@@ -4,13 +4,29 @@
   "private": true,
   "description": "Private beta Kanban board for human and agent-controlled cards.",
   "scripts": {
-    "start": "node server.js",
-    "db:init": "node scripts/init-db.mjs",
-    "check": "node --check app.js && node --check server.js && node --check state-store.js && node --check agent-token-store.js && node --check api/index.js && node --check tests/api.test.js && node --check tests/auth.test.js && node --check tests/agent-access.test.js && node --check tests/cli.test.js && node --check tests/postgres-store.test.js && node --check scripts/check-ui-contract.mjs && node --check scripts/init-db.mjs && node --check .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs && node scripts/check-ui-contract.mjs",
-    "test": "node --test tests/*.test.js"
+    "start": "npm run build && node dist/src/server.js",
+    "dev": "tsx src/server.ts",
+    "db:init": "tsx scripts/init-db.ts",
+    "clean": "rm -rf dist public/app.js public/styles.css public/robots.txt .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs",
+    "build": "npm run clean && npm run build:server && npm run build:client && npm run build:cli && npm run build:static",
+    "build:server": "tsc -p tsconfig.node.json",
+    "build:client": "esbuild src/client/app.ts --bundle --format=iife --target=es2020 --outfile=public/app.js",
+    "build:cli": "esbuild src/cli/kanban-cards-client.ts --bundle --platform=node --format=esm --target=node20 --banner:js='#!/usr/bin/env node' --outfile=.agents/skills/kanban-cards/scripts/kanban-cards-client.mjs && chmod +x .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs",
+    "build:static": "cp styles.css public/styles.css && cp robots.txt public/robots.txt",
+    "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.client.json --noEmit && tsc -p tsconfig.cli.json --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "check": "npm run typecheck && npm run build && tsx scripts/check-ui-contract.ts",
+    "test": "npm run build && node --import tsx --test tests/*.test.ts"
   },
   "dependencies": {
     "express": "^5.2.1",
     "pg": "^8.16.3"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.8.0",
+    "@types/pg": "^8.20.0",
+    "esbuild": "^0.28.0",
+    "tsx": "^4.22.0",
+    "typescript": "^6.0.3"
   }
 }

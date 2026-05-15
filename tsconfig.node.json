@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "module": "Node16",
+    "lib": ["ES2022"],
+    "types": ["node"],
+    "outDir": "dist",
+    "rootDir": ".",
+    "declaration": true,
+    "sourceMap": true
+  },
+  "include": ["src/**/*.ts", "api/**/*.ts", "scripts/**/*.ts"],
+  "exclude": ["src/client/**/*.ts", "src/cli/**/*.ts", "tests/**/*.ts"]
+}

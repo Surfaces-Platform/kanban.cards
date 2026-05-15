@@ -1,10 +1,13 @@
-const assert = require("node:assert/strict");
-const fs = require("node:fs/promises");
-const os = require("node:os");
-const path = require("node:path");
-const test = require("node:test");
+import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import type { AddressInfo } from "node:net";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+import type { Express } from "express";
+import type { Server } from "node:http";
 
-const { createApp } = require("../server");
+import { createApp } from "../src/server";
 
 test("agent API protects writes, persists cards, and returns instructions", async () => {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-cards-api-"));
@@ -12,7 +15,7 @@ test("agent API protects writes, persists cards, and returns instructions", asyn
   const token = "test-token";
   const server = await listen(createApp({ dataPath, apiToken: token }));
   let serverClosed = false;
-  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  const baseUrl = `http://127.0.0.1:${serverPort(server)}`;
 
   try {
     const health = await getJson(`${baseUrl}/api/health`);
@@ -84,7 +87,7 @@ test("agent API protects writes, persists cards, and returns instructions", asyn
 
     const restarted = await listen(createApp({ dataPath, apiToken: token }));
     try {
-      const restartedBase = `http://127.0.0.1:${restarted.address().port}`;
+      const restartedBase = `http://127.0.0.1:${serverPort(restarted)}`;
       const persistedBoard = await getJson(`${restartedBase}/api/boards/${board.id}`);
       assert.equal(persistedBoard.workItems.length, 1);
       assert.equal(persistedBoard.workItems[0].comments[0].status, "resolved");
@@ -99,7 +102,7 @@ test("agent API protects writes, persists cards, and returns instructions", asyn
   }
 });
 
-function lane(title, description, defaultOwnerAgentId = null, defaultReviewerAgentId = null) {
+function lane(title: string, description: string, defaultOwnerAgentId: string | null = null, defaultReviewerAgentId: string | null = null) {
   return {
     id: title.toLowerCase(),
     title,
@@ -113,7 +116,7 @@ function lane(title, description, defaultOwnerAgentId = null, defaultReviewerAge
   };
 }
 
-function agent(id, name, role, laneIds) {
+function agent(id: string, name: string, role: string, laneIds: string[]) {
   return {
     id,
     name,
@@ -124,28 +127,32 @@ function agent(id, name, role, laneIds) {
   };
 }
 
-async function listen(app) {
-  return new Promise((resolve) => {
+async function listen(app: Express): Promise<Server> {
+  return new Promise<Server>((resolve) => {
     const server = app.listen(0, "127.0.0.1", () => resolve(server));
   });
 }
 
-async function closeServer(server) {
-  return new Promise((resolve, reject) => {
-    server.close((error) => {
+async function closeServer(server: Server): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    server.close((error?: Error) => {
       if (error) reject(error);
       else resolve();
     });
   });
 }
 
-async function getJson(url) {
-  const response = await fetch(url);
-  assert.equal(response.ok, true, `${url} returned ${response.status}`);
-  return response.json();
+function serverPort(server: Server): number {
+  return (server.address() as AddressInfo).port;
 }
 
-async function writeJson(url, token, body, method = "POST") {
+async function getJson<T = any>(url: string): Promise<T> {
+  const response = await fetch(url);
+  assert.equal(response.ok, true, `${url} returned ${response.status}`);
+  return response.json() as Promise<T>;
+}
+
+async function writeJson<T = any>(url: string, token: string, body: unknown, method = "POST"): Promise<T> {
   const response = await fetch(url, {
     method,
     headers: {
@@ -157,5 +164,5 @@ async function writeJson(url, token, body, method = "POST") {
   if (!response.ok) {
     assert.fail(`${url} returned ${response.status}: ${await response.text()}`);
   }
-  return response.json();
+  return response.json() as Promise<T>;
 }

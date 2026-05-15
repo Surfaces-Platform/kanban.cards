@@ -1,4 +1,9 @@
 node_modules/
+dist/
+public/app.js
+public/styles.css
+public/robots.txt
+.agents/skills/kanban-cards/scripts/kanban-cards-client.mjs
 .DS_Store
 .env
 .env.*

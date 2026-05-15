@@ -1,10 +1,26 @@
-#!/usr/bin/env node
-
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
 const DEFAULT_BASE_URL = "http://127.0.0.1:4317/api";
+
+type CliOptions = Record<string, string | boolean | undefined>;
+interface CliConfig {
+  apiBaseUrl?: string;
+  token?: string;
+  boardId?: string;
+  agentId?: string;
+}
+interface RuntimeContext {
+  baseUrl: string;
+  token: string;
+  boardId: string;
+  agentId: string;
+}
+interface RequestOptions {
+  method?: string;
+  body?: Record<string, unknown>;
+}
 
 const [command, ...args] = process.argv.slice(2);
 const options = parseArgs(args);
@@ -17,11 +33,11 @@ try {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   }
 } catch (error) {
-  process.stderr.write(`${error.message}\n`);
+  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
   process.exit(1);
 }
 
-async function run(action, opts, context) {
+async function run(action: string | undefined, opts: CliOptions, context: RuntimeContext): Promise<unknown> {
   if (!action || action === "help" || action === "--help") return usage();
 
   if (action === "setup") return setup(opts);
@@ -66,7 +82,8 @@ async function run(action, opts, context) {
     requireValue(boardId, "board");
     requireOption(opts, "item");
     requireOption(opts, "lane");
-    return request(`/boards/${encodeURIComponent(boardId)}/work-items/${encodeURIComponent(opts.item)}`, {
+    const itemId = String(opts.item);
+    return request(`/boards/${encodeURIComponent(boardId)}/work-items/${encodeURIComponent(itemId)}`, {
       method: "PATCH",
       body: { laneId: opts.lane }
     }, context);
@@ -77,7 +94,8 @@ async function run(action, opts, context) {
     const boardId = opts.board || context.boardId;
     requireValue(boardId, "board");
     requireOption(opts, "item");
-    const body = {};
+    const itemId = String(opts.item);
+    const body: Record<string, unknown> = {};
     for (const key of ["title", "summary", "owner", "reviewer", "lane"]) {
       if (!opts[key]) continue;
       if (key === "owner") body.ownerAgentId = opts[key];
@@ -85,7 +103,7 @@ async function run(action, opts, context) {
       else if (key === "lane") body.laneId = opts[key];
       else body[key] = opts[key];
     }
-    return request(`/boards/${encodeURIComponent(boardId)}/work-items/${encodeURIComponent(opts.item)}`, {
+    return request(`/boards/${encodeURIComponent(boardId)}/work-items/${encodeURIComponent(itemId)}`, {
       method: "PATCH",
       body
     }, context);
@@ -97,7 +115,8 @@ async function run(action, opts, context) {
     requireValue(boardId, "board");
     requireOption(opts, "item");
     requireOption(opts, "text");
-    return request(`/boards/${encodeURIComponent(boardId)}/work-items/${encodeURIComponent(opts.item)}/comments`, {
+    const itemId = String(opts.item);
+    return request(`/boards/${encodeURIComponent(boardId)}/work-items/${encodeURIComponent(itemId)}/comments`, {
       method: "POST",
       body: {
         kind: opts.kind || "progress",
@@ -114,8 +133,10 @@ async function run(action, opts, context) {
     requireValue(boardId, "board");
     requireOption(opts, "item");
     requireOption(opts, "comment");
+    const itemId = String(opts.item);
+    const commentId = String(opts.comment);
     const status = action === "ack-comment" ? "acknowledged" : "resolved";
-    return request(`/boards/${encodeURIComponent(boardId)}/work-items/${encodeURIComponent(opts.item)}/comments/${encodeURIComponent(opts.comment)}`, {
+    return request(`/boards/${encodeURIComponent(boardId)}/work-items/${encodeURIComponent(itemId)}/comments/${encodeURIComponent(commentId)}`, {
       method: "PATCH",
       body: { status }
     }, context);
@@ -124,7 +145,7 @@ async function run(action, opts, context) {
   throw new Error(`Unknown command: ${action}`);
 }
 
-async function setup(opts) {
+async function setup(opts: CliOptions): Promise<Record<string, unknown>> {
   requireOption(opts, "url");
   requireOption(opts, "token");
   requireOption(opts, "board");
@@ -148,8 +169,8 @@ async function setup(opts) {
   };
 }
 
-async function request(pathname, options = {}, context) {
-  const headers = {};
+async function request(pathname: string, options: RequestOptions = {}, context: RuntimeContext): Promise<unknown> {
+  const headers: Record<string, string> = {};
   if (options.body) headers["Content-Type"] = "application/json";
   if (context.token) headers.Authorization = `Bearer ${context.token}`;
 
@@ -167,19 +188,19 @@ async function request(pathname, options = {}, context) {
   return data;
 }
 
-async function loadConfig(customPath) {
+async function loadConfig(customPath: string | boolean | undefined): Promise<CliConfig> {
   const configPath = resolveConfigPath(customPath);
   try {
     const raw = await fs.readFile(configPath, "utf8");
     const parsed = JSON.parse(raw);
     return parsed && typeof parsed === "object" ? parsed : {};
   } catch (error) {
-    if (error.code === "ENOENT") return {};
+    if (isNodeError(error) && error.code === "ENOENT") return {};
     throw error;
   }
 }
 
-async function writeConfig(configPath, data) {
+async function writeConfig(configPath: string, data: CliConfig): Promise<void> {
   await fs.mkdir(path.dirname(configPath), { recursive: true, mode: 0o700 });
   const tempPath = `${configPath}.${process.pid}.${Date.now()}.tmp`;
   await fs.writeFile(tempPath, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 });
@@ -187,7 +208,7 @@ async function writeConfig(configPath, data) {
   await fs.chmod(configPath, 0o600).catch(() => undefined);
 }
 
-function resolveRuntime(config) {
+function resolveRuntime(config: CliConfig): RuntimeContext {
   return {
     baseUrl: (process.env.KANBAN_CARDS_API_BASE_URL || process.env.INSTRUCT_API_BASE_URL || config.apiBaseUrl || DEFAULT_BASE_URL).replace(/\/$/, ""),
     token: process.env.KANBAN_CARDS_API_TOKEN || process.env.INSTRUCT_API_TOKEN || config.token || "",
@@ -196,7 +217,7 @@ function resolveRuntime(config) {
   };
 }
 
-function effectiveConfig(context) {
+function effectiveConfig(context: RuntimeContext): Record<string, unknown> {
   return {
     apiBaseUrl: context.baseUrl,
     boardId: context.boardId || null,
@@ -205,20 +226,20 @@ function effectiveConfig(context) {
   };
 }
 
-function resolveConfigPath(customPath) {
-  if (customPath) return path.resolve(expandHome(customPath));
+function resolveConfigPath(customPath: string | boolean | undefined): string {
+  if (customPath && typeof customPath === "string") return path.resolve(expandHome(customPath));
   return path.join(os.homedir(), ".kanban-cards", "config.json");
 }
 
-function expandHome(value) {
+function expandHome(value: string): string {
   const text = String(value || "");
   if (text === "~") return os.homedir();
   if (text.startsWith("~/")) return path.join(os.homedir(), text.slice(2));
   return text;
 }
 
-function parseArgs(values) {
-  const parsed = {};
+function parseArgs(values: string[]): CliOptions {
+  const parsed: CliOptions = {};
   for (let index = 0; index < values.length; index += 1) {
     const value = values[index];
     if (!value.startsWith("--")) continue;
@@ -239,19 +260,19 @@ function parseArgs(values) {
   return parsed;
 }
 
-function requireOption(opts, key) {
+function requireOption(opts: CliOptions, key: string): void {
   requireValue(opts[key], key);
 }
 
-function requireValue(value, key) {
+function requireValue(value: unknown, key: string): asserts value {
   if (!value) throw new Error(`Missing --${key}`);
 }
 
-function requireToken(context) {
+function requireToken(context: RuntimeContext): void {
   if (!context.token) throw new Error("Run setup or set KANBAN_CARDS_API_TOKEN for write operations.");
 }
 
-function usage() {
+function usage(): Record<string, unknown> {
   return {
     configFile: "~/.kanban-cards/config.json",
     envPrecedence: [
@@ -277,4 +298,8 @@ function usage() {
       "resolve-comment [--board <board-id>] --item <card-id> --comment <comment-id>"
     ]
   };
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error;
 }

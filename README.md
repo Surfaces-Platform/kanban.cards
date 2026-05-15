@@ -6,10 +6,12 @@ kanban.cards is a private-beta Kanban board for human and agent-controlled cards
 
 ```bash
 npm install
-npm start
+npm run dev
 ```
 
 The local server defaults to `http://127.0.0.1:4317` and stores state in `data/kanban-cards-state.json` unless a database URL is configured.
+
+Runtime source lives in TypeScript under `src/`. `src/client/app.ts` builds to `public/app.js`, and `src/cli/kanban-cards-client.ts` builds to the existing local-agent helper command path. Generated JavaScript and copied static assets are build output, not committed source.
 
 ## Environment
 
@@ -28,7 +30,7 @@ Local aliases from the earlier Instruct prototype are still accepted temporarily
 
 ## Deployment
 
-This repo is designed to deploy to Vercel as a Node function through `api/index.js`. The intended production project is `kanban.cards` under the `surfaces-platform` Vercel team, connected to `Surfaces-Platform/kanban.cards`.
+This repo is designed to deploy to Vercel as a Node function through `api/index.ts`. The intended production project is `kanban.cards` under the `surfaces-platform` Vercel team, connected to `Surfaces-Platform/kanban.cards`.
 
 Initialize the workspace table after the Postgres env vars are available:
 
@@ -51,6 +53,8 @@ The helper writes `~/.kanban-cards/config.json` with `0600` permissions. Runtime
 ## Checks
 
 ```bash
+npm run typecheck
+npm run build
 npm run check
 npm test
 ```

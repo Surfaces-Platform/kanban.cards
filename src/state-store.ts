@@ -1,16 +1,37 @@
-const crypto = require("node:crypto");
-const fs = require("node:fs/promises");
-const path = require("node:path");
+import crypto from "node:crypto";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { Pool } from "pg";
 
-const COMMENT_KINDS = new Set(["progress", "instruction", "question", "change_request", "note"]);
-const COMMENT_STATUSES = new Set(["open", "acknowledged", "resolved"]);
+import type {
+  AgentSpec,
+  Board,
+  BoardDraft,
+  BoardTemplate,
+  CommentKind,
+  CommentStatus,
+  Lane,
+  PostgresClient,
+  PostgresOptions,
+  StateStore,
+  StateStoreOptions,
+  WorkItem,
+  WorkItemComment,
+  WorkspaceState
+} from "./types";
+
+export const COMMENT_KINDS = new Set<CommentKind>(["progress", "instruction", "question", "change_request", "note"]);
+export const COMMENT_STATUSES = new Set<CommentStatus>(["open", "acknowledged", "resolved"]);
+
 const DEFAULT_WORKSPACE_ID = "default";
 const DEFAULT_TABLE_NAME = "kanban_workspaces";
+type UnknownRecord = Record<string, any>;
 
-function createStateStore(options = {}) {
+export function createStateStore(options: StateStoreOptions | string = {}): StateStore {
   if (typeof options === "string") return createFileStateStore(options);
 
-  const connectionString = options.connectionString || process.env.KANBAN_CARDS_DATABASE_URL || process.env.POSTGRES_URL || process.env.DATABASE_URL;
+  const connectionString =
+    options.connectionString || process.env.KANBAN_CARDS_DATABASE_URL || process.env.POSTGRES_URL || process.env.DATABASE_URL;
   if (connectionString) {
     return createPostgresStateStore({
       connectionString,
@@ -24,23 +45,23 @@ function createStateStore(options = {}) {
   return createFileStateStore(options.dataPath || path.join(__dirname, "data", "kanban-cards-state.json"));
 }
 
-function createFileStateStore(dataPath) {
+export function createFileStateStore(dataPath: string): StateStore {
   const resolvedPath = path.resolve(dataPath);
-  let writeQueue = Promise.resolve();
+  let writeQueue: Promise<unknown> = Promise.resolve();
 
-  async function read() {
+  async function read(): Promise<WorkspaceState> {
     try {
       const raw = await fs.readFile(resolvedPath, "utf8");
       return normalizeWorkspace(JSON.parse(raw));
     } catch (error) {
-      if (error.code !== "ENOENT") throw error;
+      if (!isNodeError(error) || error.code !== "ENOENT") throw error;
       const state = freshWorkspaceState();
       await write(state);
       return state;
     }
   }
 
-  async function write(nextState) {
+  async function write(nextState: unknown): Promise<WorkspaceState> {
     const normalized = normalizeWorkspace(nextState);
     await fs.mkdir(path.dirname(resolvedPath), { recursive: true });
     const tempPath = `${resolvedPath}.${process.pid}.${Date.now()}.tmp`;
@@ -49,8 +70,8 @@ function createFileStateStore(dataPath) {
     return normalized;
   }
 
-  async function update(mutator) {
-    writeQueue = writeQueue
+  async function update<T>(mutator: (state: WorkspaceState) => T): Promise<{ state: WorkspaceState; result: T }> {
+    const nextWrite = writeQueue
       .catch(() => undefined)
       .then(async () => {
         const state = await read();
@@ -58,23 +79,25 @@ function createFileStateStore(dataPath) {
         const saved = await write(state);
         return { state: saved, result };
       });
-    return writeQueue;
+    writeQueue = nextWrite;
+    return nextWrite;
   }
 
   return { kind: "file", path: resolvedPath, read, write, update };
 }
 
-function createPostgresStateStore(options = {}) {
-  const { Pool } = require("pg");
+export function createPostgresStateStore(options: StateStoreOptions = {}): StateStore {
   const tableName = options.tableName || DEFAULT_TABLE_NAME;
   const workspaceId = options.workspaceId || DEFAULT_WORKSPACE_ID;
-  const pool = options.pool || new Pool({
-    connectionString: options.connectionString,
-    ssl: resolvePostgresSsl(options)
-  });
-  let readyPromise = null;
+  const pool =
+    options.pool ||
+    new Pool({
+      connectionString: options.connectionString,
+      ssl: resolvePostgresSsl(options)
+    });
+  let readyPromise: Promise<unknown> | null = null;
 
-  async function ensureReady(client = pool) {
+  async function ensureReady(client: PostgresClient = pool): Promise<void> {
     if (!readyPromise || client !== pool) {
       const ready = client.query(`
         CREATE TABLE IF NOT EXISTS ${tableName} (
@@ -92,14 +115,14 @@ function createPostgresStateStore(options = {}) {
     await readyPromise;
   }
 
-  async function read() {
+  async function read(): Promise<WorkspaceState> {
     await ensureReady();
-    const result = await pool.query(`SELECT state FROM ${tableName} WHERE id = $1`, [workspaceId]);
+    const result = await pool.query<{ state: unknown }>(`SELECT state FROM ${tableName} WHERE id = $1`, [workspaceId]);
     if (!result.rows.length) return write(freshWorkspaceState());
     return normalizeWorkspace(result.rows[0].state);
   }
 
-  async function write(nextState) {
+  async function write(nextState: unknown): Promise<WorkspaceState> {
     const normalized = normalizeWorkspace(nextState);
     await ensureReady();
     await pool.query(
@@ -112,7 +135,7 @@ function createPostgresStateStore(options = {}) {
     return normalized;
   }
 
-  async function update(mutator) {
+  async function update<T>(mutator: (state: WorkspaceState) => T): Promise<{ state: WorkspaceState; result: T }> {
     const client = await pool.connect();
     try {
       await ensureReady(client);
@@ -123,7 +146,7 @@ function createPostgresStateStore(options = {}) {
          ON CONFLICT (id) DO NOTHING`,
         [workspaceId, JSON.stringify(freshWorkspaceState())]
       );
-      const result = await client.query(`SELECT state FROM ${tableName} WHERE id = $1 FOR UPDATE`, [workspaceId]);
+      const result = await client.query<{ state: unknown }>(`SELECT state FROM ${tableName} WHERE id = $1 FOR UPDATE`, [workspaceId]);
       const state = normalizeWorkspace(result.rows[0]?.state);
       const mutationResult = mutator(state);
       const normalized = normalizeWorkspace(state);
@@ -144,14 +167,14 @@ function createPostgresStateStore(options = {}) {
   return { kind: "postgres", path: `${tableName}:${workspaceId}`, read, write, update };
 }
 
-function resolvePostgresSsl(options = {}) {
+function resolvePostgresSsl(options: Pick<PostgresOptions, "ssl"> = {}): PostgresOptions["ssl"] | undefined {
   if (options.ssl !== undefined) return options.ssl;
   if (process.env.KANBAN_CARDS_POSTGRES_SSL === "disable") return false;
   if (process.env.NODE_ENV === "production" || process.env.VERCEL) return { rejectUnauthorized: false };
   return undefined;
 }
 
-function freshWorkspaceState() {
+export function freshWorkspaceState(): WorkspaceState {
   const board = createBoard({ name: "Untitled board" });
   return {
     boards: [board],
@@ -160,9 +183,9 @@ function freshWorkspaceState() {
   };
 }
 
-function createBoard(input = {}) {
+export function createBoard(input: Partial<Board> = {}): Board {
   const now = new Date().toISOString();
-  return normalizeBoard({
+  const board = normalizeBoard({
     id: input.id || makeId("board"),
     name: input.name || "Untitled board",
     lanes: input.lanes || [],
@@ -175,44 +198,36 @@ function createBoard(input = {}) {
     createdAt: input.createdAt || now,
     updatedAt: input.updatedAt || now
   });
+  if (!board) throw new Error("Unable to create board.");
+  return board;
 }
 
-function normalizeWorkspace(rawState) {
-  const boards = Array.isArray(rawState?.boards)
-    ? rawState.boards.map(normalizeBoard).filter(Boolean)
-    : [];
+export function normalizeWorkspace(rawState: unknown): WorkspaceState {
+  const state = isRecord(rawState) ? rawState : {};
+  const boards = Array.isArray(state.boards) ? state.boards.map(normalizeBoard).filter(isNonNull) : [];
 
   if (!boards.length) boards.push(createBoard({ name: "Untitled board" }));
 
-  const activeBoardId = boards.some((board) => board.id === rawState?.activeBoardId)
-    ? rawState.activeBoardId
-    : boards[0].id;
-
-  const templates = Array.isArray(rawState?.templates)
-    ? rawState.templates.map(normalizeTemplate).filter(Boolean)
-    : [];
+  const activeBoardId = boards.some((board) => board.id === state.activeBoardId) ? String(state.activeBoardId) : boards[0].id;
+  const templates = Array.isArray(state.templates) ? state.templates.map(normalizeTemplate).filter(isNonNull) : [];
 
   return { boards, activeBoardId, templates };
 }
 
-function normalizeBoard(rawBoard) {
-  if (!rawBoard || typeof rawBoard !== "object") return null;
+function normalizeBoard(rawBoard: unknown): Board | null {
+  if (!isRecord(rawBoard)) return null;
 
-  const lanes = Array.isArray(rawBoard.lanes)
-    ? withUniqueLaneIds(rawBoard.lanes.map(normalizeLane).filter(Boolean))
-    : [];
+  const lanes = Array.isArray(rawBoard.lanes) ? withUniqueLaneIds(rawBoard.lanes.map(normalizeLane).filter(isNonNull)) : [];
   const laneIds = new Set(lanes.map((lane) => lane.id));
   const agentSpecs = Array.isArray(rawBoard.agentSpecs)
-    ? withUniqueAgentIds(rawBoard.agentSpecs.map((agent) => normalizeAgentSpec(agent, laneIds)).filter(Boolean))
+    ? withUniqueAgentIds(rawBoard.agentSpecs.map((agent) => normalizeAgentSpec(agent, laneIds)).filter(isNonNull))
     : [];
   const agentIds = new Set(agentSpecs.map((agent) => agent.id));
   const normalizedLanes = lanes.map((lane) => normalizeLaneAgentDefaults(lane, agentIds));
   const workItems = Array.isArray(rawBoard.workItems)
-    ? rawBoard.workItems.map((item) => normalizeWorkItem(item, normalizedLanes)).filter(Boolean)
+    ? rawBoard.workItems.map((item) => normalizeWorkItem(item, normalizedLanes)).filter(isNonNull)
     : [];
-  const selectedId = workItems.some((item) => item.id === rawBoard.selectedId)
-    ? rawBoard.selectedId
-    : null;
+  const selectedId = workItems.some((item) => item.id === rawBoard.selectedId) ? String(rawBoard.selectedId) : null;
   const configDraft = normalizeDraft(rawBoard.configDraft);
   const name = String(rawBoard.name || "Untitled board").trim() || "Untitled board";
   const now = new Date().toISOString();
@@ -227,22 +242,20 @@ function normalizeBoard(rawBoard) {
     flowPrompt: typeof rawBoard.flowPrompt === "string" ? rawBoard.flowPrompt : "",
     configDraft,
     isEditingFlow: Boolean(rawBoard.isEditingFlow && configDraft),
-    createdAt: rawBoard.createdAt || now,
-    updatedAt: rawBoard.updatedAt || now
+    createdAt: String(rawBoard.createdAt || now),
+    updatedAt: String(rawBoard.updatedAt || now)
   };
 }
 
-function normalizeTemplate(rawTemplate) {
-  if (!rawTemplate || typeof rawTemplate !== "object") return null;
+function normalizeTemplate(rawTemplate: unknown): BoardTemplate | null {
+  if (!isRecord(rawTemplate)) return null;
 
-  const lanes = Array.isArray(rawTemplate.lanes)
-    ? withUniqueLaneIds(rawTemplate.lanes.map(normalizeLane).filter(Boolean))
-    : [];
+  const lanes = Array.isArray(rawTemplate.lanes) ? withUniqueLaneIds(rawTemplate.lanes.map(normalizeLane).filter(isNonNull)) : [];
   const name = String(rawTemplate.name || "").trim();
   if (!name || !lanes.length) return null;
   const laneIds = new Set(lanes.map((lane) => lane.id));
   const agentSpecs = Array.isArray(rawTemplate.agentSpecs)
-    ? withUniqueAgentIds(rawTemplate.agentSpecs.map((agent) => normalizeAgentSpec(agent, laneIds)).filter(Boolean))
+    ? withUniqueAgentIds(rawTemplate.agentSpecs.map((agent) => normalizeAgentSpec(agent, laneIds)).filter(isNonNull))
     : [];
   const agentIds = new Set(agentSpecs.map((agent) => agent.id));
 
@@ -253,16 +266,16 @@ function normalizeTemplate(rawTemplate) {
     builtIn: false,
     lanes: lanes.map((lane) => normalizeLaneAgentDefaults(lane, agentIds)),
     agentSpecs,
-    createdAt: rawTemplate.createdAt || new Date().toISOString()
+    createdAt: String(rawTemplate.createdAt || new Date().toISOString())
   };
 }
 
-function normalizeDraft(draft) {
-  if (!draft || !Array.isArray(draft.lanes)) return null;
-  const lanes = withUniqueLaneIds(draft.lanes.map(normalizeLane).filter(Boolean));
+function normalizeDraft(draft: unknown): BoardDraft | null {
+  if (!isRecord(draft) || !Array.isArray(draft.lanes)) return null;
+  const lanes = withUniqueLaneIds(draft.lanes.map(normalizeLane).filter(isNonNull));
   const laneIds = new Set(lanes.map((lane) => lane.id));
   const agentSpecs = Array.isArray(draft.agentSpecs)
-    ? withUniqueAgentIds(draft.agentSpecs.map((agent) => normalizeAgentSpec(agent, laneIds)).filter(Boolean))
+    ? withUniqueAgentIds(draft.agentSpecs.map((agent) => normalizeAgentSpec(agent, laneIds)).filter(isNonNull))
     : [];
   const agentIds = new Set(agentSpecs.map((agent) => agent.id));
   return {
@@ -271,13 +284,14 @@ function normalizeDraft(draft) {
   };
 }
 
-function normalizeLane(lane) {
-  if (!lane || typeof lane !== "object") return null;
+function normalizeLane(lane: unknown): Lane | null {
+  if (!isRecord(lane)) return null;
   const title = String(lane.title || "").trim();
   if (!title) return null;
 
-  const checks = Array.isArray(lane.gate?.checks)
-    ? lane.gate.checks.map((check) => String(check || "").trim()).filter(Boolean)
+  const gate = isRecord(lane.gate) ? lane.gate : {};
+  const checks = Array.isArray(gate.checks)
+    ? gate.checks.map((check: unknown) => String(check || "").trim()).filter(Boolean)
     : defaultGateChecks(title);
 
   return {
@@ -287,14 +301,14 @@ function normalizeLane(lane) {
     defaultOwnerAgentId: nullableString(lane.defaultOwnerAgentId),
     defaultReviewerAgentId: nullableString(lane.defaultReviewerAgentId),
     gate: {
-      title: String(lane.gate?.title || `${title} gate`).trim(),
+      title: String(gate.title || `${title} gate`).trim(),
       checks: checks.length ? checks : defaultGateChecks(title)
     }
   };
 }
 
-function normalizeAgentSpec(rawAgent, laneIds = new Set()) {
-  if (!rawAgent || typeof rawAgent !== "object") return null;
+function normalizeAgentSpec(rawAgent: unknown, laneIds: Set<string> = new Set()): AgentSpec | null {
+  if (!isRecord(rawAgent)) return null;
   const name = String(rawAgent.name || "").trim();
   const id = String(rawAgent.id || slugify(name)).trim() || slugify(name);
   if (!id || !name) return null;
@@ -304,23 +318,23 @@ function normalizeAgentSpec(rawAgent, laneIds = new Set()) {
     name,
     role: String(rawAgent.role || "").trim(),
     laneIds: Array.isArray(rawAgent.laneIds)
-      ? rawAgent.laneIds.map((laneId) => String(laneId || "").trim()).filter((laneId) => laneIds.has(laneId))
+      ? rawAgent.laneIds.map((laneId: unknown) => String(laneId || "").trim()).filter((laneId: string) => laneIds.has(laneId))
       : [],
     instructions: String(rawAgent.instructions || "").trim(),
     skillNotes: String(rawAgent.skillNotes || "").trim()
   };
 }
 
-function normalizeLaneAgentDefaults(lane, agentIds = new Set()) {
+function normalizeLaneAgentDefaults(lane: Lane, agentIds: Set<string> = new Set()): Lane {
   return {
     ...lane,
-    defaultOwnerAgentId: agentIds.has(lane.defaultOwnerAgentId) ? lane.defaultOwnerAgentId : null,
-    defaultReviewerAgentId: agentIds.has(lane.defaultReviewerAgentId) ? lane.defaultReviewerAgentId : null
+    defaultOwnerAgentId: agentIds.has(String(lane.defaultOwnerAgentId)) ? lane.defaultOwnerAgentId : null,
+    defaultReviewerAgentId: agentIds.has(String(lane.defaultReviewerAgentId)) ? lane.defaultReviewerAgentId : null
   };
 }
 
-function withUniqueAgentIds(agentSpecs) {
-  const used = new Map();
+function withUniqueAgentIds(agentSpecs: AgentSpec[]): AgentSpec[] {
+  const used = new Map<string, number>();
   return agentSpecs.map((agent) => {
     const baseId = slugify(agent.id) || "agent";
     const nextCount = (used.get(baseId) || 0) + 1;
@@ -332,14 +346,14 @@ function withUniqueAgentIds(agentSpecs) {
   });
 }
 
-function normalizeWorkItem(rawItem, lanes = []) {
-  if (!rawItem || typeof rawItem !== "object") return null;
+function normalizeWorkItem(rawItem: unknown, lanes: Lane[] = []): WorkItem | null {
+  if (!isRecord(rawItem)) return null;
   const title = String(rawItem.title || "").trim();
   if (!title) return null;
 
   const laneIds = new Set(lanes.map((lane) => lane.id));
   const fallbackLaneId = lanes[0]?.id || "";
-  const laneId = laneIds.has(rawItem.laneId) ? rawItem.laneId : fallbackLaneId;
+  const laneId = laneIds.has(String(rawItem.laneId)) ? String(rawItem.laneId) : fallbackLaneId;
   const now = new Date().toISOString();
 
   return {
@@ -353,29 +367,32 @@ function normalizeWorkItem(rawItem, lanes = []) {
     approvals: Array.isArray(rawItem.approvals) ? rawItem.approvals : [],
     completed: Boolean(rawItem.completed),
     delivered: Boolean(rawItem.delivered),
-    comments: Array.isArray(rawItem.comments) ? rawItem.comments.map(normalizeComment).filter(Boolean) : [],
-    createdAt: rawItem.createdAt || now,
-    updatedAt: rawItem.updatedAt || now
+    comments: Array.isArray(rawItem.comments) ? rawItem.comments.map(normalizeComment).filter(isNonNull) : [],
+    createdAt: String(rawItem.createdAt || now),
+    updatedAt: String(rawItem.updatedAt || now)
   };
 }
 
-function createWorkItem(input, board) {
-  return normalizeWorkItem({
-    ...input,
-    id: input.id || makeId("item"),
-    laneId: input.laneId || board.lanes[0]?.id || "",
-    comments: input.comments || []
-  }, board.lanes);
+export function createWorkItem(input: UnknownRecord, board: Board): WorkItem | null {
+  return normalizeWorkItem(
+    {
+      ...input,
+      id: input.id || makeId("item"),
+      laneId: input.laneId || board.lanes[0]?.id || "",
+      comments: input.comments || []
+    },
+    board.lanes
+  );
 }
 
-function normalizeComment(rawComment) {
-  if (!rawComment || typeof rawComment !== "object") return null;
+function normalizeComment(rawComment: unknown): WorkItemComment | null {
+  if (!isRecord(rawComment)) return null;
   const text = String(rawComment.text || "").trim();
   if (!text) return null;
 
   const now = new Date().toISOString();
-  const kind = COMMENT_KINDS.has(rawComment.kind) ? rawComment.kind : "note";
-  const status = COMMENT_STATUSES.has(rawComment.status) ? rawComment.status : "open";
+  const kind = COMMENT_KINDS.has(rawComment.kind as CommentKind) ? (rawComment.kind as CommentKind) : "note";
+  const status = COMMENT_STATUSES.has(rawComment.status as CommentStatus) ? (rawComment.status as CommentStatus) : "open";
 
   return {
     id: String(rawComment.id || makeId("comment")),
@@ -383,20 +400,20 @@ function normalizeComment(rawComment) {
     status,
     text,
     author: String(rawComment.author || "agent").trim() || "agent",
-    createdAt: rawComment.createdAt || now,
-    updatedAt: rawComment.updatedAt || now
+    createdAt: String(rawComment.createdAt || now),
+    updatedAt: String(rawComment.updatedAt || now)
   };
 }
 
-function createComment(input) {
+export function createComment(input: UnknownRecord): WorkItemComment | null {
   return normalizeComment({
     ...input,
     id: input.id || makeId("comment")
   });
 }
 
-function withUniqueLaneIds(lanes) {
-  const used = new Map();
+function withUniqueLaneIds(lanes: Lane[]): Lane[] {
+  const used = new Map<string, number>();
   return lanes.map((lane) => {
     const baseId = slugify(lane.title) || "lane";
     const nextCount = (used.get(baseId) || 0) + 1;
@@ -415,35 +432,31 @@ function withUniqueLaneIds(lanes) {
   });
 }
 
-function defaultGateChecks(title) {
-  return [
-    "Output is reviewable.",
-    "Blockers and open questions are captured.",
-    `${title} handoff is clear.`
-  ];
+function defaultGateChecks(title: string): string[] {
+  return ["Output is reviewable.", "Blockers and open questions are captured.", `${title} handoff is clear.`];
 }
 
-function findBoard(state, boardId) {
+export function findBoard(state: WorkspaceState, boardId: string | null | undefined): Board | null {
   return state.boards.find((board) => board.id === boardId) || null;
 }
 
-function findWorkItem(board, itemId) {
+export function findWorkItem(board: Board | null | undefined, itemId: string | null | undefined): WorkItem | null {
   return board?.workItems.find((item) => item.id === itemId) || null;
 }
 
-function findComment(item, commentId) {
+export function findComment(item: WorkItem | null | undefined, commentId: string | null | undefined): WorkItemComment | null {
   return item?.comments.find((comment) => comment.id === commentId) || null;
 }
 
-function touchBoard(board) {
+export function touchBoard(board: Board): void {
   board.updatedAt = new Date().toISOString();
 }
 
-function touchWorkItem(item) {
+export function touchWorkItem(item: WorkItem): void {
   item.updatedAt = new Date().toISOString();
 }
 
-function slugify(value) {
+function slugify(value: unknown): string {
   return String(value || "")
     .toLowerCase()
     .replace(/&/g, " and ")
@@ -452,30 +465,24 @@ function slugify(value) {
     .slice(0, 48);
 }
 
-function makeId(prefix) {
+function makeId(prefix: string): string {
   return `${prefix}-${crypto.randomUUID()}`;
 }
 
-function nullableString(value) {
+function nullableString(value: unknown): string | null {
   if (value == null) return null;
   const text = String(value).trim();
   return text || null;
 }
 
-module.exports = {
-  COMMENT_KINDS,
-  COMMENT_STATUSES,
-  createBoard,
-  createComment,
-  createFileStateStore,
-  createPostgresStateStore,
-  createStateStore,
-  createWorkItem,
-  findBoard,
-  findComment,
-  findWorkItem,
-  freshWorkspaceState,
-  normalizeWorkspace,
-  touchBoard,
-  touchWorkItem
-};
+function isRecord(value: unknown): value is UnknownRecord {
+  return typeof value === "object" && value !== null;
+}
+
+function isNonNull<T>(value: T | null): value is T {
+  return value !== null;
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error;
+}

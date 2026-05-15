@@ -1,9 +1,9 @@
-const express = require("express");
-const crypto = require("node:crypto");
-const fs = require("node:fs/promises");
-const path = require("node:path");
+import crypto from "node:crypto";
+import fs from "node:fs/promises";
+import path from "node:path";
+import express, { type ErrorRequestHandler, type NextFunction, type Request, type RequestHandler, type Response } from "express";
 
-const {
+import {
   COMMENT_KINDS,
   COMMENT_STATUSES,
   createBoard,
@@ -16,8 +16,74 @@ const {
   normalizeWorkspace,
   touchBoard,
   touchWorkItem
-} = require("./state-store");
-const { createAgentTokenStore } = require("./agent-token-store");
+} from "./state-store";
+import { createAgentTokenStore } from "./agent-token-store";
+import type {
+  AgentInstruction,
+  AgentSpec,
+  AgentTokenStore,
+  Board,
+  CommentKind,
+  CommentStatus,
+  PostgresOptions,
+  StateStore,
+  WorkItem,
+  WorkItemComment,
+  WorkspaceState
+} from "./types";
+
+type AdminAuthContext = { kind: "admin"; method: "basic" | "bearer" | "local-open" };
+type AgentAuthContext = {
+  kind: "agent";
+  method: "bearer";
+  tokenId: string;
+  boardId: string;
+  agentId: string;
+  last4: string;
+  lastUsedAt: string | null;
+};
+type AnonymousAuthContext = { kind: "anonymous" };
+type KanbanAuthContext = AdminAuthContext | AgentAuthContext | AnonymousAuthContext;
+
+declare global {
+  namespace Express {
+    interface Request {
+      kanbanAuth?: KanbanAuthContext;
+    }
+  }
+}
+
+interface CreateAppOptions extends PostgresOptions {
+  staticDir?: string;
+  dataPath?: string;
+  tokenDataPath?: string;
+  requireDatabase?: boolean;
+  requireAuth?: boolean;
+  apiToken?: string;
+  basicUser?: string;
+  basicPassword?: string;
+  store?: StateStore;
+  tokenStore?: AgentTokenStore;
+  tokenPool?: PostgresOptions["pool"];
+  host?: string;
+  port?: string | number;
+}
+
+interface AuthConfig {
+  accessAuthRequired: boolean;
+  apiToken: string;
+  basicUser: string;
+  basicPassword: string;
+  localWriteOpen: boolean;
+  missingRequiredSecrets: string[];
+}
+
+interface HttpError extends Error {
+  status?: number;
+}
+
+type UnknownRecord = Record<string, any>;
+type AsyncHandler = (req: Request, res: Response, next: NextFunction) => unknown | Promise<unknown>;
 
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 4317;
@@ -107,8 +173,8 @@ const FALLBACK_INDEX_HTML = `<!doctype html>
 </body>
 </html>`;
 
-function createApp(options = {}) {
-  const staticDir = options.staticDir || __dirname;
+export function createApp(options: CreateAppOptions = {}): express.Express {
+  const staticDir = options.staticDir || process.cwd();
   const dataPath = options.dataPath || process.env.KANBAN_CARDS_DATA_PATH || process.env.INSTRUCT_DATA_PATH || path.join(staticDir, "data", "kanban-cards-state.json");
   const connectionString = options.connectionString || process.env.KANBAN_CARDS_DATABASE_URL || process.env.POSTGRES_URL || process.env.DATABASE_URL;
   const auth = createAuthConfig(options);
@@ -152,9 +218,9 @@ function createApp(options = {}) {
 
   app.get("/", serveIndex(staticDir));
   app.get("/index.html", serveIndex(staticDir));
-  app.get("/app.js", sendStaticFile(staticDir, "app.js", "application/javascript; charset=utf-8"));
-  app.get("/styles.css", sendStaticFile(staticDir, "styles.css", "text/css; charset=utf-8"));
-  app.get("/robots.txt", sendStaticFile(staticDir, "robots.txt", "text/plain; charset=utf-8"));
+  app.get("/app.js", sendStaticFile(staticDir, "public/app.js", "application/javascript; charset=utf-8"));
+  app.get("/styles.css", sendStaticFile(staticDir, "public/styles.css", "text/css; charset=utf-8"));
+  app.get("/robots.txt", sendStaticFile(staticDir, "public/robots.txt", "text/plain; charset=utf-8"));
 
   app.get("/api/state", asyncHandler(async (req, res) => {
     if (isAgentAuth(req)) throw httpError(403, "Agent tokens cannot read full workspace state.");
@@ -177,9 +243,10 @@ function createApp(options = {}) {
   }));
 
   app.get("/api/boards/:boardId", asyncHandler(async (req, res) => {
-    requireBoardAccess(req, req.params.boardId);
+    const boardId = routeParam(req, "boardId");
+    requireBoardAccess(req, boardId);
     const state = await store.read();
-    const board = findBoard(state, req.params.boardId);
+    const board = findBoard(state, boardId);
     if (!board) throw httpError(404, "Board not found.");
     res.json(board);
   }));
@@ -218,8 +285,9 @@ function createApp(options = {}) {
   }));
 
   app.post("/api/boards/:boardId/agent-tokens", requireAdminAuth(), asyncHandler(async (req, res) => {
+    const boardId = routeParam(req, "boardId");
     const state = await store.read();
-    const board = findBoard(state, req.params.boardId);
+    const board = findBoard(state, boardId);
     if (!board) throw httpError(404, "Board not found.");
     const agentId = nullableString(req.body?.agentId);
     if (!agentId) throw httpError(400, "agentId is required.");
@@ -237,17 +305,20 @@ function createApp(options = {}) {
   }));
 
   app.get("/api/boards/:boardId/agent-tokens", requireAdminAuth(), asyncHandler(async (req, res) => {
+    const boardId = routeParam(req, "boardId");
     const state = await store.read();
-    const board = findBoard(state, req.params.boardId);
+    const board = findBoard(state, boardId);
     if (!board) throw httpError(404, "Board not found.");
     res.json({ tokens: await tokenStore.list(board.id) });
   }));
 
   app.delete("/api/boards/:boardId/agent-tokens/:tokenId", requireAdminAuth(), asyncHandler(async (req, res) => {
+    const boardId = routeParam(req, "boardId");
+    const tokenId = routeParam(req, "tokenId");
     const state = await store.read();
-    const board = findBoard(state, req.params.boardId);
+    const board = findBoard(state, boardId);
     if (!board) throw httpError(404, "Board not found.");
-    const tokenRecord = await tokenStore.revoke(board.id, req.params.tokenId);
+    const tokenRecord = await tokenStore.revoke(board.id, tokenId);
     if (!tokenRecord) throw httpError(404, "Token not found.");
     res.json(tokenRecord);
   }));
@@ -263,8 +334,9 @@ function createApp(options = {}) {
   }));
 
   app.patch("/api/boards/:boardId", requireAdminAuth(), asyncHandler(async (req, res) => {
+    const boardId = routeParam(req, "boardId");
     const { result } = await store.update((state) => {
-      const board = findBoard(state, req.params.boardId);
+      const board = findBoard(state, boardId);
       if (!board) throw httpError(404, "Board not found.");
       if (typeof req.body.name === "string") board.name = req.body.name;
       if (typeof req.body.flowPrompt === "string") board.flowPrompt = req.body.flowPrompt;
@@ -280,9 +352,10 @@ function createApp(options = {}) {
   }));
 
   app.post("/api/boards/:boardId/work-items", requireWriteAuth(), asyncHandler(async (req, res) => {
-    requireBoardAccess(req, req.params.boardId);
+    const boardId = routeParam(req, "boardId");
+    requireBoardAccess(req, boardId);
     const { result } = await store.update((state) => {
-      const board = findBoard(state, req.params.boardId);
+      const board = findBoard(state, boardId);
       if (!board) throw httpError(404, "Board not found.");
       if (!String(req.body.title || "").trim()) throw httpError(400, "Card title is required.");
       const input = isAgentAuth(req) ? withAgentCreateDefaults(req, req.body || {}) : req.body;
@@ -299,11 +372,13 @@ function createApp(options = {}) {
   }));
 
   app.patch("/api/boards/:boardId/work-items/:itemId", requireWriteAuth(), asyncHandler(async (req, res) => {
-    requireBoardAccess(req, req.params.boardId);
+    const boardId = routeParam(req, "boardId");
+    const itemId = routeParam(req, "itemId");
+    requireBoardAccess(req, boardId);
     const { result } = await store.update((state) => {
-      const board = findBoard(state, req.params.boardId);
+      const board = findBoard(state, boardId);
       if (!board) throw httpError(404, "Board not found.");
-      const item = findWorkItem(board, req.params.itemId);
+      const item = findWorkItem(board, itemId);
       if (!item) throw httpError(404, "Card not found.");
       if (isAgentAuth(req) && !isItemAssignedToAgent(item, req.kanbanAuth.agentId)) {
         throw httpError(403, "Agent tokens can only update cards assigned to that agent.");
@@ -320,11 +395,13 @@ function createApp(options = {}) {
   }));
 
   app.post("/api/boards/:boardId/work-items/:itemId/comments", requireWriteAuth(), asyncHandler(async (req, res) => {
-    requireBoardAccess(req, req.params.boardId);
+    const boardId = routeParam(req, "boardId");
+    const itemId = routeParam(req, "itemId");
+    requireBoardAccess(req, boardId);
     const { result } = await store.update((state) => {
-      const board = findBoard(state, req.params.boardId);
+      const board = findBoard(state, boardId);
       if (!board) throw httpError(404, "Board not found.");
-      const item = findWorkItem(board, req.params.itemId);
+      const item = findWorkItem(board, itemId);
       if (!item) throw httpError(404, "Card not found.");
       if (isAgentAuth(req) && !isItemAssignedToAgent(item, req.kanbanAuth.agentId)) {
         throw httpError(403, "Agent tokens can only comment on cards assigned to that agent.");
@@ -341,16 +418,19 @@ function createApp(options = {}) {
   }));
 
   app.patch("/api/boards/:boardId/work-items/:itemId/comments/:commentId", requireWriteAuth(), asyncHandler(async (req, res) => {
-    requireBoardAccess(req, req.params.boardId);
+    const boardId = routeParam(req, "boardId");
+    const itemId = routeParam(req, "itemId");
+    const commentId = routeParam(req, "commentId");
+    requireBoardAccess(req, boardId);
     const { result } = await store.update((state) => {
-      const board = findBoard(state, req.params.boardId);
+      const board = findBoard(state, boardId);
       if (!board) throw httpError(404, "Board not found.");
-      const item = findWorkItem(board, req.params.itemId);
+      const item = findWorkItem(board, itemId);
       if (!item) throw httpError(404, "Card not found.");
       if (isAgentAuth(req) && !isItemAssignedToAgent(item, req.kanbanAuth.agentId)) {
         throw httpError(403, "Agent tokens can only update comments on cards assigned to that agent.");
       }
-      const comment = findComment(item, req.params.commentId);
+      const comment = findComment(item, commentId);
       if (!comment) throw httpError(404, "Comment not found.");
       applyCommentPatch(comment, isAgentAuth(req) ? filterAgentCommentPatch(req.body || {}, comment, req.kanbanAuth.agentId) : req.body || {});
       touchWorkItem(item);
@@ -360,21 +440,22 @@ function createApp(options = {}) {
     res.json(result);
   }));
 
-  app.use((req, res) => {
+  app.use((req: Request, res: Response) => {
     res.status(404).json({ error: "Not found.", path: req.path });
   });
 
-  app.use((error, _req, res, _next) => {
+  const errorHandler: ErrorRequestHandler = (error: HttpError, _req, res, _next) => {
     const status = error.status || 500;
     res.status(status).json({
       error: status === 500 ? "Internal server error." : error.message
     });
-  });
+  };
+  app.use(errorHandler);
 
   return app;
 }
 
-function applyWorkItemPatch(board, item, patch) {
+function applyWorkItemPatch(board: Board, item: WorkItem, patch: UnknownRecord): void {
   if (typeof patch.title === "string") item.title = patch.title;
   if (typeof patch.summary === "string") item.summary = patch.summary;
   if (Object.prototype.hasOwnProperty.call(patch, "ownerAgentId")) item.ownerAgentId = nullableString(patch.ownerAgentId);
@@ -389,26 +470,26 @@ function applyWorkItemPatch(board, item, patch) {
   }
 }
 
-function applyCommentPatch(comment, patch) {
+function applyCommentPatch(comment: WorkItemComment, patch: UnknownRecord): void {
   if (typeof patch.text === "string" && patch.text.trim()) comment.text = patch.text.trim();
   if (typeof patch.author === "string" && patch.author.trim()) comment.author = patch.author.trim();
   if (typeof patch.kind === "string") {
-    if (!COMMENT_KINDS.has(patch.kind)) throw httpError(400, "Invalid comment kind.");
-    comment.kind = patch.kind;
+    if (!COMMENT_KINDS.has(patch.kind as CommentKind)) throw httpError(400, "Invalid comment kind.");
+    comment.kind = patch.kind as CommentKind;
   }
   if (typeof patch.status === "string") {
-    if (!COMMENT_STATUSES.has(patch.status)) throw httpError(400, "Invalid comment status.");
-    comment.status = patch.status;
+    if (!COMMENT_STATUSES.has(patch.status as CommentStatus)) throw httpError(400, "Invalid comment status.");
+    comment.status = patch.status as CommentStatus;
   }
   comment.updatedAt = new Date().toISOString();
 }
 
-function collectAgentInstructions(state, agentId, boardId = null) {
+function collectAgentInstructions(state: WorkspaceState, agentId: unknown, boardId: unknown = null): AgentInstruction[] {
   const normalizedAgentId = nullableString(agentId);
   const normalizedBoardId = nullableString(boardId);
   const actionableKinds = new Set(["instruction", "question", "change_request"]);
   const actionableStatuses = new Set(["open", "acknowledged"]);
-  const instructions = [];
+  const instructions: AgentInstruction[] = [];
 
   for (const board of state.boards) {
     if (normalizedBoardId && board.id !== normalizedBoardId) continue;
@@ -437,51 +518,52 @@ function collectAgentInstructions(state, agentId, boardId = null) {
   return instructions;
 }
 
-function findAgentSpec(board, agentId) {
+function findAgentSpec(board: Board | null | undefined, agentId: string): AgentSpec | null {
   return board?.agentSpecs?.find((agent) => agent.id === agentId) || null;
 }
 
-function isItemAssignedToAgent(item, agentId) {
+function isItemAssignedToAgent(item: WorkItem | null | undefined, agentId: string | null | undefined): boolean {
   return Boolean(agentId && (item?.ownerAgentId === agentId || item?.reviewerAgentId === agentId));
 }
 
-function withAgentCreateDefaults(req, input) {
+function withAgentCreateDefaults(req: Request, input: UnknownRecord): UnknownRecord {
+  if (!isAgentAuth(req)) return input;
   const agentId = req.kanbanAuth.agentId;
   const next = { ...input };
   if (!next.ownerAgentId && !next.reviewerAgentId) next.ownerAgentId = agentId;
   return next;
 }
 
-function filterAgentCommentPatch(patch, comment, agentId) {
-  const filtered = {};
+function filterAgentCommentPatch(patch: UnknownRecord, comment: WorkItemComment, agentId: string): UnknownRecord {
+  const filtered: UnknownRecord = {};
   if (typeof patch.status === "string") filtered.status = patch.status;
   if (comment.author === agentId && typeof patch.text === "string") filtered.text = patch.text;
   if (comment.author === agentId && typeof patch.kind === "string") filtered.kind = patch.kind;
   return filtered;
 }
 
-function requireBoardAccess(req, boardId) {
+function requireBoardAccess(req: Request, boardId: string): void {
   if (isAgentAuth(req) && req.kanbanAuth.boardId !== boardId) {
     throw httpError(403, "Agent token is scoped to a different board.");
   }
 }
 
-function isAdminAuth(req) {
+function isAdminAuth(req: Request): req is Request & { kanbanAuth: AdminAuthContext } {
   return req.kanbanAuth?.kind === "admin";
 }
 
-function isAgentAuth(req) {
+function isAgentAuth(req: Request): req is Request & { kanbanAuth: AgentAuthContext } {
   return req.kanbanAuth?.kind === "agent";
 }
 
-function createAuthConfig(options = {}) {
+function createAuthConfig(options: CreateAppOptions = {}): AuthConfig {
   const productionLike = options.requireAuth ?? Boolean(process.env.VERCEL || process.env.NODE_ENV === "production");
   const apiToken = options.apiToken ?? process.env.KANBAN_CARDS_API_TOKEN ?? process.env.INSTRUCT_API_TOKEN ?? "";
   const apiTokenProvided = Boolean(options.apiToken || process.env.KANBAN_CARDS_API_TOKEN || process.env.INSTRUCT_API_TOKEN);
   const basicUser = options.basicUser ?? process.env.KANBAN_CARDS_BASIC_USER ?? "";
   const basicPassword = options.basicPassword ?? process.env.KANBAN_CARDS_BASIC_PASSWORD ?? "";
   const basicConfigured = Boolean(basicUser && basicPassword);
-  const missingRequiredSecrets = [];
+  const missingRequiredSecrets: string[] = [];
 
   if (productionLike && !apiToken) missingRequiredSecrets.push("KANBAN_CARDS_API_TOKEN");
   if (productionLike && !basicUser) missingRequiredSecrets.push("KANBAN_CARDS_BASIC_USER");
@@ -497,7 +579,11 @@ function createAuthConfig(options = {}) {
   };
 }
 
-function requireAccessAuth(auth, tokenStore, missingRequiredConfig = auth.missingRequiredSecrets) {
+function requireAccessAuth(
+  auth: AuthConfig,
+  tokenStore: AgentTokenStore,
+  missingRequiredConfig: string[] = auth.missingRequiredSecrets
+): RequestHandler {
   return asyncHandler(async (req, res, next) => {
     if (missingRequiredConfig.length) {
       res.status(500).json({
@@ -519,7 +605,7 @@ function requireAccessAuth(auth, tokenStore, missingRequiredConfig = auth.missin
   });
 }
 
-async function authenticateRequest(req, auth, tokenStore) {
+async function authenticateRequest(req: Request, auth: AuthConfig, tokenStore: AgentTokenStore): Promise<KanbanAuthContext> {
   if (hasValidBasic(req, auth)) return { kind: "admin", method: "basic" };
 
   const bearerToken = getBearerToken(req);
@@ -544,8 +630,8 @@ async function authenticateRequest(req, auth, tokenStore) {
   return { kind: "anonymous" };
 }
 
-function requireAdminAuth() {
-  return (req, _res, next) => {
+function requireAdminAuth(): RequestHandler {
+  return (req: Request, _res: Response, next: NextFunction) => {
     if (isAdminAuth(req)) {
       next();
       return;
@@ -556,8 +642,8 @@ function requireAdminAuth() {
   };
 }
 
-function requireWriteAuth() {
-  return (req, _res, next) => {
+function requireWriteAuth(): RequestHandler {
+  return (req: Request, _res: Response, next: NextFunction) => {
     if (isAdminAuth(req) || isAgentAuth(req)) {
       next();
       return;
@@ -567,18 +653,18 @@ function requireWriteAuth() {
   };
 }
 
-function hasValidAdminBearer(token, auth) {
+function hasValidAdminBearer(token: string, auth: AuthConfig): boolean {
   if (!auth.apiToken) return false;
   return safeEqual(token, auth.apiToken);
 }
 
-function getBearerToken(req) {
+function getBearerToken(req: Request): string {
   const header = req.get("authorization") || "";
   const match = header.match(/^Bearer\s+(.+)$/i);
   return match ? match[1] : "";
 }
 
-function hasValidBasic(req, auth) {
+function hasValidBasic(req: Request, auth: AuthConfig): boolean {
   if (!auth.basicUser || !auth.basicPassword) return false;
   const header = req.get("authorization") || "";
   const match = header.match(/^Basic\s+(.+)$/i);
@@ -598,13 +684,13 @@ function hasValidBasic(req, auth) {
   return safeEqual(user, auth.basicUser) && safeEqual(password, auth.basicPassword);
 }
 
-function safeEqual(left, right) {
+function safeEqual(left: unknown, right: unknown): boolean {
   const leftBuffer = Buffer.from(String(left));
   const rightBuffer = Buffer.from(String(right));
   return leftBuffer.length === rightBuffer.length && crypto.timingSafeEqual(leftBuffer, rightBuffer);
 }
 
-function serveIndex(staticDir) {
+function serveIndex(staticDir: string): RequestHandler {
   return asyncHandler(async (_req, res) => {
     const html = await readIndexHtml(staticDir);
     const injected = html.replace(
@@ -615,40 +701,46 @@ function serveIndex(staticDir) {
   });
 }
 
-async function readIndexHtml(staticDir) {
+async function readIndexHtml(staticDir: string): Promise<string> {
   try {
     return await fs.readFile(path.join(staticDir, "index.html"), "utf8");
   } catch (error) {
-    if (error.code === "ENOENT") return FALLBACK_INDEX_HTML;
+    if (isNodeError(error) && error.code === "ENOENT") return FALLBACK_INDEX_HTML;
     throw error;
   }
 }
 
-function sendStaticFile(staticDir, filename, contentType) {
-  return (_req, res) => {
+function sendStaticFile(staticDir: string, filename: string, contentType: string): RequestHandler {
+  return (_req: Request, res: Response) => {
     res.type(contentType).sendFile(path.join(staticDir, filename));
   };
 }
 
-function asyncHandler(handler) {
-  return (req, res, next) => {
+function asyncHandler(handler: AsyncHandler): RequestHandler {
+  return (req: Request, res: Response, next: NextFunction) => {
     Promise.resolve(handler(req, res, next)).catch(next);
   };
 }
 
-function httpError(status, message) {
-  const error = new Error(message);
+function httpError(status: number, message: string): HttpError {
+  const error: HttpError = new Error(message);
   error.status = status;
   return error;
 }
 
-function nullableString(value) {
+function routeParam(req: Request, name: string): string {
+  const value = req.params[name];
+  if (Array.isArray(value)) return value[0] || "";
+  return value || "";
+}
+
+function nullableString(value: unknown): string | null {
   if (value == null) return null;
   const text = String(value).trim();
   return text || null;
 }
 
-function startServer(options = {}) {
+export function startServer(options: CreateAppOptions = {}) {
   const host = options.host || process.env.HOST || DEFAULT_HOST;
   const port = Number(options.port || process.env.PORT || DEFAULT_PORT);
   const app = createApp(options);
@@ -661,7 +753,9 @@ if (require.main === module) {
   startServer();
 }
 
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error;
+}
+
 const defaultApp = createApp();
-module.exports = defaultApp;
-module.exports.createApp = createApp;
-module.exports.startServer = startServer;
+export default defaultApp;

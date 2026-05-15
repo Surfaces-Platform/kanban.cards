@@ -1,12 +1,26 @@
-const crypto = require("node:crypto");
-const fs = require("node:fs/promises");
-const path = require("node:path");
+import crypto from "node:crypto";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { Pool } from "pg";
+
+import type {
+  AgentTokenCreateInput,
+  AgentTokenStore,
+  AgentTokenStoreOptions,
+  CreatedAgentToken,
+  PostgresClient,
+  PostgresOptions,
+  PublicTokenRecord,
+  TokenRecord
+} from "./types";
 
 const DEFAULT_TABLE_NAME = "agent_access_tokens";
 const DEFAULT_TOKEN_FILE = path.join(__dirname, "data", "agent-access-tokens.json");
+type UnknownRecord = Record<string, any>;
 
-function createAgentTokenStore(options = {}) {
-  const connectionString = options.connectionString || process.env.KANBAN_CARDS_DATABASE_URL || process.env.POSTGRES_URL || process.env.DATABASE_URL;
+export function createAgentTokenStore(options: AgentTokenStoreOptions = {}): AgentTokenStore {
+  const connectionString =
+    options.connectionString || process.env.KANBAN_CARDS_DATABASE_URL || process.env.POSTGRES_URL || process.env.DATABASE_URL;
   if (connectionString || options.pool) {
     return createPostgresAgentTokenStore({
       connectionString,
@@ -19,32 +33,32 @@ function createAgentTokenStore(options = {}) {
   return createFileAgentTokenStore(options.dataPath || DEFAULT_TOKEN_FILE);
 }
 
-function createFileAgentTokenStore(dataPath = DEFAULT_TOKEN_FILE) {
+export function createFileAgentTokenStore(dataPath: string = DEFAULT_TOKEN_FILE): AgentTokenStore {
   const resolvedPath = path.resolve(dataPath);
-  let writeQueue = Promise.resolve();
+  let writeQueue: Promise<unknown> = Promise.resolve();
 
-  async function ensureReady() {
+  async function ensureReady(): Promise<void> {
     await fs.mkdir(path.dirname(resolvedPath), { recursive: true });
     try {
       await fs.access(resolvedPath);
     } catch (error) {
-      if (error.code !== "ENOENT") throw error;
+      if (!isNodeError(error) || error.code !== "ENOENT") throw error;
       await writeTokens([]);
     }
   }
 
-  async function readTokens() {
+  async function readTokens(): Promise<TokenRecord[]> {
     try {
       const raw = await fs.readFile(resolvedPath, "utf8");
       const parsed = JSON.parse(raw);
-      return Array.isArray(parsed?.tokens) ? parsed.tokens.map(normalizeTokenRecord).filter(Boolean) : [];
+      return Array.isArray(parsed?.tokens) ? parsed.tokens.map(normalizeTokenRecord).filter(isNonNull) : [];
     } catch (error) {
-      if (error.code !== "ENOENT") throw error;
+      if (!isNodeError(error) || error.code !== "ENOENT") throw error;
       return [];
     }
   }
 
-  async function writeTokens(tokens) {
+  async function writeTokens(tokens: TokenRecord[]): Promise<void> {
     await fs.mkdir(path.dirname(resolvedPath), { recursive: true });
     const tempPath = `${resolvedPath}.${process.pid}.${Date.now()}.tmp`;
     await fs.writeFile(tempPath, `${JSON.stringify({ tokens }, null, 2)}\n`, { mode: 0o600 });
@@ -52,8 +66,8 @@ function createFileAgentTokenStore(dataPath = DEFAULT_TOKEN_FILE) {
     await fs.chmod(resolvedPath, 0o600).catch(() => undefined);
   }
 
-  async function updateTokens(mutator) {
-    writeQueue = writeQueue
+  async function updateTokens<T>(mutator: (tokens: TokenRecord[]) => T): Promise<T> {
+    const nextWrite = writeQueue
       .catch(() => undefined)
       .then(async () => {
         const tokens = await readTokens();
@@ -61,17 +75,19 @@ function createFileAgentTokenStore(dataPath = DEFAULT_TOKEN_FILE) {
         await writeTokens(tokens);
         return result;
       });
-    return writeQueue;
+    writeQueue = nextWrite;
+    return nextWrite;
   }
 
-  async function list(boardId) {
+  async function list(boardId: string): Promise<PublicTokenRecord[]> {
     await ensureReady();
     return (await readTokens())
       .filter((token) => token.boardId === boardId && !token.revokedAt)
-      .map(toPublicTokenRecord);
+      .map(toPublicTokenRecord)
+      .filter(isNonNull);
   }
 
-  async function create(input) {
+  async function create(input: AgentTokenCreateInput): Promise<CreatedAgentToken> {
     const rawToken = generateAgentToken();
     const now = new Date().toISOString();
     const record = normalizeTokenRecord({
@@ -85,15 +101,18 @@ function createFileAgentTokenStore(dataPath = DEFAULT_TOKEN_FILE) {
       lastUsedAt: null,
       revokedAt: null
     });
+    if (!record) throw new Error("Unable to create agent token record.");
 
     await updateTokens((tokens) => {
       tokens.push(record);
     });
 
-    return { token: rawToken, tokenRecord: toPublicTokenRecord(record) };
+    const tokenRecord = toPublicTokenRecord(record);
+    if (!tokenRecord) throw new Error("Unable to create public agent token record.");
+    return { token: rawToken, tokenRecord };
   }
 
-  async function verify(rawToken) {
+  async function verify(rawToken: string): Promise<PublicTokenRecord | null> {
     const tokenHash = hashAgentToken(rawToken);
     const now = new Date().toISOString();
     return updateTokens((tokens) => {
@@ -104,7 +123,7 @@ function createFileAgentTokenStore(dataPath = DEFAULT_TOKEN_FILE) {
     });
   }
 
-  async function revoke(boardId, tokenId) {
+  async function revoke(boardId: string, tokenId: string): Promise<PublicTokenRecord | null> {
     const now = new Date().toISOString();
     return updateTokens((tokens) => {
       const record = tokens.find((candidate) => candidate.id === tokenId && candidate.boardId === boardId);
@@ -117,18 +136,20 @@ function createFileAgentTokenStore(dataPath = DEFAULT_TOKEN_FILE) {
   return { kind: "file", path: resolvedPath, ensureReady, list, create, verify, revoke };
 }
 
-function createPostgresAgentTokenStore(options = {}) {
-  const { Pool } = require("pg");
+export function createPostgresAgentTokenStore(options: AgentTokenStoreOptions = {}): AgentTokenStore {
   const tableName = options.tableName || DEFAULT_TABLE_NAME;
-  const pool = options.pool || new Pool({
-    connectionString: options.connectionString,
-    ssl: resolvePostgresSsl(options)
-  });
-  let readyPromise = null;
+  const pool =
+    options.pool ||
+    new Pool({
+      connectionString: options.connectionString,
+      ssl: resolvePostgresSsl(options)
+    });
+  let readyPromise: Promise<unknown> | null = null;
 
-  async function ensureReady(client = pool) {
+  async function ensureReady(client: PostgresClient = pool): Promise<void> {
     if (!readyPromise || client !== pool) {
-      const ready = client.query(`
+      const ready = client
+        .query(`
         CREATE TABLE IF NOT EXISTS ${tableName} (
           id text PRIMARY KEY,
           board_id text NOT NULL,
@@ -140,7 +161,8 @@ function createPostgresAgentTokenStore(options = {}) {
           last_used_at timestamptz,
           revoked_at timestamptz
         )
-      `).then(() => client.query(`CREATE INDEX IF NOT EXISTS ${tableName}_board_id_idx ON ${tableName} (board_id)`))
+      `)
+        .then(() => client.query(`CREATE INDEX IF NOT EXISTS ${tableName}_board_id_idx ON ${tableName} (board_id)`))
         .then(() => client.query(`CREATE INDEX IF NOT EXISTS ${tableName}_token_hash_idx ON ${tableName} (token_hash)`));
       if (client === pool) readyPromise = ready;
       await ready;
@@ -150,7 +172,7 @@ function createPostgresAgentTokenStore(options = {}) {
     await readyPromise;
   }
 
-  async function list(boardId) {
+  async function list(boardId: string): Promise<PublicTokenRecord[]> {
     await ensureReady();
     const result = await pool.query(
       `SELECT id, board_id, agent_id, label, last4, created_at, last_used_at, revoked_at
@@ -159,10 +181,10 @@ function createPostgresAgentTokenStore(options = {}) {
        ORDER BY created_at DESC`,
       [boardId]
     );
-    return result.rows.map(toPublicTokenRecord);
+    return result.rows.map(toPublicTokenRecord).filter(isNonNull);
   }
 
-  async function create(input) {
+  async function create(input: AgentTokenCreateInput): Promise<CreatedAgentToken> {
     await ensureReady();
     const rawToken = generateAgentToken();
     const id = input.id || `agtok_${crypto.randomUUID()}`;
@@ -170,19 +192,14 @@ function createPostgresAgentTokenStore(options = {}) {
       `INSERT INTO ${tableName} (id, board_id, agent_id, label, token_hash, last4, created_at)
        VALUES ($1, $2, $3, $4, $5, $6, now())
        RETURNING id, board_id, agent_id, label, last4, created_at, last_used_at, revoked_at`,
-      [
-        id,
-        input.boardId,
-        input.agentId,
-        sanitizeLabel(input.label),
-        hashAgentToken(rawToken),
-        rawToken.slice(-4)
-      ]
+      [id, input.boardId, input.agentId, sanitizeLabel(input.label), hashAgentToken(rawToken), rawToken.slice(-4)]
     );
-    return { token: rawToken, tokenRecord: toPublicTokenRecord(result.rows[0]) };
+    const tokenRecord = toPublicTokenRecord(result.rows[0]);
+    if (!tokenRecord) throw new Error("Unable to create public agent token record.");
+    return { token: rawToken, tokenRecord };
   }
 
-  async function verify(rawToken) {
+  async function verify(rawToken: string): Promise<PublicTokenRecord | null> {
     await ensureReady();
     const result = await pool.query(
       `UPDATE ${tableName}
@@ -194,7 +211,7 @@ function createPostgresAgentTokenStore(options = {}) {
     return result.rows[0] ? toPublicTokenRecord(result.rows[0]) : null;
   }
 
-  async function revoke(boardId, tokenId) {
+  async function revoke(boardId: string, tokenId: string): Promise<PublicTokenRecord | null> {
     await ensureReady();
     const result = await pool.query(
       `UPDATE ${tableName}
@@ -209,16 +226,16 @@ function createPostgresAgentTokenStore(options = {}) {
   return { kind: "postgres", path: tableName, ensureReady, list, create, verify, revoke };
 }
 
-function generateAgentToken() {
+export function generateAgentToken(): string {
   return `kcagt_${crypto.randomBytes(32).toString("base64url")}`;
 }
 
-function hashAgentToken(rawToken) {
+export function hashAgentToken(rawToken: string): string {
   return `sha256:${crypto.createHash("sha256").update(String(rawToken)).digest("hex")}`;
 }
 
-function normalizeTokenRecord(record) {
-  if (!record || typeof record !== "object") return null;
+function normalizeTokenRecord(record: unknown): TokenRecord | null {
+  if (!isRecord(record)) return null;
   const id = String(record.id || "").trim();
   const boardId = String(record.boardId || record.board_id || "").trim();
   const agentId = String(record.agentId || record.agent_id || "").trim();
@@ -239,8 +256,8 @@ function normalizeTokenRecord(record) {
   };
 }
 
-function toPublicTokenRecord(record) {
-  if (!record || typeof record !== "object") return null;
+function toPublicTokenRecord(record: unknown): PublicTokenRecord | null {
+  if (!isRecord(record)) return null;
   const id = String(record.id || "").trim();
   const boardId = String(record.boardId || record.board_id || "").trim();
   const agentId = String(record.agentId || record.agent_id || "").trim();
@@ -259,28 +276,32 @@ function toPublicTokenRecord(record) {
   };
 }
 
-function sanitizeLabel(label) {
+function sanitizeLabel(label: unknown): string {
   return String(label || "Local agent").trim().slice(0, 120) || "Local agent";
 }
 
-function dateToIso(value) {
+function dateToIso(value: unknown): string | null {
   if (!value) return null;
   if (value instanceof Date) return value.toISOString();
-  const date = new Date(value);
+  const date = new Date(String(value));
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
-function resolvePostgresSsl(options = {}) {
+function resolvePostgresSsl(options: Pick<PostgresOptions, "ssl"> = {}): PostgresOptions["ssl"] | undefined {
   if (options.ssl !== undefined) return options.ssl;
   if (process.env.KANBAN_CARDS_POSTGRES_SSL === "disable") return false;
   if (process.env.NODE_ENV === "production" || process.env.VERCEL) return { rejectUnauthorized: false };
   return undefined;
 }
 
-module.exports = {
-  createAgentTokenStore,
-  createFileAgentTokenStore,
-  createPostgresAgentTokenStore,
-  generateAgentToken,
-  hashAgentToken
-};
+function isRecord(value: unknown): value is UnknownRecord {
+  return typeof value === "object" && value !== null;
+}
+
+function isNonNull<T>(value: T | null): value is T {
+  return value !== null;
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error;
+}

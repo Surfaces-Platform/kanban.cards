@@ -7,7 +7,7 @@ This app uses two gates for generated UI work:
 
 ## Approved Form Primitives
 
-Feature UI in `app.js` must render form controls through these helpers:
+Feature UI in `src/client/app.ts` must render form controls through these helpers. The build emits the browser bundle at `public/app.js`.
 
 - `renderFormField`
 - `renderTextField`

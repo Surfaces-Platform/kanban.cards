@@ -1,10 +1,10 @@
-const assert = require("node:assert/strict");
-const { execFile } = require("node:child_process");
-const fs = require("node:fs/promises");
-const os = require("node:os");
-const path = require("node:path");
-const test = require("node:test");
-const { promisify } = require("node:util");
+import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 const CLIENT_PATH = path.join(__dirname, "..", ".agents", "skills", "kanban-cards", "scripts", "kanban-cards-client.mjs");
@@ -85,7 +85,7 @@ test("kanban-cards client reads config after env vars", async () => {
   }
 });
 
-function cleanEnv(overrides) {
+function cleanEnv(overrides: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env = { ...process.env, ...overrides };
   delete env.KANBAN_CARDS_API_BASE_URL;
   delete env.KANBAN_CARDS_API_TOKEN;

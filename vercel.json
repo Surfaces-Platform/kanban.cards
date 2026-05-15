@@ -1,35 +1,32 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "version": 2,
-  "builds": [
-    {
-      "src": "api/index.js",
-      "use": "@vercel/node",
-      "config": {
-        "includeFiles": "*"
-      }
-    },
-    {
-      "src": "public/**/*",
-      "use": "@vercel/static"
+  "buildCommand": "npm run build",
+  "functions": {
+    "api/index.ts": {
+      "includeFiles": "{index.html,public/**}"
     }
-  ],
+  },
   "rewrites": [
     {
+      "source": "/api/(.*)",
+      "destination": "/api/index"
+    },
+    {
       "source": "/app.js",
-      "destination": "/public/app.js"
+      "destination": "/api/index"
     },
     {
       "source": "/styles.css",
-      "destination": "/public/styles.css"
+      "destination": "/api/index"
     },
     {
       "source": "/robots.txt",
-      "destination": "/public/robots.txt"
+      "destination": "/api/index"
     },
     {
       "source": "/(.*)",
-      "destination": "/api/index.js"
+      "destination": "/api/index"
     }
   ],
   "headers": [

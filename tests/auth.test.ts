@@ -1,10 +1,13 @@
-const assert = require("node:assert/strict");
-const fs = require("node:fs/promises");
-const os = require("node:os");
-const path = require("node:path");
-const test = require("node:test");
+import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import type { Server } from "node:http";
+import type { AddressInfo } from "node:net";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+import type { Express } from "express";
 
-const { createApp } = require("../server");
+import { createApp } from "../src/server";
 
 test("private beta auth protects the UI without exposing the agent token", async () => {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-cards-auth-"));
@@ -16,7 +19,7 @@ test("private beta auth protects the UI without exposing the agent token", async
     basicUser: "mike",
     basicPassword: "secret"
   }));
-  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  const baseUrl = `http://127.0.0.1:${serverPort(server)}`;
 
   try {
     const denied = await fetch(`${baseUrl}/`);
@@ -43,12 +46,12 @@ test("private beta auth protects the UI without exposing the agent token", async
 
 test("production-like auth reports missing required secrets", async () => {
   const server = await listen(createApp({ requireAuth: true, apiToken: "", basicUser: "", basicPassword: "" }));
-  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  const baseUrl = `http://127.0.0.1:${serverPort(server)}`;
 
   try {
     const health = await fetch(`${baseUrl}/api/health`);
     assert.equal(health.status, 500);
-    const body = await health.json();
+    const body = await health.json() as any;
     assert.deepEqual(body.missingConfig, [
       "KANBAN_CARDS_API_TOKEN",
       "KANBAN_CARDS_BASIC_USER",
@@ -59,46 +62,50 @@ test("production-like auth reports missing required secrets", async () => {
   }
 });
 
-function basicHeaders(user, password) {
+function basicHeaders(user: string, password: string): Record<string, string> {
   return {
     Authorization: `Basic ${Buffer.from(`${user}:${password}`).toString("base64")}`
   };
 }
 
-function bearerHeaders(token) {
+function bearerHeaders(token: string): Record<string, string> {
   return {
     Authorization: `Bearer ${token}`
   };
 }
 
-async function listen(app) {
-  return new Promise((resolve) => {
+async function listen(app: Express): Promise<Server> {
+  return new Promise<Server>((resolve) => {
     const server = app.listen(0, "127.0.0.1", () => resolve(server));
   });
 }
 
-async function closeServer(server) {
-  return new Promise((resolve, reject) => {
-    server.close((error) => {
+async function closeServer(server: Server): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    server.close((error?: Error) => {
       if (error) reject(error);
       else resolve();
     });
   });
 }
 
-async function text(url, headers = {}) {
+function serverPort(server: Server): number {
+  return (server.address() as AddressInfo).port;
+}
+
+async function text(url: string, headers: Record<string, string> = {}): Promise<string> {
   const response = await fetch(url, { headers });
   assert.equal(response.ok, true, `${url} returned ${response.status}`);
   return response.text();
 }
 
-async function getJson(url, headers = {}) {
+async function getJson<T = any>(url: string, headers: Record<string, string> = {}): Promise<T> {
   const response = await fetch(url, { headers });
   assert.equal(response.ok, true, `${url} returned ${response.status}`);
-  return response.json();
+  return response.json() as Promise<T>;
 }
 
-async function writeJson(url, headers, body, method = "POST") {
+async function writeJson<T = any>(url: string, headers: Record<string, string>, body: unknown, method = "POST"): Promise<T> {
   const response = await fetch(url, {
     method,
     headers: {
@@ -110,5 +117,5 @@ async function writeJson(url, headers, body, method = "POST") {
   if (!response.ok) {
     assert.fail(`${url} returned ${response.status}: ${await response.text()}`);
   }
-  return response.json();
+  return response.json() as Promise<T>;
 }

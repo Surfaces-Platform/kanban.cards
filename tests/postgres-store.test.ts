@@ -1,12 +1,26 @@
-const assert = require("node:assert/strict");
-const test = require("node:test");
+import assert from "node:assert/strict";
+import test from "node:test";
 
-const { createPostgresAgentTokenStore, hashAgentToken } = require("../agent-token-store");
-const { createBoard, createPostgresStateStore } = require("../state-store");
+import { createPostgresAgentTokenStore, hashAgentToken } from "../src/agent-token-store";
+import { createBoard, createPostgresStateStore } from "../src/state-store";
+import type { WorkspaceState } from "../src/types";
+
+type QueryResult = { rows: any[] };
+type TokenRow = {
+  id: string;
+  board_id: string;
+  agent_id: string;
+  label: string;
+  token_hash: string;
+  last4: string;
+  created_at: Date;
+  last_used_at: Date | null;
+  revoked_at: Date | null;
+};
 
 test("Postgres store reads, writes, and updates the workspace document", async () => {
   const pool = new FakePool();
-  const store = createPostgresStateStore({ pool });
+  const store = createPostgresStateStore({ pool: pool as any });
 
   const initial = await store.read();
   assert.equal(initial.boards.length, 1);
@@ -22,7 +36,7 @@ test("Postgres store reads, writes, and updates the workspace document", async (
   const saved = await store.read();
   assert.equal(saved.boards[0].name, "Postgres board");
 
-  const { result, state } = await store.update((workspace) => {
+  const { result, state } = await store.update((workspace: WorkspaceState) => {
     workspace.boards[0].name = "Updated board";
     return workspace.boards[0];
   });
@@ -34,7 +48,7 @@ test("Postgres store reads, writes, and updates the workspace document", async (
 
 test("Postgres agent token store persists hashes and supports verify and revoke", async () => {
   const pool = new FakeTokenPool();
-  const store = createPostgresAgentTokenStore({ pool });
+  const store = createPostgresAgentTokenStore({ pool: pool as any });
 
   const created = await store.create({
     boardId: "board-1",
@@ -51,31 +65,35 @@ test("Postgres agent token store persists hashes and supports verify and revoke"
   assert.equal(listed[0].lastUsedAt, null);
 
   const verified = await store.verify(created.token);
+  assert.ok(verified);
   assert.equal(verified.agentId, "agent-a");
   assert.ok(verified.lastUsedAt);
 
   const revoked = await store.revoke("board-1", created.tokenRecord.id);
+  assert.ok(revoked);
   assert.ok(revoked.revokedAt);
   assert.equal(await store.verify(created.token), null);
 });
 
 class FakePool {
+  rows: Map<string, WorkspaceState>;
+
   constructor() {
     this.rows = new Map();
   }
 
-  async query(sql, args = []) {
+  async query(sql: string, args: any[] = []): Promise<QueryResult> {
     return this.handle(sql, args);
   }
 
-  async connect() {
+  async connect(): Promise<{ query: (sql: string, args?: any[]) => Promise<QueryResult>; release: () => undefined }> {
     return {
-      query: (sql, args = []) => this.handle(sql, args),
+      query: (sql: string, args: any[] = []) => this.handle(sql, args),
       release: () => undefined
     };
   }
 
-  async handle(sql, args = []) {
+  async handle(sql: string, args: any[] = []): Promise<QueryResult> {
     const normalizedSql = sql.replace(/\s+/g, " ").trim().toUpperCase();
     if (normalizedSql.startsWith("CREATE TABLE") || normalizedSql === "BEGIN" || normalizedSql === "COMMIT" || normalizedSql === "ROLLBACK") {
       return { rows: [] };
@@ -102,11 +120,13 @@ class FakePool {
 }
 
 class FakeTokenPool {
+  tokens: TokenRow[];
+
   constructor() {
     this.tokens = [];
   }
 
-  async query(sql, args = []) {
+  async query(sql: string, args: any[] = []): Promise<QueryResult> {
     const normalizedSql = sql.replace(/\s+/g, " ").trim().toUpperCase();
     if (normalizedSql.startsWith("CREATE TABLE") || normalizedSql.startsWith("CREATE INDEX")) {
       return { rows: [] };
@@ -131,21 +151,21 @@ class FakeTokenPool {
     if (normalizedSql.startsWith("SELECT ID")) {
       return {
         rows: this.tokens
-          .filter((token) => token.board_id === args[0] && !token.revoked_at)
-          .sort((left, right) => right.created_at - left.created_at)
+          .filter((token: TokenRow) => token.board_id === args[0] && !token.revoked_at)
+          .sort((left: TokenRow, right: TokenRow) => right.created_at.getTime() - left.created_at.getTime())
           .map(publicTokenRow)
       };
     }
 
     if (normalizedSql.startsWith("UPDATE") && normalizedSql.includes("SET LAST_USED_AT")) {
-      const token = this.tokens.find((candidate) => candidate.token_hash === args[0] && !candidate.revoked_at);
+      const token = this.tokens.find((candidate: TokenRow) => candidate.token_hash === args[0] && !candidate.revoked_at);
       if (!token) return { rows: [] };
       token.last_used_at = new Date();
       return { rows: [publicTokenRow(token)] };
     }
 
     if (normalizedSql.startsWith("UPDATE") && normalizedSql.includes("SET REVOKED_AT")) {
-      const token = this.tokens.find((candidate) => candidate.board_id === args[0] && candidate.id === args[1]);
+      const token = this.tokens.find((candidate: TokenRow) => candidate.board_id === args[0] && candidate.id === args[1]);
       if (!token) return { rows: [] };
       token.revoked_at = token.revoked_at || new Date();
       return { rows: [publicTokenRow(token)] };
@@ -155,7 +175,7 @@ class FakeTokenPool {
   }
 }
 
-function publicTokenRow(row) {
+function publicTokenRow(row: TokenRow): any {
   return {
     id: row.id,
     board_id: row.board_id,

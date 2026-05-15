@@ -1,11 +1,14 @@
-const assert = require("node:assert/strict");
-const fs = require("node:fs/promises");
-const os = require("node:os");
-const path = require("node:path");
-const test = require("node:test");
+import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import type { Server } from "node:http";
+import type { AddressInfo } from "node:net";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+import type { Express } from "express";
 
-const { hashAgentToken } = require("../agent-token-store");
-const { createApp } = require("../server");
+import { hashAgentToken } from "../src/agent-token-store";
+import { createApp } from "../src/server";
 
 test("scoped agent tokens are one-time, hashed, revocable, and board-agent limited", async () => {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-cards-agent-access-"));
@@ -20,7 +23,7 @@ test("scoped agent tokens are one-time, hashed, revocable, and board-agent limit
     basicUser: "mike",
     basicPassword: "secret"
   }));
-  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  const baseUrl = `http://127.0.0.1:${serverPort(server)}`;
 
   try {
     const board = await writeJson(`${baseUrl}/api/boards`, bearerHeaders(adminToken), {
@@ -129,7 +132,7 @@ test("scoped agent tokens are one-time, hashed, revocable, and board-agent limit
   }
 });
 
-function lane(title, description, defaultOwnerAgentId = null, defaultReviewerAgentId = null) {
+function lane(title: string, description: string, defaultOwnerAgentId: string | null = null, defaultReviewerAgentId: string | null = null) {
   return {
     id: title.toLowerCase(),
     title,
@@ -143,7 +146,7 @@ function lane(title, description, defaultOwnerAgentId = null, defaultReviewerAge
   };
 }
 
-function agent(id, name, role, laneIds) {
+function agent(id: string, name: string, role: string, laneIds: string[]) {
   return {
     id,
     name,
@@ -154,36 +157,40 @@ function agent(id, name, role, laneIds) {
   };
 }
 
-function bearerHeaders(token) {
+function bearerHeaders(token: string): Record<string, string> {
   return {
     Authorization: `Bearer ${token}`
   };
 }
 
-async function listen(app) {
-  return new Promise((resolve) => {
+async function listen(app: Express): Promise<Server> {
+  return new Promise<Server>((resolve) => {
     const server = app.listen(0, "127.0.0.1", () => resolve(server));
   });
 }
 
-async function closeServer(server) {
-  return new Promise((resolve, reject) => {
-    server.close((error) => {
+async function closeServer(server: Server): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    server.close((error?: Error) => {
       if (error) reject(error);
       else resolve();
     });
   });
 }
 
-async function getJson(url, headers = {}) {
+function serverPort(server: Server): number {
+  return (server.address() as AddressInfo).port;
+}
+
+async function getJson<T = any>(url: string, headers: Record<string, string> = {}): Promise<T> {
   const response = await fetch(url, { headers });
   if (!response.ok) {
     assert.fail(`${url} returned ${response.status}: ${await response.text()}`);
   }
-  return response.json();
+  return response.json() as Promise<T>;
 }
 
-async function writeJson(url, headers, body, method = "POST") {
+async function writeJson<T = any>(url: string, headers: Record<string, string>, body: unknown, method = "POST"): Promise<T> {
   const response = await fetch(url, {
     method,
     headers: {
@@ -195,5 +202,5 @@ async function writeJson(url, headers, body, method = "POST") {
   if (!response.ok) {
     assert.fail(`${url} returned ${response.status}: ${await response.text()}`);
   }
-  return response.json();
+  return response.json() as Promise<T>;
 }
