@@ -2,6 +2,8 @@
 
 kanban.cards is a private-beta Kanban board for human and agent-controlled cards. Humans use the browser UI to describe or choose a workflow, create cards, and review activity. Agents use the API to create cards, move cards, and post progress or reviewer-facing comments.
 
+For the product thesis and the "why Kanban / why agents using Kanban" framing, see [Product Vision](docs/product-vision.md).
+
 ## Local Development
 
 ```bash
