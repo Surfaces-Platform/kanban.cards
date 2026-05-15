@@ -21,6 +21,90 @@ const {
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 4317;
 const PRODUCT_NAME = "kanban.cards";
+const FALLBACK_INDEX_HTML = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <meta name="description" content="kanban.cards tracks human and agent-controlled Kanban cards with reviewable workflows.">
+  <title>kanban.cards</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="app-body">
+  <main class="product-shell">
+    <header class="topbar">
+      <div class="topbar-left">
+        <a class="product-mark" href="./" aria-label="kanban.cards home">kanban.cards</a>
+        <label class="board-switcher" for="board-select">
+          <span class="sr-only">Board</span>
+          <select id="board-select">
+            <option>Untitled board</option>
+          </select>
+        </label>
+        <button class="secondary-button" type="button" id="new-board">New board</button>
+      </div>
+      <button class="primary-button" type="button" id="new-work-item" disabled title="Configure lanes before adding cards.">New card</button>
+    </header>
+
+    <section class="board-toolbar" aria-label="Board controls">
+      <div class="board-context">
+        <h1 id="board-title">Untitled board</h1>
+        <div class="board-counts" aria-label="Board summary">
+          <span><strong id="metric-active">0</strong> active</span>
+          <span><strong id="metric-blocked">0</strong> blocked</span>
+          <span><strong id="metric-approvals">0</strong> approvals</span>
+          <span><strong id="metric-delivered">0</strong> delivered</span>
+        </div>
+      </div>
+      <div class="board-actions">
+        <button class="secondary-button" type="button" id="edit-flow" hidden>Edit flow</button>
+      </div>
+    </section>
+
+    <section class="workspace-grid" aria-label="Reviewer workspace">
+      <section class="board-canvas is-setup" id="board-canvas" aria-label="Cards">
+        <section class="flow-panel" aria-labelledby="flow-setup-title">
+          <div class="flow-panel-heading">
+            <p class="eyebrow">Board setup</p>
+            <h2 id="flow-setup-title">Choose a template or describe the flow</h2>
+          </div>
+          <label class="board-name-field" for="board-name">
+            <span class="meta-label">Board name</span>
+            <input id="board-name" type="text" value="Untitled board">
+          </label>
+          <label class="flow-prompt-field" for="flow-prompt">
+            <span class="sr-only">Kanban flow description</span>
+            <textarea id="flow-prompt" rows="5" placeholder="Intake, Research, Draft, Review, Release"></textarea>
+          </label>
+          <div class="flow-actions">
+            <button class="primary-button" type="button" data-action="generate-flow">Generate flow</button>
+          </div>
+        </section>
+      </section>
+
+      <aside class="detail-panel" aria-live="polite" aria-label="Card inspector">
+        <div class="detail-shell" id="inspector-panel">
+          <div class="inspector-label">
+            <span>Inspector</span>
+            <strong>No selection</strong>
+          </div>
+          <section class="empty-inspector" aria-labelledby="empty-inspector-title">
+            <p class="eyebrow">Card detail</p>
+            <h2 id="empty-inspector-title">Select a card</h2>
+            <p>Details, review gates, approvals, and activity will appear here after cards exist.</p>
+          </section>
+        </div>
+      </aside>
+    </section>
+  </main>
+
+  <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
+  <div id="modal-root"></div>
+  <script src="app.js"></script>
+</body>
+</html>`;
 
 function createApp(options = {}) {
   const staticDir = options.staticDir || __dirname;
@@ -340,13 +424,22 @@ function safeEqual(left, right) {
 
 function serveIndex(staticDir) {
   return asyncHandler(async (_req, res) => {
-    const html = await fs.readFile(path.join(staticDir, "index.html"), "utf8");
+    const html = await readIndexHtml(staticDir);
     const injected = html.replace(
       '<script src="app.js"></script>',
       '<script>window.KANBAN_CARDS_API_BASE_URL="/api";</script>\n  <script src="app.js"></script>'
     );
     res.type("html").send(injected);
   });
+}
+
+async function readIndexHtml(staticDir) {
+  try {
+    return await fs.readFile(path.join(staticDir, "index.html"), "utf8");
+  } catch (error) {
+    if (error.code === "ENOENT") return FALLBACK_INDEX_HTML;
+    throw error;
+  }
 }
 
 function sendStaticFile(staticDir, filename, contentType) {
