@@ -21,10 +21,13 @@ Private-beta browser access may also use HTTP Basic Auth for the same-origin UI 
 - `GET /boards/:boardId`
 - `GET /agent/instructions?agentId=<agent-id>`
 - `GET /agent/session`
+- `GET /events` admin/browser live-update stream
 
 `/agent/instructions` returns open or acknowledged `instruction`, `question`, and `change_request` comments on cards assigned to the agent as owner or reviewer. Omit `agentId` to return all open instructions.
 
 With a scoped agent token, `agentId` is ignored and the response is limited to that token's board and agent.
+
+`/events` returns a `text/event-stream` for the browser/admin surface. It emits `workspace_changed` invalidation events with an event `id`, optional `boardId`, `createdAt`, and small payload. Clients should refetch state when an event arrives. Use `Last-Event-ID` or `?since=<event-id>` to catch up after reconnecting.
 
 ## Agent Token Management
 

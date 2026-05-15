@@ -2,6 +2,8 @@
 
 kanban.cards is a private-beta Kanban board for human and agent-controlled cards. Humans use the browser UI to describe or choose a workflow, create cards, and review activity. Agents use the API to create cards, move cards, and post progress or reviewer-facing comments.
 
+For the product thesis and the "why Kanban / why agents using Kanban" framing, see [Product Vision](docs/product-vision.md).
+
 ## Local Development
 
 ```bash
@@ -50,9 +52,9 @@ node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs setup --url htt
 
 The helper writes `~/.kanban-cards/config.json` with `0600` permissions. Runtime precedence is environment variables first, then the config file, then local defaults.
 
-## Recordable Demo
+## Local Agent Trip Planner Workflow
 
-Use the local orchestrated-agents harness for a clean recording with the browser and terminal side by side:
+Use the local workflow runner to seed an agent trip planner product buildout and execute the scoped agent actions:
 
 ```bash
 npm run demo:prepare
@@ -62,17 +64,24 @@ npm run demo:server
 Open `http://127.0.0.1:4317`, then run each visible agent action one at a time:
 
 ```bash
-npm run demo:step -- coordinator-intake
-npm run demo:step -- researcher-research
-npm run demo:step -- producer-draft
+npm run demo:step -- product-intake
+npm run demo:step -- traveller-research
+npm run demo:step -- designer-flow
+npm run demo:step -- engineer-build
 npm run demo:step -- reviewer-change-request
-npm run demo:step -- producer-revise
-npm run demo:step -- reviewer-release
-npm run demo:step -- coordinator-closeout
+npm run demo:step -- engineer-constraints
+npm run demo:step -- reviewer-approval
+npm run demo:step -- product-closeout
 npm run demo:verify
 ```
 
-The harness seeds throwaway state under `.demo/`, creates scoped per-agent configs, and uses the generated CLI helper for all agent actions. `.demo/` is ignored so generated tokens and recording state are never committed.
+To generate a browser-only MP4 with narration:
+
+```bash
+KANBAN_CARDS_DEMO_RECORD_TTS_PROVIDER=elevenlabs npm run demo:record
+```
+
+The workflow state is written under `.demo/`, creates scoped per-agent configs, and uses the generated CLI helper for all agent actions. `.demo/` is ignored so generated tokens and local run artifacts are never committed.
 
 ```bash
 npm run demo:reset
