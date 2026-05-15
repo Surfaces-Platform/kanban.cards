@@ -9,6 +9,7 @@ public/robots.txt
 .env.*
 !.env.example
 .vercel/
+.demo/
 data/*.json
 coverage/
 .playwright-cli/

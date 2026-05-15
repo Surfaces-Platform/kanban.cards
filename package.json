@@ -15,7 +15,12 @@
     "build:static": "cp styles.css public/styles.css && cp robots.txt public/robots.txt",
     "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.client.json --noEmit && tsc -p tsconfig.cli.json --noEmit && tsc -p tsconfig.test.json --noEmit",
     "check": "npm run typecheck && npm run build && tsx scripts/check-ui-contract.ts",
-    "test": "npm run build && node --import tsx --test tests/*.test.ts"
+    "test": "npm run build && node --import tsx --test tests/*.test.ts",
+    "demo:prepare": "npm run build && tsx scripts/demo.ts prepare",
+    "demo:server": "NODE_ENV=development VERCEL= KANBAN_CARDS_DATA_PATH=.demo/kanban-cards-state.json KANBAN_CARDS_DATABASE_URL= POSTGRES_URL= DATABASE_URL= KANBAN_CARDS_API_TOKEN= INSTRUCT_API_TOKEN= KANBAN_CARDS_BASIC_USER= KANBAN_CARDS_BASIC_PASSWORD= node dist/src/server.js",
+    "demo:step": "tsx scripts/demo.ts step",
+    "demo:verify": "tsx scripts/demo.ts verify",
+    "demo:reset": "tsx scripts/demo.ts reset"
   },
   "dependencies": {
     "express": "^5.2.1",

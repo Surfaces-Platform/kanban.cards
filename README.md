@@ -50,6 +50,34 @@ node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs setup --url htt
 
 The helper writes `~/.kanban-cards/config.json` with `0600` permissions. Runtime precedence is environment variables first, then the config file, then local defaults.
 
+## Recordable Demo
+
+Use the local orchestrated-agents harness for a clean recording with the browser and terminal side by side:
+
+```bash
+npm run demo:prepare
+npm run demo:server
+```
+
+Open `http://127.0.0.1:4317`, then run each visible agent action one at a time:
+
+```bash
+npm run demo:step -- coordinator-intake
+npm run demo:step -- researcher-research
+npm run demo:step -- producer-draft
+npm run demo:step -- reviewer-change-request
+npm run demo:step -- producer-revise
+npm run demo:step -- reviewer-release
+npm run demo:step -- coordinator-closeout
+npm run demo:verify
+```
+
+The harness seeds throwaway state under `.demo/`, creates scoped per-agent configs, and uses the generated CLI helper for all agent actions. `.demo/` is ignored so generated tokens and recording state are never committed.
+
+```bash
+npm run demo:reset
+```
+
 ## Checks
 
 ```bash
