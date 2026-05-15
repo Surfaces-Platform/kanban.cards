@@ -25,10 +25,16 @@ const PRODUCT_NAME = "kanban.cards";
 function createApp(options = {}) {
   const staticDir = options.staticDir || __dirname;
   const dataPath = options.dataPath || process.env.KANBAN_CARDS_DATA_PATH || process.env.INSTRUCT_DATA_PATH || path.join(staticDir, "data", "kanban-cards-state.json");
+  const connectionString = options.connectionString || process.env.KANBAN_CARDS_DATABASE_URL || process.env.POSTGRES_URL || process.env.DATABASE_URL;
   const auth = createAuthConfig(options);
+  const missingRequiredConfig = [...auth.missingRequiredSecrets];
+  const databaseRequired = options.requireDatabase ?? Boolean(process.env.VERCEL || process.env.NODE_ENV === "production");
+  if (databaseRequired && !connectionString) {
+    missingRequiredConfig.push("KANBAN_CARDS_DATABASE_URL or POSTGRES_URL or DATABASE_URL");
+  }
   const store = options.store || createStateStore({
     dataPath,
-    connectionString: options.connectionString,
+    connectionString,
     pool: options.pool,
     ssl: options.ssl
   });
@@ -38,7 +44,7 @@ function createApp(options = {}) {
   app.use(express.json({ limit: "1mb" }));
 
   app.get("/api/health", (_req, res) => {
-    const ok = auth.missingRequiredSecrets.length === 0;
+    const ok = missingRequiredConfig.length === 0;
     res.status(ok ? 200 : 500).json({
       ok,
       product: PRODUCT_NAME,
@@ -46,11 +52,11 @@ function createApp(options = {}) {
       dataPath: store.kind === "file" ? store.path : undefined,
       authRequired: auth.accessAuthRequired,
       writeAuthRequired: !auth.localWriteOpen,
-      missingConfig: auth.missingRequiredSecrets
+      missingConfig: missingRequiredConfig
     });
   });
 
-  app.use(requireAccessAuth(auth));
+  app.use(requireAccessAuth(auth, missingRequiredConfig));
 
   app.get("/", serveIndex(staticDir));
   app.get("/index.html", serveIndex(staticDir));
@@ -268,12 +274,12 @@ function createAuthConfig(options = {}) {
   };
 }
 
-function requireAccessAuth(auth) {
+function requireAccessAuth(auth, missingRequiredConfig = auth.missingRequiredSecrets) {
   return (req, res, next) => {
-    if (auth.missingRequiredSecrets.length) {
+    if (missingRequiredConfig.length) {
       res.status(500).json({
-        error: "kanban.cards auth is not configured.",
-        missingConfig: auth.missingRequiredSecrets
+        error: "kanban.cards is not configured.",
+        missingConfig: missingRequiredConfig
       });
       return;
     }
