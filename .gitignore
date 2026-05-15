@@ -11,6 +11,7 @@ public/robots.txt
 .vercel/
 .demo/
 data/*.json
+data/*.jsonl
 coverage/
 .playwright-cli/
 npm-debug.log*

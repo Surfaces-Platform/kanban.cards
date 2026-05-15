@@ -18,6 +18,7 @@ import {
   touchWorkItem
 } from "./state-store";
 import { createAgentTokenStore } from "./agent-token-store";
+import { createEventStore } from "./event-store";
 import type {
   AgentInstruction,
   AgentSpec,
@@ -25,8 +26,10 @@ import type {
   Board,
   CommentKind,
   CommentStatus,
+  EventStore,
   PostgresOptions,
   StateStore,
+  WorkspaceEvent,
   WorkItem,
   WorkItemComment,
   WorkspaceState
@@ -64,7 +67,11 @@ interface CreateAppOptions extends PostgresOptions {
   basicPassword?: string;
   store?: StateStore;
   tokenStore?: AgentTokenStore;
+  eventStore?: EventStore;
   tokenPool?: PostgresOptions["pool"];
+  eventPool?: PostgresOptions["pool"];
+  eventDataPath?: string;
+  eventTableName?: string;
   host?: string;
   port?: string | number;
 }
@@ -88,6 +95,9 @@ type AsyncHandler = (req: Request, res: Response, next: NextFunction) => unknown
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 4317;
 const PRODUCT_NAME = "kanban.cards";
+const SSE_HEARTBEAT_MS = 25_000;
+const SSE_POLL_MS = 1_000;
+const SSE_BATCH_LIMIT = 200;
 const FALLBACK_INDEX_HTML = `<!doctype html>
 <html lang="en">
 <head>
@@ -195,6 +205,14 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     pool: options.tokenPool,
     ssl: options.ssl
   });
+  const eventStore = options.eventStore || createEventStore({
+    dataPath: options.eventDataPath || path.join(path.dirname(dataPath), "kanban-events.jsonl"),
+    connectionString,
+    pool: options.eventPool || options.pool,
+    ssl: options.ssl,
+    tableName: options.eventTableName
+  });
+  const eventSubscribers = new Set<() => void>();
   const app = express();
 
   app.disable("x-powered-by");
@@ -208,6 +226,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       storage: store.kind,
       dataPath: store.kind === "file" ? store.path : undefined,
       tokenStorage: tokenStore.kind,
+      eventStorage: eventStore.kind,
       authRequired: auth.accessAuthRequired,
       writeAuthRequired: !auth.localWriteOpen,
       missingConfig: missingRequiredConfig
@@ -228,7 +247,14 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
   }));
 
   app.put("/api/state", requireAdminAuth(), asyncHandler(async (req, res) => {
-    res.json(await store.write(req.body));
+    const saved = await store.write(req.body);
+    await publishWorkspaceEvent(null, "workspace_saved");
+    res.json(saved);
+  }));
+
+  app.get("/api/events", asyncHandler(async (req, res) => {
+    if (isAgentAuth(req)) throw httpError(403, "Agent tokens cannot subscribe to workspace events.");
+    await streamWorkspaceEvents(req, res);
   }));
 
   app.get("/api/boards", asyncHandler(async (req, res) => {
@@ -298,6 +324,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       agentId: agent.id,
       label: req.body?.label
     });
+    await publishWorkspaceEvent(board.id, "agent_token_created");
     res.status(201).json({
       ...created.tokenRecord,
       token: created.token
@@ -320,6 +347,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     if (!board) throw httpError(404, "Board not found.");
     const tokenRecord = await tokenStore.revoke(board.id, tokenId);
     if (!tokenRecord) throw httpError(404, "Token not found.");
+    await publishWorkspaceEvent(board.id, "agent_token_revoked");
     res.json(tokenRecord);
   }));
 
@@ -330,6 +358,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       state.activeBoardId = board.id;
       return board;
     });
+    await publishWorkspaceEvent(result.id, "board_created");
     res.status(201).json(result);
   }));
 
@@ -348,6 +377,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       touchBoard(board);
       return board;
     });
+    await publishWorkspaceEvent(result.id, "board_updated");
     res.json(result);
   }));
 
@@ -368,6 +398,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       touchBoard(board);
       return item;
     });
+    await publishWorkspaceEvent(boardId, "card_created");
     res.status(201).json(result);
   }));
 
@@ -391,6 +422,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       touchBoard(board);
       return item;
     });
+    await publishWorkspaceEvent(boardId, "card_updated");
     res.json(result);
   }));
 
@@ -414,6 +446,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       touchBoard(board);
       return comment;
     });
+    await publishWorkspaceEvent(boardId, "comment_created");
     res.status(201).json(result);
   }));
 
@@ -437,6 +470,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       touchBoard(board);
       return comment;
     });
+    await publishWorkspaceEvent(boardId, "comment_updated");
     res.json(result);
   }));
 
@@ -453,6 +487,106 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
   app.use(errorHandler);
 
   return app;
+
+  async function publishWorkspaceEvent(boardId: string | null, reason: string): Promise<WorkspaceEvent> {
+    const event = await eventStore.append({
+      type: "workspace_changed",
+      boardId,
+      payload: {
+        reason,
+        updatedAt: new Date().toISOString()
+      }
+    });
+    notifyEventSubscribers(eventSubscribers);
+    return event;
+  }
+
+  async function streamWorkspaceEvents(req: Request, res: Response): Promise<void> {
+    await eventStore.ensureReady();
+
+    res.status(200);
+    res.set({
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no"
+    });
+    res.flushHeaders?.();
+    res.write(`event: connected\ndata: ${JSON.stringify({ ok: true })}\n\n`);
+
+    const requestedCursor = eventCursor(req);
+    let cursor = requestedCursor ?? (await eventStore.latestId());
+    let closed = false;
+    let sending = false;
+    let sendAgain = false;
+
+    const sendAvailableEvents = async (): Promise<void> => {
+      if (closed) return;
+      if (sending) {
+        sendAgain = true;
+        return;
+      }
+
+      sending = true;
+      try {
+        do {
+          sendAgain = false;
+          const events = await eventStore.listSince(cursor, SSE_BATCH_LIMIT);
+          for (const event of events) {
+            if (closed) return;
+            writeSseEvent(res, event);
+            cursor = event.id;
+          }
+        } while (sendAgain);
+      } finally {
+        sending = false;
+      }
+    };
+
+    const notify = (): void => {
+      void sendAvailableEvents().catch(() => cleanup());
+    };
+    const heartbeat = windowlessSetInterval(() => {
+      if (!closed) res.write(`: heartbeat ${new Date().toISOString()}\n\n`);
+    }, SSE_HEARTBEAT_MS);
+    const poll = windowlessSetInterval(notify, SSE_POLL_MS);
+
+    eventSubscribers.add(notify);
+    const cleanup = (): void => {
+      if (closed) return;
+      closed = true;
+      eventSubscribers.delete(notify);
+      clearInterval(heartbeat);
+      clearInterval(poll);
+      res.end();
+    };
+
+    req.on("close", cleanup);
+    res.on("error", cleanup);
+    await sendAvailableEvents();
+  }
+}
+
+function windowlessSetInterval(handler: () => void, timeout: number): NodeJS.Timeout {
+  return setInterval(handler, timeout);
+}
+
+function notifyEventSubscribers(subscribers: Set<() => void>): void {
+  for (const subscriber of [...subscribers]) subscriber();
+}
+
+function eventCursor(req: Request): string | null {
+  const headerCursor = req.get("last-event-id");
+  const queryCursor = req.query.since;
+  const value = headerCursor || (Array.isArray(queryCursor) ? queryCursor[0] : queryCursor);
+  const text = String(value || "").trim();
+  return /^\d+$/.test(text) ? text : null;
+}
+
+function writeSseEvent(res: Response, event: WorkspaceEvent): void {
+  res.write(`id: ${event.id}\n`);
+  res.write(`event: ${event.type}\n`);
+  res.write(`data: ${JSON.stringify(event)}\n\n`);
 }
 
 function applyWorkItemPatch(board: Board, item: WorkItem, patch: UnknownRecord): void {

@@ -14,6 +14,14 @@ type FormControlElement = HTMLInputElement | HTMLSelectElement | HTMLTextAreaEle
 type TemplateLike = Omit<BoardTemplate, "createdAt"> & { createdAt?: string; builtIn: boolean };
 type CreatedAgentTokenPayload = PublicTokenRecord & { token?: string };
 
+interface LiveWorkspaceEvent {
+  id: string;
+  type: "workspace_changed";
+  boardId: string | null;
+  payload: AnyRecord;
+  createdAt: string;
+}
+
 const API_BASE_URL = window.KANBAN_CARDS_API_BASE_URL || window.INSTRUCT_API_BASE_URL || "/api";
 const API_TOKEN = window.KANBAN_CARDS_API_TOKEN || window.INSTRUCT_API_TOKEN || "";
 const POLL_INTERVAL_MS = 5000;
@@ -61,6 +69,10 @@ let apiOnline = false;
 let saveQueue: Promise<unknown> = Promise.resolve();
 let lastPersistedState = "";
 let apiWarningShown = false;
+let eventSource: EventSource | null = null;
+let pendingRemoteRefresh = false;
+let pendingRemoteRefreshToastShown = false;
+let remoteRefreshInFlight = false;
 
 const boardCanvas = document.querySelector("#board-canvas") as HTMLElement;
 const inspectorPanel = document.querySelector("#inspector-panel") as HTMLElement;
@@ -324,10 +336,86 @@ function apiHeaders(includeContentType: boolean): HeadersInit {
   return headers;
 }
 
+function liveEventsUrl(): string {
+  return new URL(`${API_BASE_URL.replace(/\/$/, "")}/events`, window.location.origin).toString();
+}
+
+function startLiveUpdates(): void {
+  if (typeof EventSource === "undefined") return;
+  if (eventSource) eventSource.close();
+
+  eventSource = new EventSource(liveEventsUrl(), { withCredentials: true });
+  eventSource.addEventListener("open", () => {
+    apiOnline = true;
+  });
+  eventSource.addEventListener("workspace_changed", (event) => {
+    handleWorkspaceChangedEvent(event as MessageEvent<string>);
+  });
+  eventSource.addEventListener("error", () => {
+    apiOnline = false;
+  });
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") void applyPendingRemoteRefresh();
+  });
+}
+
+function handleWorkspaceChangedEvent(event: MessageEvent<string>): void {
+  const payload = parseLiveEvent(event.data);
+  if (payload?.boardId && payload.boardId !== state.activeBoardId) return;
+  pendingRemoteRefresh = true;
+  if (hasLocalEditingState()) {
+    showPendingRemoteRefreshToast();
+    return;
+  }
+  void applyPendingRemoteRefresh();
+}
+
+function parseLiveEvent(raw: string): LiveWorkspaceEvent | null {
+  try {
+    const parsed = JSON.parse(raw) as Partial<LiveWorkspaceEvent>;
+    if (parsed.type !== "workspace_changed" || !parsed.id) return null;
+    return {
+      id: String(parsed.id),
+      type: "workspace_changed",
+      boardId: parsed.boardId ? String(parsed.boardId) : null,
+      payload: parsed.payload && typeof parsed.payload === "object" ? parsed.payload as AnyRecord : {},
+      createdAt: String(parsed.createdAt || "")
+    };
+  } catch (_error) {
+    return null;
+  }
+}
+
+function showPendingRemoteRefreshToast(): void {
+  if (pendingRemoteRefreshToastShown) return;
+  pendingRemoteRefreshToastShown = true;
+  showToast("Board updated. Latest work appears after you close this panel.");
+}
+
+async function applyPendingRemoteRefresh(): Promise<void> {
+  if (!pendingRemoteRefresh || remoteRefreshInFlight) return;
+  if (document.visibilityState !== "visible" || hasLocalEditingState()) return;
+
+  remoteRefreshInFlight = true;
+  pendingRemoteRefresh = false;
+  pendingRemoteRefreshToastShown = false;
+  try {
+    await saveQueue.catch(() => undefined);
+    await refreshStateFromApi();
+  } finally {
+    remoteRefreshInFlight = false;
+  }
+}
+
 function startPolling(): void {
   window.setInterval(() => {
     if (document.visibilityState !== "visible") return;
     if (hasLocalEditingState()) return;
+    if (pendingRemoteRefresh) {
+      void applyPendingRemoteRefresh();
+      return;
+    }
     refreshStateFromApi();
   }, POLL_INTERVAL_MS);
 }
@@ -414,6 +502,7 @@ function render(): void {
   renderBoard(board);
   renderInspector();
   renderModals(board);
+  if (pendingRemoteRefresh && !hasLocalEditingState()) window.setTimeout(() => void applyPendingRemoteRefresh(), 0);
 }
 
 function renderTopbar(board: Board): void {
@@ -2165,6 +2254,7 @@ async function initialize() {
   state = await loadState();
   render();
   startPolling();
+  startLiveUpdates();
 }
 
 initialize();

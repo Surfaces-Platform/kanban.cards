@@ -127,6 +127,22 @@ export interface AgentTokenCreateInput {
   label?: unknown;
 }
 
+export type WorkspaceEventType = "workspace_changed";
+
+export interface WorkspaceEvent {
+  id: string;
+  type: WorkspaceEventType;
+  boardId: Nullable<string>;
+  payload: JsonObject;
+  createdAt: string;
+}
+
+export interface WorkspaceEventCreateInput {
+  type: WorkspaceEventType;
+  boardId?: Nullable<string>;
+  payload?: JsonObject;
+}
+
 export interface StateStore {
   kind: "file" | "postgres";
   path: string;
@@ -145,6 +161,15 @@ export interface AgentTokenStore {
   revoke(boardId: string, tokenId: string): Promise<PublicTokenRecord | null>;
 }
 
+export interface EventStore {
+  kind: "file" | "postgres";
+  path: string;
+  ensureReady(): Promise<void>;
+  append(input: WorkspaceEventCreateInput): Promise<WorkspaceEvent>;
+  listSince(sinceId: string | null, limit?: number): Promise<WorkspaceEvent[]>;
+  latestId(): Promise<string | null>;
+}
+
 export interface PostgresOptions {
   connectionString?: string;
   tableName?: string;
@@ -158,6 +183,10 @@ export interface StateStoreOptions extends PostgresOptions {
 }
 
 export interface AgentTokenStoreOptions extends PostgresOptions {
+  dataPath?: string;
+}
+
+export interface EventStoreOptions extends PostgresOptions {
   dataPath?: string;
 }
 
