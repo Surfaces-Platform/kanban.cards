@@ -1,0 +1,4 @@
+agent:
+  display_name: "kanban.cards"
+  short_description: "Use the kanban.cards board API"
+  default_prompt: "Use the kanban.cards API to find assigned cards, report progress, and respond to reviewer instructions."

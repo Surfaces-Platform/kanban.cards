@@ -1,0 +1,11 @@
+node_modules
+.env
+.env.*
+.git
+.DS_Store
+data/*.json
+pulsar-consulting-framework
+discovery
+downloads
+lesson-brief
+review-checklist
