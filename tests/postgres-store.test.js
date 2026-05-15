@@ -125,7 +125,7 @@ class FakeTokenPool {
         revoked_at: null
       };
       this.tokens.push(row);
-      return { rows: [row] };
+      return { rows: [publicTokenRow(row)] };
     }
 
     if (normalizedSql.startsWith("SELECT ID")) {
@@ -133,6 +133,7 @@ class FakeTokenPool {
         rows: this.tokens
           .filter((token) => token.board_id === args[0] && !token.revoked_at)
           .sort((left, right) => right.created_at - left.created_at)
+          .map(publicTokenRow)
       };
     }
 
@@ -140,16 +141,29 @@ class FakeTokenPool {
       const token = this.tokens.find((candidate) => candidate.token_hash === args[0] && !candidate.revoked_at);
       if (!token) return { rows: [] };
       token.last_used_at = new Date();
-      return { rows: [token] };
+      return { rows: [publicTokenRow(token)] };
     }
 
     if (normalizedSql.startsWith("UPDATE") && normalizedSql.includes("SET REVOKED_AT")) {
       const token = this.tokens.find((candidate) => candidate.board_id === args[0] && candidate.id === args[1]);
       if (!token) return { rows: [] };
       token.revoked_at = token.revoked_at || new Date();
-      return { rows: [token] };
+      return { rows: [publicTokenRow(token)] };
     }
 
     throw new Error(`Unexpected SQL: ${sql}`);
   }
+}
+
+function publicTokenRow(row) {
+  return {
+    id: row.id,
+    board_id: row.board_id,
+    agent_id: row.agent_id,
+    label: row.label,
+    last4: row.last4,
+    created_at: row.created_at,
+    last_used_at: row.last_used_at,
+    revoked_at: row.revoked_at
+  };
 }

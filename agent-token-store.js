@@ -240,17 +240,22 @@ function normalizeTokenRecord(record) {
 }
 
 function toPublicTokenRecord(record) {
-  const normalized = normalizeTokenRecord(record);
-  if (!normalized) return null;
+  if (!record || typeof record !== "object") return null;
+  const id = String(record.id || "").trim();
+  const boardId = String(record.boardId || record.board_id || "").trim();
+  const agentId = String(record.agentId || record.agent_id || "").trim();
+  const last4 = String(record.last4 || "").trim();
+  if (!id || !boardId || !agentId || !last4) return null;
+
   return {
-    id: normalized.id,
-    boardId: normalized.boardId,
-    agentId: normalized.agentId,
-    label: normalized.label,
-    last4: normalized.last4,
-    createdAt: normalized.createdAt,
-    lastUsedAt: normalized.lastUsedAt,
-    revokedAt: normalized.revokedAt
+    id,
+    boardId,
+    agentId,
+    label: sanitizeLabel(record.label),
+    last4,
+    createdAt: dateToIso(record.createdAt || record.created_at) || new Date().toISOString(),
+    lastUsedAt: dateToIso(record.lastUsedAt || record.last_used_at),
+    revokedAt: dateToIso(record.revokedAt || record.revoked_at)
   };
 }
 
