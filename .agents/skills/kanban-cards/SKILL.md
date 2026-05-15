@@ -11,18 +11,25 @@ Use the kanban.cards API as the source of truth. Do not edit local state files o
 
 Default connection:
 - `KANBAN_CARDS_API_BASE_URL`, default `http://127.0.0.1:4317/api`
-- `KANBAN_CARDS_API_TOKEN`, required for agent writes
+- `KANBAN_CARDS_API_TOKEN`, optional bearer token override for agent writes
+- `KANBAN_CARDS_BOARD_ID` and `KANBAN_CARDS_AGENT_ID`, optional board and agent defaults
 
-Legacy local aliases `INSTRUCT_API_BASE_URL` and `INSTRUCT_API_TOKEN` are accepted temporarily.
+The preferred setup path is a scoped token created from the kanban.cards UI:
+
+```bash
+node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs setup --url https://kanban.cards/api --token <token> --board <board-id> --agent <agent-id>
+```
+
+The helper reads env vars first, then `~/.kanban-cards/config.json`. Legacy local aliases `INSTRUCT_API_BASE_URL` and `INSTRUCT_API_TOKEN` are accepted temporarily.
 
 For endpoint details, read `references/api.md` when needed.
 
 ## Workflow
 
-1. Read board state with `GET /state` or list boards with the helper script.
+1. Read your session with `GET /agent/session` or list your scoped board with the helper script.
 2. Inspect the active board's `agentSpecs` to find your stable agent `id`, role, lane responsibilities, instructions, and skill notes.
 3. Find your cards by matching `ownerAgentId` or `reviewerAgentId` to your agent spec `id`, then by title or board context.
-4. Check reviewer instructions with `GET /agent/instructions?agentId=<id>`.
+4. Check reviewer instructions with `GET /agent/instructions`; scoped tokens are automatically limited to their own agent and board.
 5. Post progress as a `progress` comment before or after substantive work.
 6. Acknowledge or resolve human instructions by patching the relevant comment status.
 7. Move a card only when the current lane's output is genuinely ready for the next lane.
@@ -33,13 +40,14 @@ Use `scripts/kanban-cards-client.mjs` for common operations:
 
 ```bash
 node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs boards
-node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs instructions --agent agent-a
-node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs create-card --board <board-id> --title "Draft brief" --lane <lane-id> --owner agent-a
-node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs comment --board <board-id> --item <card-id> --kind progress --text "Draft is ready for review."
-node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs move-card --board <board-id> --item <card-id> --lane <lane-id>
+node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs session
+node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs instructions
+node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs create-card --title "Draft brief" --lane <lane-id>
+node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs comment --item <card-id> --kind progress --text "Draft is ready for review."
+node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs move-card --item <card-id> --lane <lane-id>
 ```
 
-The helper sends `Authorization: Bearer $KANBAN_CARDS_API_TOKEN` for mutating commands.
+The helper sends `Authorization: Bearer <token>` when a token is configured.
 
 ## Comment Guidance
 

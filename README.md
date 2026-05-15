@@ -15,7 +15,7 @@ The local server defaults to `http://127.0.0.1:4317` and stores state in `data/k
 
 Production requires:
 
-- `KANBAN_CARDS_API_TOKEN`: bearer token for agent writes
+- `KANBAN_CARDS_API_TOKEN`: admin compatibility bearer token for emergencies and tests
 - `KANBAN_CARDS_BASIC_USER`: private-beta UI username
 - `KANBAN_CARDS_BASIC_PASSWORD`: private-beta UI password
 - `KANBAN_CARDS_DATABASE_URL`, `POSTGRES_URL`, or `DATABASE_URL`: Postgres connection string
@@ -35,6 +35,18 @@ Initialize the workspace table after the Postgres env vars are available:
 ```bash
 npm run db:init
 ```
+
+`db:init` initializes both the workspace table and the `agent_access_tokens` table.
+
+## Local Agent Access
+
+Normal local agents should use scoped tokens generated from the private UI instead of the admin bearer token. In Edit flow, open an existing board agent and choose `Connect`; kanban.cards returns a one-time setup command:
+
+```bash
+node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs setup --url https://kanban.cards/api --token <token> --board <board-id> --agent <agent-id>
+```
+
+The helper writes `~/.kanban-cards/config.json` with `0600` permissions. Runtime precedence is environment variables first, then the config file, then local defaults.
 
 ## Checks
 

@@ -2,24 +2,48 @@
 
 Base URL defaults to `http://127.0.0.1:4317/api`.
 
-Agent writes require:
+Admin compatibility writes use:
 
 ```http
 Authorization: Bearer $KANBAN_CARDS_API_TOKEN
 Content-Type: application/json
 ```
 
+Normal local agents should use board+agent-scoped bearer tokens generated from the private UI. Scoped tokens can read their board/session/instructions, create cards assigned to that agent, and update/move/comment on cards where that agent is the owner or reviewer.
+
 Private-beta browser access may also use HTTP Basic Auth for the same-origin UI and API.
 
 ## Reads
 
 - `GET /health`
-- `GET /state`
+- `GET /state` admin/full workspace only
 - `GET /boards`
 - `GET /boards/:boardId`
 - `GET /agent/instructions?agentId=<agent-id>`
+- `GET /agent/session`
 
 `/agent/instructions` returns open or acknowledged `instruction`, `question`, and `change_request` comments on cards assigned to the agent as owner or reviewer. Omit `agentId` to return all open instructions.
+
+With a scoped agent token, `agentId` is ignored and the response is limited to that token's board and agent.
+
+## Agent Token Management
+
+These endpoints require admin auth through Basic Auth or `KANBAN_CARDS_API_TOKEN`:
+
+- `POST /boards/:boardId/agent-tokens`
+- `GET /boards/:boardId/agent-tokens`
+- `DELETE /boards/:boardId/agent-tokens/:tokenId`
+
+Create payload:
+
+```json
+{
+  "agentId": "agent-a",
+  "label": "Agent A laptop"
+}
+```
+
+The create response returns `token` once. List and revoke responses only include metadata: `id`, `boardId`, `agentId`, `label`, `last4`, `createdAt`, `lastUsedAt`, and `revokedAt`.
 
 ## Writes
 

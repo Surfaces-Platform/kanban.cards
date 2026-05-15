@@ -35,6 +35,12 @@ let editingTemplateId = null;
 let workItemDialogOpen = false;
 let flowActionsMenuOpen = false;
 let deleteBoardDialogOpen = false;
+let agentConnectDialogOpen = false;
+let agentConnectAgentId = null;
+let agentConnectTokens = [];
+let agentConnectToken = null;
+let agentConnectLoading = false;
+let agentConnectError = "";
 let apiOnline = false;
 let saveQueue = Promise.resolve();
 let lastPersistedState = "";
@@ -329,7 +335,7 @@ async function refreshStateFromApi() {
 
 function hasLocalEditingState() {
   const board = getActiveBoard();
-  return Boolean(board.isEditingFlow || board.configDraft || templateFormOpen || editingTemplateId || workItemDialogOpen || deleteBoardDialogOpen);
+  return Boolean(board.isEditingFlow || board.configDraft || templateFormOpen || editingTemplateId || workItemDialogOpen || deleteBoardDialogOpen || agentConnectDialogOpen);
 }
 
 function showApiWarning(message) {
@@ -742,16 +748,21 @@ function renderAgentSetup(draft) {
 }
 
 function renderAgentEditor(agent, agentIndex, draft) {
+  const board = getActiveBoard();
   const laneTags = draft.lanes
     .filter((lane) => agent.laneIds.includes(lane.id))
     .map((lane) => lane.title)
     .join(", ");
+  const canConnect = Boolean(board.agentSpecs?.some((candidate) => candidate.id === agent.id));
 
   return `
     <article class="agent-editor" data-agent-index="${agentIndex}">
       <div class="agent-editor-header">
         <span class="agent-badge">${escapeHtml(agent.id)}</span>
-        <button class="icon-action danger" type="button" data-action="remove-agent" aria-label="Remove ${escapeAttribute(agent.name)}">x</button>
+        <div class="agent-editor-actions">
+          <button class="secondary-button small" type="button" data-action="connect-agent" data-agent-id="${escapeAttribute(agent.id)}" ${canConnect ? "" : "disabled"} title="${canConnect ? "Create a local-agent token" : "Apply this agent before connecting it"}">Connect</button>
+          <button class="icon-action danger" type="button" data-action="remove-agent" aria-label="Remove ${escapeAttribute(agent.name)}">x</button>
+        </div>
       </div>
       ${renderFieldGrid(`
         ${renderTextField({ label: "Agent name", value: agent.name, attributes: { "data-agent-field": "name" } })}
@@ -929,11 +940,83 @@ function renderModals(board) {
   if (!modalRoot) return;
   if (workItemDialogOpen) {
     modalRoot.innerHTML = renderCreateWorkItemDialog(board);
+  } else if (agentConnectDialogOpen) {
+    modalRoot.innerHTML = renderConnectAgentDialog(board);
   } else if (deleteBoardDialogOpen) {
     modalRoot.innerHTML = renderDeleteBoardDialog(board);
   } else {
     modalRoot.innerHTML = "";
   }
+}
+
+function renderConnectAgentDialog(board) {
+  const agent = board.agentSpecs?.find((candidate) => candidate.id === agentConnectAgentId);
+  if (!agent) {
+    return `
+      <div class="modal-backdrop" data-action="close-modal">
+        <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="connect-agent-title">
+          <div class="modal-header">
+            <div>
+              <p class="eyebrow">Agent access</p>
+              <h2 id="connect-agent-title">Agent not found</h2>
+            </div>
+            <button class="icon-action" type="button" data-action="cancel-agent-connect" aria-label="Close agent connection">x</button>
+          </div>
+          <p class="modal-copy">Apply the board flow before creating local-agent access.</p>
+        </section>
+      </div>
+    `;
+  }
+
+  const command = agentConnectToken?.token ? buildAgentSetupCommand(board, agent, agentConnectToken.token) : "";
+  const tokenRows = agentConnectTokens.length
+    ? agentConnectTokens.map((tokenRecord) => `
+      <li class="token-row">
+        <div>
+          <strong>${escapeHtml(tokenRecord.label || "Local agent")}</strong>
+          <span>ending ${escapeHtml(tokenRecord.last4)}</span>
+          <time datetime="${escapeAttribute(tokenRecord.createdAt || "")}">${escapeHtml(formatDateTime(tokenRecord.createdAt))}</time>
+        </div>
+        <button class="secondary-button small danger-button" type="button" data-action="revoke-agent-token" data-token-id="${escapeAttribute(tokenRecord.id)}">Revoke</button>
+      </li>
+    `).join("")
+    : '<li class="empty-note">No active tokens</li>';
+
+  return `
+    <div class="modal-backdrop" data-action="close-modal">
+      <section class="modal-card agent-connect-modal" role="dialog" aria-modal="true" aria-labelledby="connect-agent-title" aria-describedby="connect-agent-description">
+        <div class="modal-header">
+          <div>
+            <p class="eyebrow">Agent access</p>
+            <h2 id="connect-agent-title">Connect ${escapeHtml(agent.name)}</h2>
+          </div>
+          <button class="icon-action" type="button" data-action="cancel-agent-connect" aria-label="Close agent connection">x</button>
+        </div>
+        <p class="modal-copy" id="connect-agent-description">${escapeHtml(agent.id)} receives board-scoped API access for assigned cards.</p>
+        ${agentConnectError ? `<p class="flow-message warning">${escapeHtml(agentConnectError)}</p>` : ""}
+        <form class="modal-form" data-agent-token-form>
+          ${renderTextField({ label: "Token label", value: `${agent.name} local access`, attributes: { "data-agent-token-label": true } })}
+          <div class="modal-actions">
+            <button class="primary-button" type="button" data-action="create-agent-token" ${agentConnectLoading ? "disabled" : ""}>Create token</button>
+          </div>
+        </form>
+        ${command ? `
+          <div class="setup-command">
+            <span class="meta-label">Setup command</span>
+            ${renderTextArea({ value: command, rows: 4, attributes: { readonly: true, "data-agent-setup-command": true }, ariaLabel: "Agent setup command" })}
+          </div>
+        ` : ""}
+        <div class="token-list-block">
+          <div class="section-heading">
+            <h3>Active tokens</h3>
+          </div>
+          <ul class="token-list">
+            ${tokenRows}
+          </ul>
+        </div>
+      </section>
+    </div>
+  `;
 }
 
 function renderCreateWorkItemDialog(board) {
@@ -1006,6 +1089,7 @@ function createNewBoard() {
   workItemDialogOpen = false;
   flowActionsMenuOpen = false;
   deleteBoardDialogOpen = false;
+  resetAgentConnectDialog();
   saveState();
   render();
 }
@@ -1020,6 +1104,7 @@ function switchBoard(boardId) {
   workItemDialogOpen = false;
   flowActionsMenuOpen = false;
   deleteBoardDialogOpen = false;
+  resetAgentConnectDialog();
   saveState();
   render();
 }
@@ -1047,6 +1132,7 @@ function useTemplate(templateId) {
   workItemDialogOpen = false;
   flowActionsMenuOpen = false;
   deleteBoardDialogOpen = false;
+  resetAgentConnectDialog();
   saveState();
   render();
 }
@@ -1070,6 +1156,7 @@ function openWorkItemDialog() {
 
   workItemDialogOpen = true;
   deleteBoardDialogOpen = false;
+  resetAgentConnectDialog();
   flowActionsMenuOpen = false;
   render();
   modalRoot?.querySelector('[data-work-item-field="title"]')?.focus();
@@ -1078,6 +1165,121 @@ function openWorkItemDialog() {
 function closeWorkItemDialog() {
   workItemDialogOpen = false;
   render();
+}
+
+async function openAgentConnectDialog(agentId) {
+  const board = getActiveBoard();
+  const agent = board.agentSpecs?.find((candidate) => candidate.id === agentId);
+  if (!agent) {
+    showToast("Apply this agent before connecting it.");
+    return;
+  }
+
+  workItemDialogOpen = false;
+  deleteBoardDialogOpen = false;
+  flowActionsMenuOpen = false;
+  agentConnectDialogOpen = true;
+  agentConnectAgentId = agent.id;
+  agentConnectTokens = [];
+  agentConnectToken = null;
+  agentConnectLoading = true;
+  agentConnectError = "";
+  render();
+  await refreshAgentTokens(board.id);
+  modalRoot?.querySelector("[data-agent-token-label]")?.focus();
+}
+
+function resetAgentConnectDialog() {
+  agentConnectDialogOpen = false;
+  agentConnectAgentId = null;
+  agentConnectTokens = [];
+  agentConnectToken = null;
+  agentConnectLoading = false;
+  agentConnectError = "";
+}
+
+function closeAgentConnectDialog() {
+  resetAgentConnectDialog();
+  render();
+}
+
+async function refreshAgentTokens(boardId = getActiveBoard().id) {
+  if (!agentConnectDialogOpen) return;
+  try {
+    const response = await fetch(`${API_BASE_URL}/boards/${encodeURIComponent(boardId)}/agent-tokens`, {
+      headers: apiHeaders(false),
+      credentials: "same-origin"
+    });
+    if (!response.ok) throw new Error(`Token list failed with ${response.status}`);
+    const payload = await response.json();
+    agentConnectTokens = Array.isArray(payload.tokens) ? payload.tokens : [];
+    agentConnectError = "";
+  } catch (error) {
+    agentConnectError = "Could not load active tokens.";
+  } finally {
+    agentConnectLoading = false;
+    render();
+  }
+}
+
+async function createAgentTokenFromForm(action) {
+  const board = getActiveBoard();
+  const agent = board.agentSpecs?.find((candidate) => candidate.id === agentConnectAgentId);
+  if (!agent || agentConnectLoading) return;
+
+  const form = action.closest("[data-agent-token-form]");
+  const label = form?.querySelector("[data-agent-token-label]")?.value.trim() || `${agent.name} local access`;
+  agentConnectLoading = true;
+  agentConnectError = "";
+  render();
+
+  try {
+    const response = await fetch(`${API_BASE_URL}/boards/${encodeURIComponent(board.id)}/agent-tokens`, {
+      method: "POST",
+      headers: apiHeaders(true),
+      credentials: "same-origin",
+      body: JSON.stringify({ agentId: agent.id, label })
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload?.error || `Token creation failed with ${response.status}`);
+    agentConnectToken = payload;
+    await refreshAgentTokens(board.id);
+    showToast("Agent token created.");
+  } catch (error) {
+    agentConnectError = error.message || "Could not create token.";
+    agentConnectLoading = false;
+    render();
+  }
+}
+
+async function revokeAgentToken(tokenId) {
+  const board = getActiveBoard();
+  if (!tokenId || agentConnectLoading) return;
+  agentConnectLoading = true;
+  agentConnectError = "";
+  render();
+
+  try {
+    const response = await fetch(`${API_BASE_URL}/boards/${encodeURIComponent(board.id)}/agent-tokens/${encodeURIComponent(tokenId)}`, {
+      method: "DELETE",
+      headers: apiHeaders(false),
+      credentials: "same-origin"
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload?.error || `Token revoke failed with ${response.status}`);
+    if (agentConnectToken?.id === tokenId) agentConnectToken = null;
+    await refreshAgentTokens(board.id);
+    showToast("Agent token revoked.");
+  } catch (error) {
+    agentConnectError = error.message || "Could not revoke token.";
+    agentConnectLoading = false;
+    render();
+  }
+}
+
+function buildAgentSetupCommand(board, agent, token) {
+  const apiUrl = new URL(API_BASE_URL, window.location.origin).toString().replace(/\/$/, "");
+  return `node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs setup --url ${apiUrl} --token ${token} --board ${board.id} --agent ${agent.id}`;
 }
 
 function createWorkItemFromForm(action) {
@@ -1318,6 +1520,7 @@ function openDeleteBoardDialog() {
   flowActionsMenuOpen = false;
   deleteBoardDialogOpen = true;
   workItemDialogOpen = false;
+  resetAgentConnectDialog();
   render();
   modalRoot?.querySelector("[data-delete-confirm]")?.focus();
 }
@@ -1360,6 +1563,7 @@ function deleteCurrentBoardFromDialog(action) {
 
   deleteBoardDialogOpen = false;
   flowActionsMenuOpen = false;
+  resetAgentConnectDialog();
   templateFormOpen = false;
   editingTemplateId = null;
   flowMessage = "";
@@ -1822,6 +2026,7 @@ boardCanvas.addEventListener("click", (event) => {
     if (action.dataset.action === "save-template") saveCurrentFlowAsTemplate();
     if (action.dataset.action === "add-lane") addLane();
     if (action.dataset.action === "add-agent") addAgent();
+    if (action.dataset.action === "connect-agent") openAgentConnectDialog(action.dataset.agentId);
     if (action.dataset.action === "remove-agent") {
       const agentEditor = action.closest(".agent-editor");
       removeAgent(Number(agentEditor?.dataset.agentIndex));
@@ -1894,10 +2099,14 @@ if (modalRoot) {
     if (action.dataset.action === "close-modal" && event.target === action) {
       workItemDialogOpen = false;
       deleteBoardDialogOpen = false;
+      resetAgentConnectDialog();
       render();
     }
     if (action.dataset.action === "cancel-work-item") closeWorkItemDialog();
     if (action.dataset.action === "create-work-item") createWorkItemFromForm(action);
+    if (action.dataset.action === "cancel-agent-connect") closeAgentConnectDialog();
+    if (action.dataset.action === "create-agent-token") createAgentTokenFromForm(action);
+    if (action.dataset.action === "revoke-agent-token") revokeAgentToken(action.dataset.tokenId);
     if (action.dataset.action === "cancel-delete-board") closeDeleteBoardDialog();
     if (action.dataset.action === "confirm-delete-board") deleteCurrentBoardFromDialog(action);
   });
@@ -1912,9 +2121,10 @@ if (modalRoot) {
 
   modalRoot.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
-    if (!workItemDialogOpen && !deleteBoardDialogOpen) return;
+    if (!workItemDialogOpen && !deleteBoardDialogOpen && !agentConnectDialogOpen) return;
     workItemDialogOpen = false;
     deleteBoardDialogOpen = false;
+    resetAgentConnectDialog();
     render();
   });
 }

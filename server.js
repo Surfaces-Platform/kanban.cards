@@ -17,6 +17,7 @@ const {
   touchBoard,
   touchWorkItem
 } = require("./state-store");
+const { createAgentTokenStore } = require("./agent-token-store");
 
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 4317;
@@ -122,6 +123,12 @@ function createApp(options = {}) {
     pool: options.pool,
     ssl: options.ssl
   });
+  const tokenStore = options.tokenStore || createAgentTokenStore({
+    dataPath: options.tokenDataPath || path.join(path.dirname(dataPath), "agent-access-tokens.json"),
+    connectionString,
+    pool: options.tokenPool,
+    ssl: options.ssl
+  });
   const app = express();
 
   app.disable("x-powered-by");
@@ -134,13 +141,14 @@ function createApp(options = {}) {
       product: PRODUCT_NAME,
       storage: store.kind,
       dataPath: store.kind === "file" ? store.path : undefined,
+      tokenStorage: tokenStore.kind,
       authRequired: auth.accessAuthRequired,
       writeAuthRequired: !auth.localWriteOpen,
       missingConfig: missingRequiredConfig
     });
   });
 
-  app.use(requireAccessAuth(auth, missingRequiredConfig));
+  app.use(requireAccessAuth(auth, tokenStore, missingRequiredConfig));
 
   app.get("/", serveIndex(staticDir));
   app.get("/index.html", serveIndex(staticDir));
@@ -148,20 +156,28 @@ function createApp(options = {}) {
   app.get("/styles.css", sendStaticFile(staticDir, "styles.css", "text/css; charset=utf-8"));
   app.get("/robots.txt", sendStaticFile(staticDir, "robots.txt", "text/plain; charset=utf-8"));
 
-  app.get("/api/state", asyncHandler(async (_req, res) => {
+  app.get("/api/state", asyncHandler(async (req, res) => {
+    if (isAgentAuth(req)) throw httpError(403, "Agent tokens cannot read full workspace state.");
     res.json(await store.read());
   }));
 
-  app.put("/api/state", requireWriteAuth(auth), asyncHandler(async (req, res) => {
+  app.put("/api/state", requireAdminAuth(), asyncHandler(async (req, res) => {
     res.json(await store.write(req.body));
   }));
 
-  app.get("/api/boards", asyncHandler(async (_req, res) => {
+  app.get("/api/boards", asyncHandler(async (req, res) => {
     const state = await store.read();
+    if (isAgentAuth(req)) {
+      const board = findBoard(state, req.kanbanAuth.boardId);
+      if (!board) throw httpError(404, "Board not found.");
+      res.json({ boards: [board], activeBoardId: board.id });
+      return;
+    }
     res.json({ boards: state.boards, activeBoardId: state.activeBoardId });
   }));
 
   app.get("/api/boards/:boardId", asyncHandler(async (req, res) => {
+    requireBoardAccess(req, req.params.boardId);
     const state = await store.read();
     const board = findBoard(state, req.params.boardId);
     if (!board) throw httpError(404, "Board not found.");
@@ -170,10 +186,73 @@ function createApp(options = {}) {
 
   app.get("/api/agent/instructions", asyncHandler(async (req, res) => {
     const state = await store.read();
+    if (isAgentAuth(req)) {
+      res.json({ instructions: collectAgentInstructions(state, req.kanbanAuth.agentId, req.kanbanAuth.boardId) });
+      return;
+    }
     res.json({ instructions: collectAgentInstructions(state, req.query.agentId) });
   }));
 
-  app.post("/api/boards", requireWriteAuth(auth), asyncHandler(async (req, res) => {
+  app.get("/api/agent/session", asyncHandler(async (req, res) => {
+    if (isAdminAuth(req)) {
+      res.json({ mode: "admin" });
+      return;
+    }
+    if (!isAgentAuth(req)) throw httpError(401, "Agent authentication required.");
+
+    const state = await store.read();
+    const board = findBoard(state, req.kanbanAuth.boardId);
+    if (!board) throw httpError(404, "Board not found.");
+    const agent = findAgentSpec(board, req.kanbanAuth.agentId);
+    if (!agent) throw httpError(404, "Agent not found.");
+    res.json({
+      mode: "agent",
+      board,
+      agent,
+      token: {
+        id: req.kanbanAuth.tokenId,
+        last4: req.kanbanAuth.last4,
+        lastUsedAt: req.kanbanAuth.lastUsedAt
+      }
+    });
+  }));
+
+  app.post("/api/boards/:boardId/agent-tokens", requireAdminAuth(), asyncHandler(async (req, res) => {
+    const state = await store.read();
+    const board = findBoard(state, req.params.boardId);
+    if (!board) throw httpError(404, "Board not found.");
+    const agentId = nullableString(req.body?.agentId);
+    if (!agentId) throw httpError(400, "agentId is required.");
+    const agent = findAgentSpec(board, agentId);
+    if (!agent) throw httpError(404, "Agent not found on this board.");
+    const created = await tokenStore.create({
+      boardId: board.id,
+      agentId: agent.id,
+      label: req.body?.label
+    });
+    res.status(201).json({
+      ...created.tokenRecord,
+      token: created.token
+    });
+  }));
+
+  app.get("/api/boards/:boardId/agent-tokens", requireAdminAuth(), asyncHandler(async (req, res) => {
+    const state = await store.read();
+    const board = findBoard(state, req.params.boardId);
+    if (!board) throw httpError(404, "Board not found.");
+    res.json({ tokens: await tokenStore.list(board.id) });
+  }));
+
+  app.delete("/api/boards/:boardId/agent-tokens/:tokenId", requireAdminAuth(), asyncHandler(async (req, res) => {
+    const state = await store.read();
+    const board = findBoard(state, req.params.boardId);
+    if (!board) throw httpError(404, "Board not found.");
+    const tokenRecord = await tokenStore.revoke(board.id, req.params.tokenId);
+    if (!tokenRecord) throw httpError(404, "Token not found.");
+    res.json(tokenRecord);
+  }));
+
+  app.post("/api/boards", requireAdminAuth(), asyncHandler(async (req, res) => {
     const { result } = await store.update((state) => {
       const board = createBoard(req.body || {});
       state.boards.push(board);
@@ -183,7 +262,7 @@ function createApp(options = {}) {
     res.status(201).json(result);
   }));
 
-  app.patch("/api/boards/:boardId", requireWriteAuth(auth), asyncHandler(async (req, res) => {
+  app.patch("/api/boards/:boardId", requireAdminAuth(), asyncHandler(async (req, res) => {
     const { result } = await store.update((state) => {
       const board = findBoard(state, req.params.boardId);
       if (!board) throw httpError(404, "Board not found.");
@@ -200,13 +279,18 @@ function createApp(options = {}) {
     res.json(result);
   }));
 
-  app.post("/api/boards/:boardId/work-items", requireWriteAuth(auth), asyncHandler(async (req, res) => {
+  app.post("/api/boards/:boardId/work-items", requireWriteAuth(), asyncHandler(async (req, res) => {
+    requireBoardAccess(req, req.params.boardId);
     const { result } = await store.update((state) => {
       const board = findBoard(state, req.params.boardId);
       if (!board) throw httpError(404, "Board not found.");
       if (!String(req.body.title || "").trim()) throw httpError(400, "Card title is required.");
-      const item = createWorkItem(req.body, board);
+      const input = isAgentAuth(req) ? withAgentCreateDefaults(req, req.body || {}) : req.body;
+      const item = createWorkItem(input, board);
       if (!item) throw httpError(400, "Card is invalid.");
+      if (isAgentAuth(req) && !isItemAssignedToAgent(item, req.kanbanAuth.agentId)) {
+        throw httpError(403, "Agent tokens can only create cards assigned to that agent.");
+      }
       board.workItems.push(item);
       touchBoard(board);
       return item;
@@ -214,13 +298,20 @@ function createApp(options = {}) {
     res.status(201).json(result);
   }));
 
-  app.patch("/api/boards/:boardId/work-items/:itemId", requireWriteAuth(auth), asyncHandler(async (req, res) => {
+  app.patch("/api/boards/:boardId/work-items/:itemId", requireWriteAuth(), asyncHandler(async (req, res) => {
+    requireBoardAccess(req, req.params.boardId);
     const { result } = await store.update((state) => {
       const board = findBoard(state, req.params.boardId);
       if (!board) throw httpError(404, "Board not found.");
       const item = findWorkItem(board, req.params.itemId);
       if (!item) throw httpError(404, "Card not found.");
+      if (isAgentAuth(req) && !isItemAssignedToAgent(item, req.kanbanAuth.agentId)) {
+        throw httpError(403, "Agent tokens can only update cards assigned to that agent.");
+      }
       applyWorkItemPatch(board, item, req.body || {});
+      if (isAgentAuth(req) && !isItemAssignedToAgent(item, req.kanbanAuth.agentId)) {
+        throw httpError(403, "Agent tokens cannot remove themselves from an assigned card.");
+      }
       touchWorkItem(item);
       touchBoard(board);
       return item;
@@ -228,13 +319,18 @@ function createApp(options = {}) {
     res.json(result);
   }));
 
-  app.post("/api/boards/:boardId/work-items/:itemId/comments", requireWriteAuth(auth), asyncHandler(async (req, res) => {
+  app.post("/api/boards/:boardId/work-items/:itemId/comments", requireWriteAuth(), asyncHandler(async (req, res) => {
+    requireBoardAccess(req, req.params.boardId);
     const { result } = await store.update((state) => {
       const board = findBoard(state, req.params.boardId);
       if (!board) throw httpError(404, "Board not found.");
       const item = findWorkItem(board, req.params.itemId);
       if (!item) throw httpError(404, "Card not found.");
-      const comment = createComment(req.body || {});
+      if (isAgentAuth(req) && !isItemAssignedToAgent(item, req.kanbanAuth.agentId)) {
+        throw httpError(403, "Agent tokens can only comment on cards assigned to that agent.");
+      }
+      const input = isAgentAuth(req) ? { ...(req.body || {}), author: req.kanbanAuth.agentId } : req.body || {};
+      const comment = createComment(input);
       if (!comment) throw httpError(400, "Comment text is required.");
       item.comments.push(comment);
       touchWorkItem(item);
@@ -244,15 +340,19 @@ function createApp(options = {}) {
     res.status(201).json(result);
   }));
 
-  app.patch("/api/boards/:boardId/work-items/:itemId/comments/:commentId", requireWriteAuth(auth), asyncHandler(async (req, res) => {
+  app.patch("/api/boards/:boardId/work-items/:itemId/comments/:commentId", requireWriteAuth(), asyncHandler(async (req, res) => {
+    requireBoardAccess(req, req.params.boardId);
     const { result } = await store.update((state) => {
       const board = findBoard(state, req.params.boardId);
       if (!board) throw httpError(404, "Board not found.");
       const item = findWorkItem(board, req.params.itemId);
       if (!item) throw httpError(404, "Card not found.");
+      if (isAgentAuth(req) && !isItemAssignedToAgent(item, req.kanbanAuth.agentId)) {
+        throw httpError(403, "Agent tokens can only update comments on cards assigned to that agent.");
+      }
       const comment = findComment(item, req.params.commentId);
       if (!comment) throw httpError(404, "Comment not found.");
-      applyCommentPatch(comment, req.body || {});
+      applyCommentPatch(comment, isAgentAuth(req) ? filterAgentCommentPatch(req.body || {}, comment, req.kanbanAuth.agentId) : req.body || {});
       touchWorkItem(item);
       touchBoard(board);
       return comment;
@@ -303,13 +403,15 @@ function applyCommentPatch(comment, patch) {
   comment.updatedAt = new Date().toISOString();
 }
 
-function collectAgentInstructions(state, agentId) {
+function collectAgentInstructions(state, agentId, boardId = null) {
   const normalizedAgentId = nullableString(agentId);
+  const normalizedBoardId = nullableString(boardId);
   const actionableKinds = new Set(["instruction", "question", "change_request"]);
   const actionableStatuses = new Set(["open", "acknowledged"]);
   const instructions = [];
 
   for (const board of state.boards) {
+    if (normalizedBoardId && board.id !== normalizedBoardId) continue;
     for (const item of board.workItems) {
       const matchesAgent = !normalizedAgentId
         || item.ownerAgentId === normalizedAgentId
@@ -335,6 +437,43 @@ function collectAgentInstructions(state, agentId) {
   return instructions;
 }
 
+function findAgentSpec(board, agentId) {
+  return board?.agentSpecs?.find((agent) => agent.id === agentId) || null;
+}
+
+function isItemAssignedToAgent(item, agentId) {
+  return Boolean(agentId && (item?.ownerAgentId === agentId || item?.reviewerAgentId === agentId));
+}
+
+function withAgentCreateDefaults(req, input) {
+  const agentId = req.kanbanAuth.agentId;
+  const next = { ...input };
+  if (!next.ownerAgentId && !next.reviewerAgentId) next.ownerAgentId = agentId;
+  return next;
+}
+
+function filterAgentCommentPatch(patch, comment, agentId) {
+  const filtered = {};
+  if (typeof patch.status === "string") filtered.status = patch.status;
+  if (comment.author === agentId && typeof patch.text === "string") filtered.text = patch.text;
+  if (comment.author === agentId && typeof patch.kind === "string") filtered.kind = patch.kind;
+  return filtered;
+}
+
+function requireBoardAccess(req, boardId) {
+  if (isAgentAuth(req) && req.kanbanAuth.boardId !== boardId) {
+    throw httpError(403, "Agent token is scoped to a different board.");
+  }
+}
+
+function isAdminAuth(req) {
+  return req.kanbanAuth?.kind === "admin";
+}
+
+function isAgentAuth(req) {
+  return req.kanbanAuth?.kind === "agent";
+}
+
 function createAuthConfig(options = {}) {
   const productionLike = options.requireAuth ?? Boolean(process.env.VERCEL || process.env.NODE_ENV === "production");
   const apiToken = options.apiToken ?? process.env.KANBAN_CARDS_API_TOKEN ?? process.env.INSTRUCT_API_TOKEN ?? "";
@@ -358,8 +497,8 @@ function createAuthConfig(options = {}) {
   };
 }
 
-function requireAccessAuth(auth, missingRequiredConfig = auth.missingRequiredSecrets) {
-  return (req, res, next) => {
+function requireAccessAuth(auth, tokenStore, missingRequiredConfig = auth.missingRequiredSecrets) {
+  return asyncHandler(async (req, res, next) => {
     if (missingRequiredConfig.length) {
       res.status(500).json({
         error: "kanban.cards is not configured.",
@@ -368,19 +507,58 @@ function requireAccessAuth(auth, missingRequiredConfig = auth.missingRequiredSec
       return;
     }
 
-    if (!auth.accessAuthRequired || hasValidBearer(req, auth) || hasValidBasic(req, auth)) {
+    req.kanbanAuth = await authenticateRequest(req, auth, tokenStore);
+
+    if (!auth.accessAuthRequired || isAdminAuth(req) || isAgentAuth(req)) {
       next();
       return;
     }
 
     res.set("WWW-Authenticate", 'Basic realm="kanban.cards", charset="UTF-8"');
     res.status(401).json({ error: "Authentication required." });
+  });
+}
+
+async function authenticateRequest(req, auth, tokenStore) {
+  if (hasValidBasic(req, auth)) return { kind: "admin", method: "basic" };
+
+  const bearerToken = getBearerToken(req);
+  if (bearerToken && hasValidAdminBearer(bearerToken, auth)) return { kind: "admin", method: "bearer" };
+
+  if (bearerToken && tokenStore) {
+    const record = await tokenStore.verify(bearerToken);
+    if (record) {
+      return {
+        kind: "agent",
+        method: "bearer",
+        tokenId: record.id,
+        boardId: record.boardId,
+        agentId: record.agentId,
+        last4: record.last4,
+        lastUsedAt: record.lastUsedAt
+      };
+    }
+  }
+
+  if (!auth.accessAuthRequired && auth.localWriteOpen) return { kind: "admin", method: "local-open" };
+  return { kind: "anonymous" };
+}
+
+function requireAdminAuth() {
+  return (req, _res, next) => {
+    if (isAdminAuth(req)) {
+      next();
+      return;
+    }
+
+    if (isAgentAuth(req)) throw httpError(403, "Admin authentication required.");
+    throw httpError(401, "Admin authentication required.");
   };
 }
 
-function requireWriteAuth(auth) {
+function requireWriteAuth() {
   return (req, _res, next) => {
-    if (auth.localWriteOpen || hasValidBearer(req, auth) || hasValidBasic(req, auth)) {
+    if (isAdminAuth(req) || isAgentAuth(req)) {
       next();
       return;
     }
@@ -389,11 +567,15 @@ function requireWriteAuth(auth) {
   };
 }
 
-function hasValidBearer(req, auth) {
+function hasValidAdminBearer(token, auth) {
   if (!auth.apiToken) return false;
+  return safeEqual(token, auth.apiToken);
+}
+
+function getBearerToken(req) {
   const header = req.get("authorization") || "";
   const match = header.match(/^Bearer\s+(.+)$/i);
-  return Boolean(match && safeEqual(match[1], auth.apiToken));
+  return match ? match[1] : "";
 }
 
 function hasValidBasic(req, auth) {

@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node server.js",
     "db:init": "node scripts/init-db.mjs",
-    "check": "node --check app.js && node --check server.js && node --check state-store.js && node --check api/index.js && node --check tests/api.test.js && node --check tests/auth.test.js && node --check tests/postgres-store.test.js && node --check scripts/check-ui-contract.mjs && node --check scripts/init-db.mjs && node --check .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs && node scripts/check-ui-contract.mjs",
+    "check": "node --check app.js && node --check server.js && node --check state-store.js && node --check agent-token-store.js && node --check api/index.js && node --check tests/api.test.js && node --check tests/auth.test.js && node --check tests/agent-access.test.js && node --check tests/cli.test.js && node --check tests/postgres-store.test.js && node --check scripts/check-ui-contract.mjs && node --check scripts/init-db.mjs && node --check .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs && node scripts/check-ui-contract.mjs",
     "test": "node --test tests/*.test.js"
   },
   "dependencies": {
