@@ -386,4 +386,7 @@ if (require.main === module) {
   startServer();
 }
 
-module.exports = { createApp, startServer };
+const defaultApp = createApp();
+module.exports = defaultApp;
+module.exports.createApp = createApp;
+module.exports.startServer = startServer;
