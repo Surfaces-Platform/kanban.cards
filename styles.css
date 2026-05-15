@@ -806,6 +806,7 @@ textarea.form-control {
   align-items: start;
   background: var(--paper);
   border-bottom: 1px solid var(--line);
+  border-radius: 7px 7px 0 0;
   display: grid;
   gap: 8px;
   grid-template-columns: minmax(0, 1fr) auto;
