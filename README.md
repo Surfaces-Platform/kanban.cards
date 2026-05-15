@@ -52,9 +52,9 @@ node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs setup --url htt
 
 The helper writes `~/.kanban-cards/config.json` with `0600` permissions. Runtime precedence is environment variables first, then the config file, then local defaults.
 
-## Local Agent Trip Planner Workflow
+## Local Private Beta Security Release Workflow
 
-Use the local workflow runner to seed an agent trip planner product buildout and execute the scoped agent actions:
+Use the local workflow runner to seed a private beta security release and execute the scoped agent actions:
 
 ```bash
 npm run demo:prepare
@@ -64,14 +64,14 @@ npm run demo:server
 Open `http://127.0.0.1:4317`, then run each visible agent action one at a time:
 
 ```bash
-npm run demo:step -- product-intake
-npm run demo:step -- traveller-research
-npm run demo:step -- designer-flow
-npm run demo:step -- engineer-build
-npm run demo:step -- reviewer-change-request
-npm run demo:step -- engineer-constraints
-npm run demo:step -- reviewer-approval
-npm run demo:step -- product-closeout
+npm run demo:step -- coordinator-intake
+npm run demo:step -- risk-triage
+npm run demo:step -- engineer-plan
+npm run demo:step -- engineer-implementation
+npm run demo:step -- security-change-request
+npm run demo:step -- engineer-evidence
+npm run demo:step -- security-approval
+npm run demo:step -- coordinator-closeout
 npm run demo:verify
 ```
 

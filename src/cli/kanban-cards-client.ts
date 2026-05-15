@@ -97,15 +97,44 @@ async function run(action: string | undefined, opts: CliOptions, context: Runtim
     const itemId = String(opts.item);
     const body: Record<string, unknown> = {};
     for (const key of ["title", "summary", "owner", "reviewer", "lane"]) {
-      if (!opts[key]) continue;
+      if (opts[key] === undefined) continue;
       if (key === "owner") body.ownerAgentId = opts[key];
       else if (key === "reviewer") body.reviewerAgentId = opts[key];
       else if (key === "lane") body.laneId = opts[key];
       else body[key] = opts[key];
     }
+    for (const key of ["completed", "delivered"]) {
+      if (opts[key] === undefined) continue;
+      body[key] = booleanOption(opts[key], key);
+    }
     return request(`/boards/${encodeURIComponent(boardId)}/work-items/${encodeURIComponent(itemId)}`, {
       method: "PATCH",
       body
+    }, context);
+  }
+
+  if (action === "approve-card" || action === "approve-item") {
+    requireToken(context);
+    const boardId = opts.board || context.boardId;
+    requireValue(boardId, "board");
+    requireOption(opts, "item");
+    const itemId = String(opts.item);
+    const board = await request(`/boards/${encodeURIComponent(boardId)}`, {}, context) as { workItems?: Array<{ id?: string; approvals?: unknown[] }> };
+    const item = board.workItems?.find((candidate) => candidate.id === itemId);
+    if (!item) throw new Error("Card not found.");
+    const approvals = Array.isArray(item.approvals) ? item.approvals : [];
+    return request(`/boards/${encodeURIComponent(boardId)}/work-items/${encodeURIComponent(itemId)}`, {
+      method: "PATCH",
+      body: {
+        approvals: [
+          ...approvals,
+          {
+            author: opts.author || opts.agent || context.agentId || "agent",
+            text: opts.text || "Approved.",
+            createdAt: new Date().toISOString()
+          }
+        ]
+      }
     }, context);
   }
 
@@ -292,12 +321,21 @@ function usage(): Record<string, unknown> {
       "instructions [--agent <agent-id>]",
       "create-card [--board <board-id>] --title <title> [--lane <lane-id>] [--owner <agent-id>] [--reviewer <agent-id>]",
       "move-card [--board <board-id>] --item <card-id> --lane <lane-id>",
-      "update-card [--board <board-id>] --item <card-id> [--title <title>] [--summary <summary>] [--lane <lane-id>] [--owner <agent-id>] [--reviewer <agent-id>]",
+      "update-card [--board <board-id>] --item <card-id> [--title <title>] [--summary <summary>] [--lane <lane-id>] [--owner <agent-id>] [--reviewer <agent-id>] [--completed true|false] [--delivered true|false]",
+      "approve-card [--board <board-id>] --item <card-id> [--text <text>] [--author <name>]",
       "comment [--board <board-id>] --item <card-id> --text <text> [--kind progress|instruction|question|change_request|note] [--status open|acknowledged|resolved] [--author <name>]",
       "ack-comment [--board <board-id>] --item <card-id> --comment <comment-id>",
       "resolve-comment [--board <board-id>] --item <card-id> --comment <comment-id>"
     ]
   };
+}
+
+function booleanOption(value: string | boolean | undefined, key: string): boolean {
+  if (value === true) return true;
+  if (value === false) return false;
+  if (value === "true" || value === "1") return true;
+  if (value === "false" || value === "0") return false;
+  throw new Error(`--${key} must be true or false.`);
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {

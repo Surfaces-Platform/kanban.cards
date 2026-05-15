@@ -17,17 +17,17 @@ const execFileAsync = promisify(execFile);
 const REPO_ROOT = path.join(__dirname, "..");
 const DEMO_SCRIPT = path.join(REPO_ROOT, "scripts", "demo.ts");
 const DEMO_STEPS = [
-  "product-intake",
-  "traveller-research",
-  "designer-flow",
-  "engineer-build",
-  "reviewer-change-request",
-  "engineer-constraints",
-  "reviewer-approval",
-  "product-closeout"
+  "coordinator-intake",
+  "risk-triage",
+  "engineer-plan",
+  "engineer-implementation",
+  "security-change-request",
+  "engineer-evidence",
+  "security-approval",
+  "coordinator-closeout"
 ] as const;
 
-test("demo harness prepares scoped configs and runs the agent trip planner product buildout", async () => {
+test("demo harness prepares scoped configs and runs the private beta security release", async () => {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-cards-demo-"));
   const demoDir = path.join(tempDir, ".demo");
   const homeDir = path.join(tempDir, "home");
@@ -54,7 +54,7 @@ test("demo harness prepares scoped configs and runs the agent trip planner produ
     assert.match(prepared.stdout, /Workflow prepared\./);
     assert.doesNotMatch(prepared.stdout, /kcagt_[A-Za-z0-9_-]+/);
 
-    for (const agent of ["product", "research", "designer", "engineer", "reviewer"]) {
+    for (const agent of ["coordinator", "risk", "engineer", "security"]) {
       const configPath = path.join(demoDir, "configs", `${agent}.json`);
       const config = JSON.parse(await fs.readFile(configPath, "utf8"));
       assert.match(config.token, /^kcagt_/);
@@ -72,47 +72,48 @@ test("demo harness prepares scoped configs and runs the agent trip planner produ
 
     const runState = JSON.parse(await fs.readFile(path.join(demoDir, "run-state.json"), "utf8"));
     assert.deepEqual(runState.completedSteps, [...DEMO_STEPS]);
-    assert.ok(runState.cards.productBrief);
-    assert.ok(runState.cards.researchBrief);
-    assert.ok(runState.cards.experienceMap);
-    assert.ok(runState.cards.planningSlice);
-    assert.ok(runState.comments.constraintChangeRequest);
+    assert.ok(runState.cards.releaseBrief);
+    assert.ok(runState.cards.riskBrief);
+    assert.ok(runState.cards.engineeringPlan);
+    assert.ok(runState.cards.releaseImplementation);
+    assert.ok(runState.comments.securityChangeRequest);
 
     const workspace = JSON.parse(await fs.readFile(dataPath, "utf8")) as WorkspaceState;
     const board = requireBoard(workspace);
-    assert.equal(board.name, "Agent Trip Planner MVP Buildout");
+    assert.equal(board.name, "Private Beta Security Release");
     assert.deepEqual(board.lanes.map((lane) => lane.title), [
-      "Product Intake",
-      "Traveller Research",
-      "Experience Design",
-      "Build",
-      "Review",
-      "Pilot Ready"
+      "Intake",
+      "Risk Triage",
+      "Engineering Plan",
+      "Implementation",
+      "Security Review",
+      "Release Ready"
     ]);
 
-    const productCard = board.workItems.find((item) => item.id === runState.cards.productBrief);
-    const researchCard = board.workItems.find((item) => item.id === runState.cards.researchBrief);
-    const designCard = board.workItems.find((item) => item.id === runState.cards.experienceMap);
-    const planningCard = board.workItems.find((item) => item.id === runState.cards.planningSlice);
-    assert.equal(productCard?.laneId, "pilot-ready");
-    assert.equal(researchCard?.laneId, "experience-design");
-    assert.equal(designCard?.laneId, "build");
-    assert.equal(planningCard?.laneId, "pilot-ready");
+    const releaseCard = board.workItems.find((item) => item.id === runState.cards.releaseBrief);
+    const riskCard = board.workItems.find((item) => item.id === runState.cards.riskBrief);
+    const planCard = board.workItems.find((item) => item.id === runState.cards.engineeringPlan);
+    const implementationCard = board.workItems.find((item) => item.id === runState.cards.releaseImplementation);
+    assert.equal(releaseCard?.laneId, "release-ready");
+    assert.equal(riskCard?.laneId, "engineering-plan");
+    assert.equal(planCard?.laneId, "implementation");
+    assert.equal(implementationCard?.laneId, "release-ready");
+    assert.equal(releaseCard?.delivered, true);
 
-    const changeRequest = planningCard?.comments.find((comment) => comment.id === runState.comments.constraintChangeRequest);
-    assert.equal(changeRequest?.author, "agent-qa-reviewer");
+    const changeRequest = implementationCard?.comments.find((comment) => comment.id === runState.comments.securityChangeRequest);
+    assert.equal(changeRequest?.author, "agent-security-reviewer");
     assert.equal(changeRequest?.kind, "change_request");
     assert.equal(changeRequest?.status, "resolved");
-    assert.ok(productCard?.comments.some((comment) => comment.author === "agent-product-lead" && comment.text.includes("Product Lead created")));
-    assert.ok(researchCard?.comments.some((comment) => comment.author === "agent-traveller-research" && comment.text.includes("created this research card") && comment.text.includes("moved it toward design")));
-    assert.ok(designCard?.comments.some((comment) => comment.author === "agent-experience-designer" && comment.text.includes("created the experience map") && comment.text.includes("moved the card into Build")));
-    assert.ok(planningCard?.comments.some((comment) => comment.author === "agent-product-engineer" && comment.text.includes("created the build slice")));
-    assert.ok(planningCard?.summary.includes("Product Engineer updated the planning slice"));
-    assert.ok(changeRequest?.text.includes("QA Reviewer opened this change request"));
-    assert.ok(planningCard?.comments.some((comment) => comment.author === "agent-product-engineer" && comment.text.includes("Product Engineer resolved the change request")));
-    assert.ok(planningCard?.comments.some((comment) => comment.author === "agent-qa-reviewer" && comment.text.includes("QA Reviewer approved") && comment.text.includes("moved it to Pilot Ready")));
-    assert.ok(productCard?.comments.some((comment) => comment.author === "agent-product-lead" && comment.text.includes("updated the original brief") && comment.text.includes("moved it to Pilot Ready")));
-    assert.ok(productCard?.summary.includes("Product Lead closed the buildout"));
+    assert.ok(releaseCard?.comments.some((comment) => comment.author === "agent-release-coordinator" && comment.text.includes("opened the release packet")));
+    assert.ok(riskCard?.comments.some((comment) => comment.author === "agent-risk-triage" && comment.text.includes("live event replay gaps")));
+    assert.ok(planCard?.comments.some((comment) => comment.author === "agent-release-engineer" && comment.text.includes("implementation plan")));
+    assert.ok(implementationCard?.comments.some((comment) => comment.author === "agent-release-engineer" && comment.text.includes("rotated stale tokens")));
+    assert.ok(changeRequest?.text.includes("Security Reviewer opened this change request"));
+    assert.ok(implementationCard?.comments.some((comment) => comment.author === "agent-release-engineer" && comment.text.includes("Release Engineer resolved the change request")));
+    assert.ok(implementationCard?.comments.some((comment) => comment.author === "agent-security-reviewer" && comment.text.includes("Security Reviewer approved")));
+    assert.equal(implementationCard?.approvals.length, 1);
+    assert.ok(releaseCard?.comments.some((comment) => comment.author === "agent-release-coordinator" && comment.text.includes("closed the release packet")));
+    assert.ok(releaseCard?.summary.includes("rollback ownership"));
     assertOperationalBoardCopy(board);
   } finally {
     await closeServer(server);
@@ -148,7 +149,7 @@ function serverPort(server: Server): number {
 }
 
 function requireBoard(workspace: WorkspaceState): Board {
-  const board = workspace.boards.find((candidate) => candidate.id === "agent-trip-planner-mvp-buildout");
+  const board = workspace.boards.find((candidate) => candidate.id === "private-beta-security-release");
   assert.ok(board);
   return board;
 }

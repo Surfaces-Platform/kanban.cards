@@ -7,9 +7,10 @@
   --panel: #f5f7f9;
   --panel-strong: #e9edf2;
   --paper: #ffffff;
-  --accent: #1f6f7a;
-  --accent-strong: #175661;
-  --accent-soft: #e3f1f3;
+  --accent: #2f5f8f;
+  --accent-strong: #24496f;
+  --accent-soft: #e8f0f8;
+  --accent-border: rgba(47, 95, 143, 0.35);
   --danger: #a0442b;
   --danger-soft: #faeee9;
   --ok: #2f6b4f;
@@ -739,7 +740,7 @@ textarea.form-control {
 .lane-position {
   align-items: center;
   background: var(--accent-soft);
-  border: 1px solid rgba(31, 111, 122, 0.35);
+  border: 1px solid var(--accent-border);
   border-radius: 6px;
   color: var(--accent-strong);
   display: inline-flex;
@@ -883,7 +884,7 @@ textarea.form-control {
 .history-count {
   align-items: center;
   background: var(--accent-soft);
-  border: 1px solid rgba(31, 111, 122, 0.35);
+  border: 1px solid var(--accent-border);
   border-radius: 6px;
   color: var(--accent-strong);
   display: inline-flex;

@@ -34,6 +34,7 @@ interface DemoScene {
   step?: string;
   verify?: boolean;
   expectedText: string;
+  currentStateText?: string;
   selectCardTitle?: string;
 }
 
@@ -71,63 +72,72 @@ interface ElevenLabsConfig {
 const scenes: DemoScene[] = [
   {
     label: "intro",
-    narration: "The board opens on an agent trip planner build. Named agents will create, update, review, and move cards as the product takes shape.",
-    expectedText: "Agent Trip Planner MVP Buildout"
+    narration: "The board opens on a private beta security release. Release, risk, engineering, and security agents will move the launch toward approval.",
+    expectedText: "Private Beta Security Release"
   },
   {
-    narration: "Product Lead creates the product brief in Product Intake around a five-day Lisbon trip: dates, budget, walking limits, and hotel handoff.",
-    step: "product-intake",
-    expectedText: "Product Lead created this product brief in Product Intake for a 5-day Lisbon trip with fixed dates, a $2,400 budget, walking limits, and hotel-first booking handoff.",
-    selectCardTitle: "Build agent trip planner for independent travellers"
+    narration: "Release Coordinator opens the release packet with token rotation, scoped access, rollback ownership, and required evidence.",
+    step: "coordinator-intake",
+    expectedText: "Release Coordinator opened the release packet with production token rotation, scoped agent access, rollback owner, and verification evidence required before launch.",
+    currentStateText: "In progress",
+    selectCardTitle: "Rotate private beta access tokens before launch"
   },
   {
-    narration: "Traveller Research Agent creates a research card, adds traveller constraints, and moves it into Experience Design.",
-    step: "traveller-research",
-    expectedText: "Traveller Research Agent created this research card, added date windows, total budget, pace, mobility limits, passport or visa uncertainty, cancellation tolerance, and neighbourhood preferences, then moved it toward design.",
-    selectCardTitle: "Traveller planning constraints research"
+    narration: "Risk Triage Agent identifies token, event stream, database, and rollback risks, then advances the work into engineering planning.",
+    step: "risk-triage",
+    expectedText: "Risk Triage Agent identified stale local tokens, live event replay gaps, database migration timing, and rollback ownership as launch risks.",
+    currentStateText: "Engineering Plan",
+    selectCardTitle: "Token rotation risk triage"
   },
   {
-    narration: "Experience Designer creates the intake-to-itinerary map and advances the card into Build.",
-    step: "designer-flow",
-    expectedText: "Experience Designer created the experience map, ordered destination, dates, budget, traveller count, mobility needs, interests, and cancellation tolerance before day plans, then moved the card into Build.",
-    selectCardTitle: "Intake-to-itinerary experience map"
+    narration: "Release Engineer writes the implementation plan and carries it into the implementation lane.",
+    step: "engineer-plan",
+    expectedText: "Release Engineer wrote the implementation plan covering token revocation, scoped token setup, live event replay checks, database initialization, and rollback handoff.",
+    currentStateText: "Implementation",
+    selectCardTitle: "Security release implementation plan"
   },
   {
-    narration: "Product Engineer creates the build slice, updates the summary, and moves it to Review for QA.",
-    step: "engineer-build",
-    expectedText: "Product Engineer created the build slice for Lisbon, five days, food and architecture interests, then added itinerary drafting, lodging notes, transit suggestions, and booking handoff.",
-    selectCardTitle: "Build first trip-planning slice"
+    narration: "Release Engineer rotates stale tokens, checks live event replay after reconnect, initializes tables, and moves the work into security review.",
+    step: "engineer-implementation",
+    expectedText: "Release Engineer rotated stale tokens, verified live event replay after reconnect, initialized workspace and token tables, and attached rollback notes.",
+    currentStateText: "Security Review",
+    selectCardTitle: "Implement private beta token rotation"
   },
   {
-    narration: "QA Reviewer opens a change request that blocks pilot readiness until required traveller constraints are enforced.",
-    step: "reviewer-change-request",
-    expectedText: "QA Reviewer opened this change request: block pilot readiness until budget, mobility needs, passport or visa uncertainty, cancellation tolerance, and incomplete-input handling are required before itinerary generation.",
-    selectCardTitle: "Build first trip-planning slice"
+    narration: "Security Reviewer opens a change request until revocation evidence, replay results, initialization output, and rollback acknowledgement are attached.",
+    step: "security-change-request",
+    expectedText: "Security Reviewer opened this change request: hold release until token revocation evidence, event replay after reconnect, database initialization output, and rollback owner acknowledgement are attached.",
+    currentStateText: "Change requested",
+    selectCardTitle: "Implement private beta token rotation"
   },
   {
-    narration: "Product Engineer resolves the request and updates the build slice with hard stops for missing inputs.",
-    step: "engineer-constraints",
-    expectedText: "Product Engineer resolved the change request by adding budget range, mobility limits, passport or visa uncertainty, cancellation tolerance, and missing-answer prompts that block itinerary generation until resolved.",
-    selectCardTitle: "Build first trip-planning slice"
+    narration: "Release Engineer resolves the request with the evidence pack, clearing open requests in the current state panel.",
+    step: "engineer-evidence",
+    expectedText: "Release Engineer resolved the change request with token revocation evidence, reconnect replay result, database initialization output, and rollback owner acknowledgement.",
+    currentStateText: "No open requests.",
+    selectCardTitle: "Implement private beta token rotation"
   },
   {
-    narration: "QA Reviewer approves the build slice and moves it to Pilot Ready after the constraint fix lands.",
-    step: "reviewer-approval",
-    expectedText: "QA Reviewer approved the build slice and moved it to Pilot Ready after required traveller constraints, incomplete-input handling, itinerary pacing, and booking handoff were covered.",
-    selectCardTitle: "Build first trip-planning slice"
+    narration: "Security Reviewer approves the security gate and moves the implementation card to Release Ready.",
+    step: "security-approval",
+    expectedText: "Security Reviewer approved the release after token revocation, live event replay, database initialization, and rollback evidence matched the security gate.",
+    currentStateText: "Approved",
+    selectCardTitle: "Implement private beta token rotation"
   },
   {
-    narration: "Product Lead updates the original brief, moves it to Pilot Ready, and records owner, success metric, and support handoff.",
-    step: "product-closeout",
-    expectedText: "Product Lead updated the original brief and moved it to Pilot Ready. Pilot owner: Product Lead. Success metric: first itinerary accepted without support. Support handoff: QA Reviewer monitors failed constraint checks.",
-    selectCardTitle: "Build agent trip planner for independent travellers"
+    narration: "Release Coordinator closes the release packet with launch owner, rollback owner, and security monitoring handoff.",
+    step: "coordinator-closeout",
+    expectedText: "Release Coordinator closed the release packet. Launch owner: Release Coordinator. Rollback owner: Release Engineer. Security monitor: Security Reviewer watches token and event alerts.",
+    currentStateText: "Delivered",
+    selectCardTitle: "Rotate private beta access tokens before launch"
   },
   {
     label: "verification",
-    narration: "The final board keeps the agent-created product brief, research, design, reviewed build slice, and pilot handoff together.",
+    narration: "The final board keeps the launch packet, risk triage, engineering work, security approval, and delivered closeout together.",
     verify: true,
-    expectedText: "Product Lead closed the buildout after agent-created research, design, build, QA approval, required traveller constraints, booking handoff, and support monitoring.",
-    selectCardTitle: "Build agent trip planner for independent travellers"
+    expectedText: "Release Coordinator closed the release after security approval, token rotation evidence, live event replay validation, database initialization, and rollback ownership were complete.",
+    currentStateText: "Delivered",
+    selectCardTitle: "Rotate private beta access tokens before launch"
   }
 ];
 
@@ -225,7 +235,7 @@ async function main(): Promise<void> {
     const video = page.video();
     if (!video) throw new Error("Playwright did not initialize browser video capture.");
 
-    await page.goto(baseUrl, { waitUntil: "networkidle" });
+    await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
     await runRecordingScenes(page, audioScenes, demoEnv);
     await page.waitForTimeout(1_000);
 
@@ -255,12 +265,10 @@ async function runRecordingScenes(page: Page, audioScenes: AudioScene[], env: No
 
     if (scene.step) {
       await run(`Workflow step ${scene.step}`, "npm", ["run", "demo:step", "--", scene.step], { env });
-      await page.reload({ waitUntil: "networkidle" });
     }
 
     if (scene.verify) {
       await run("Verify workflow state", "npm", ["run", "demo:verify"], { env });
-      await page.reload({ waitUntil: "networkidle" });
     }
 
     if (scene.selectCardTitle) {
@@ -268,6 +276,10 @@ async function runRecordingScenes(page: Page, audioScenes: AudioScene[], env: No
     }
 
     await waitForText(page, scene.expectedText);
+    if (scene.currentStateText) {
+      await waitForText(page, "Current state");
+      await waitForText(page, scene.currentStateText);
+    }
     await page.waitForTimeout(durationMs + 350);
   }
 }
