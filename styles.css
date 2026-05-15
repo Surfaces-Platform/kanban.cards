@@ -904,13 +904,14 @@ textarea.form-control {
 }
 
 .work-item-card {
+  align-content: start;
   background: var(--paper);
   border: 1px solid var(--line);
   border-radius: 8px;
   color: inherit;
   display: grid;
-  gap: 8px;
-  min-height: 112px;
+  gap: 9px;
+  min-height: 184px;
   padding: 10px;
   text-align: left;
 }
@@ -923,18 +924,92 @@ textarea.form-control {
   outline: 0;
 }
 
+.card-heading-row {
+  align-items: start;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.card-heading-row .attention-chip {
+  flex: 0 0 auto;
+  max-width: 100%;
+}
+
 .card-title {
   color: var(--ink);
+  display: -webkit-box;
   font-size: 14px;
   font-weight: 900;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
   line-height: 1.2;
   margin: 0;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .card-summary {
   color: var(--muted);
+  display: -webkit-box;
   font-size: 12px;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
   margin: 0;
+  overflow: hidden;
+}
+
+.card-agent-grid {
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  padding-top: 8px;
+}
+
+.card-agent-grid > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.card-agent-grid strong {
+  color: var(--ink);
+  font-size: 11px;
+  line-height: 1.2;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.card-state-footer {
+  align-items: start;
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 5px;
+  padding-top: 8px;
+}
+
+.card-state-footer p {
+  color: var(--muted);
+  font-size: 11px;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.card-request-count {
+  align-items: center;
+  background: var(--warn-soft);
+  border: 1px solid rgba(135, 100, 22, 0.35);
+  border-radius: 5px;
+  color: var(--warn);
+  display: inline-flex;
+  font-size: 11px;
+  font-weight: 900;
+  justify-self: start;
+  min-height: 22px;
+  padding: 0 7px;
 }
 
 .empty-lane,
@@ -977,6 +1052,11 @@ textarea.form-control {
   background: var(--danger-soft);
   border-color: rgba(160, 68, 43, 0.4);
   color: var(--danger);
+}
+
+.attention-chip {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .detail-panel {
@@ -1040,6 +1120,88 @@ textarea.form-control {
 .work-item-detail {
   display: grid;
   gap: 14px;
+}
+
+.current-state-panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+}
+
+.current-state-heading {
+  align-items: center;
+}
+
+.current-state-grid {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  overflow: hidden;
+}
+
+.current-state-grid > div {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 9px;
+}
+
+.current-state-grid > div:nth-child(odd) {
+  border-right: 1px solid var(--line);
+}
+
+.current-state-grid > div:nth-child(n + 3) {
+  border-top: 1px solid var(--line);
+}
+
+.current-state-grid strong {
+  font-size: 12px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.current-state-rows {
+  display: grid;
+  gap: 7px;
+}
+
+.current-state-row,
+.gate-summary {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 6px;
+  padding: 9px;
+}
+
+.current-state-row p,
+.gate-summary p {
+  color: var(--ink);
+  margin: 0;
+}
+
+.gate-summary > div {
+  display: grid;
+  gap: 5px;
+}
+
+.gate-summary strong {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.gate-summary ul {
+  color: var(--muted);
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
 }
 
 .detail-meta-grid {
@@ -1419,8 +1581,17 @@ th {
   .fields,
   .phase-list,
   .two-col,
+  .current-state-grid,
   .detail-meta-grid {
     grid-template-columns: 1fr;
+  }
+
+  .current-state-grid > div:nth-child(odd) {
+    border-right: 0;
+  }
+
+  .current-state-grid > div:nth-child(n + 2) {
+    border-top: 1px solid var(--line);
   }
 
   .detail-meta-grid > div + div {

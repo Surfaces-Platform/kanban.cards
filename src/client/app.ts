@@ -1,4 +1,4 @@
-import type { AgentSpec, Board, BoardDraft, BoardTemplate, Lane, PublicTokenRecord, WorkItem, WorkspaceState } from "../types";
+import type { AgentSpec, Board, BoardDraft, BoardTemplate, Lane, PublicTokenRecord, WorkItem, WorkItemComment, WorkspaceState } from "../types";
 
 declare global {
   interface Window {
@@ -13,6 +13,26 @@ type AnyRecord = Record<string, any>;
 type FormControlElement = HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
 type TemplateLike = Omit<BoardTemplate, "createdAt"> & { createdAt?: string; builtIn: boolean };
 type CreatedAgentTokenPayload = PublicTokenRecord & { token?: string };
+type AttentionTone = "neutral" | "ok" | "warn" | "danger";
+
+interface AttentionState {
+  label: string;
+  tone: AttentionTone;
+}
+
+interface WorkItemCurrentState {
+  lane: Lane | null;
+  comments: WorkItemComment[];
+  latestComment: WorkItemComment | null;
+  openRequests: WorkItemComment[];
+  openChangeRequests: WorkItemComment[];
+  openQuestions: WorkItemComment[];
+  openInstructions: WorkItemComment[];
+  openBlockers: any[];
+  approvals: number;
+  delivered: boolean;
+  attention: AttentionState;
+}
 
 interface LiveWorkspaceEvent {
   id: string;
@@ -27,6 +47,7 @@ const API_TOKEN = window.KANBAN_CARDS_API_TOKEN || window.INSTRUCT_API_TOKEN || 
 const POLL_INTERVAL_MS = 5000;
 const MAX_LANES = 8;
 const MIN_LANES = 2;
+const OPEN_REQUEST_COMMENT_KINDS = ["instruction", "question", "change_request"] as const;
 
 const BUILT_IN_TEMPLATES: TemplateLike[] = [
   {
@@ -493,6 +514,80 @@ function isDelivered(item: any): boolean {
   return Boolean(item?.completed || item?.delivered || item?.released);
 }
 
+function getWorkItemCurrentState(board: Board, item: WorkItem): WorkItemCurrentState {
+  const comments = Array.isArray(item.comments) ? item.comments : [];
+  const latestComment = getLatestActivityComment(comments);
+  const openRequests = comments.filter(isOpenRequestComment).sort(compareCommentsNewestFirst);
+  const openChangeRequests = openRequests.filter((comment) => comment.kind === "change_request");
+  const openQuestions = openRequests.filter((comment) => comment.kind === "question");
+  const openInstructions = openRequests.filter((comment) => comment.kind === "instruction");
+  const openBlockers = getOpenBlockers(item);
+  const approvals = getApprovalCount(item);
+  const delivered = isDelivered(item);
+
+  return {
+    lane: board.lanes.find((lane) => lane.id === item.laneId) || null,
+    comments,
+    latestComment,
+    openRequests,
+    openChangeRequests,
+    openQuestions,
+    openInstructions,
+    openBlockers,
+    approvals,
+    delivered,
+    attention: deriveAttentionState({
+      latestComment,
+      openChangeRequests,
+      openQuestions,
+      openInstructions,
+      openBlockers,
+      approvals,
+      delivered
+    })
+  };
+}
+
+function getLatestActivityComment(comments: WorkItemComment[]): WorkItemComment | null {
+  return comments.reduce<WorkItemComment | null>((latest, comment) => {
+    if (!latest) return comment;
+    return getCommentTime(comment) > getCommentTime(latest) ? comment : latest;
+  }, null);
+}
+
+function compareCommentsNewestFirst(a: WorkItemComment, b: WorkItemComment): number {
+  return getCommentTime(b) - getCommentTime(a);
+}
+
+function getCommentTime(comment: WorkItemComment): number {
+  const value = comment.updatedAt || comment.createdAt;
+  const time = value ? new Date(value).getTime() : 0;
+  return Number.isNaN(time) ? 0 : time;
+}
+
+function isOpenRequestComment(comment: WorkItemComment): boolean {
+  return comment.status !== "resolved" && (OPEN_REQUEST_COMMENT_KINDS as readonly string[]).includes(comment.kind);
+}
+
+function deriveAttentionState(input: {
+  latestComment: WorkItemComment | null;
+  openChangeRequests: WorkItemComment[];
+  openQuestions: WorkItemComment[];
+  openInstructions: WorkItemComment[];
+  openBlockers: any[];
+  approvals: number;
+  delivered: boolean;
+}): AttentionState {
+  if (input.openChangeRequests.length) return { label: "Change requested", tone: "danger" };
+  if (input.openQuestions.length) return { label: "Question open", tone: "warn" };
+  if (input.openInstructions.length) return { label: "Instruction open", tone: "warn" };
+  if (input.openBlockers.length) return { label: "Blocked", tone: "danger" };
+  if (input.delivered) return { label: "Delivered", tone: "ok" };
+  if (input.approvals > 0) return { label: "Approved", tone: "ok" };
+  if (input.latestComment) return { label: "In progress", tone: "neutral" };
+  return { label: "No activity", tone: "neutral" };
+}
+
 function render(): void {
   state = normalizeWorkspace(state);
   const board = getActiveBoard();
@@ -955,12 +1050,35 @@ function renderFlowMessage(): string {
 
 function renderWorkItemCard(item: WorkItem, board: Board): string {
   const selectedClass = item.id === board.selectedId ? " is-selected" : "";
+  const current = getWorkItemCurrentState(board, item);
+  const openRequestText = current.openRequests.length ? formatCount(current.openRequests.length, "open request") : "";
   return `
     <article class="work-item-card${selectedClass}" tabindex="0" role="button" data-work-item-id="${escapeAttribute(item.id)}">
-      <h3 class="card-title">${escapeHtml(item.title || "Untitled card")}</h3>
+      <div class="card-heading-row">
+        <h3 class="card-title">${escapeHtml(item.title || "Untitled card")}</h3>
+        <span class="${escapeAttribute(attentionChipClass(current.attention))}">${escapeHtml(current.attention.label)}</span>
+      </div>
       <p class="card-summary">${escapeHtml(item.summary || "No summary provided.")}</p>
+      <div class="card-agent-grid">
+        <div>
+          <span class="meta-label">Owner</span>
+          <strong>${escapeHtml(resolveAgentShortName(board, item.ownerAgentId))}</strong>
+        </div>
+        <div>
+          <span class="meta-label">Reviewer</span>
+          <strong>${escapeHtml(resolveAgentShortName(board, item.reviewerAgentId))}</strong>
+        </div>
+      </div>
+      <div class="card-state-footer">
+        ${openRequestText ? `<span class="card-request-count">${escapeHtml(openRequestText)}</span>` : ""}
+        <p>${escapeHtml(formatCardLatestActivity(current.latestComment))}</p>
+      </div>
     </article>
   `;
+}
+
+function attentionChipClass(attention: AttentionState): string {
+  return ["chip", "attention-chip", attention.tone].filter(Boolean).join(" ");
 }
 
 function renderInspector(): void {
@@ -993,20 +1111,7 @@ function renderInspector(): void {
         <h2>${escapeHtml(selected.title || "Untitled card")}</h2>
         <p>${escapeHtml(selected.summary || "No summary provided.")}</p>
       </div>
-      <div class="detail-meta-grid">
-        <div>
-          <span class="meta-label">Owner</span>
-          <strong>${escapeHtml(resolveAgentDisplayName(board, selected.ownerAgentId))}</strong>
-        </div>
-        <div>
-          <span class="meta-label">Reviewer</span>
-          <strong>${escapeHtml(resolveAgentDisplayName(board, selected.reviewerAgentId))}</strong>
-        </div>
-        <div>
-          <span class="meta-label">Status</span>
-          <strong>${escapeHtml(isDelivered(selected) ? "Delivered" : "Active")}</strong>
-        </div>
-      </div>
+      ${renderCurrentStatePanel(selected, board)}
       <div class="comment-thread">
         <div class="section-heading">
           <h3>Activity</h3>
@@ -1014,6 +1119,67 @@ function renderInspector(): void {
         ${renderCommentThread(selected)}
       </div>
     </section>
+  `;
+}
+
+function renderCurrentStatePanel(item: WorkItem, board: Board): string {
+  const current = getWorkItemCurrentState(board, item);
+  const laneTitle = current.lane?.title || "Unknown lane";
+  return `
+    <section class="current-state-panel" aria-labelledby="current-state-title">
+      <div class="section-heading current-state-heading">
+        <h3 id="current-state-title">Current state</h3>
+        <span class="${escapeAttribute(attentionChipClass(current.attention))}">${escapeHtml(current.attention.label)}</span>
+      </div>
+      <div class="current-state-grid">
+        ${renderStateGridItem("Lane", laneTitle)}
+        ${renderStateGridItem("Owner", resolveAgentDisplayName(board, item.ownerAgentId))}
+        ${renderStateGridItem("Reviewer", resolveAgentDisplayName(board, item.reviewerAgentId))}
+        ${renderStateGridItem("Open requests", String(current.openRequests.length))}
+        ${renderStateGridItem("Change requests", String(current.openChangeRequests.length))}
+        ${renderStateGridItem("Blockers", String(current.openBlockers.length))}
+        ${renderStateGridItem("Approvals", String(current.approvals))}
+        ${renderStateGridItem("Delivery", current.delivered ? "Delivered" : "Active")}
+      </div>
+      <div class="current-state-rows">
+        <div class="current-state-row">
+          <span class="meta-label">Latest</span>
+          <p>${escapeHtml(formatLatestActivitySentence(current.latestComment))}</p>
+        </div>
+        <div class="current-state-row">
+          <span class="meta-label">Open requests</span>
+          <p>${escapeHtml(formatRequestSummary(current))}</p>
+        </div>
+      </div>
+      ${renderGateSummary(current)}
+    </section>
+  `;
+}
+
+function renderStateGridItem(label: string, value: string): string {
+  return `
+    <div>
+      <span class="meta-label">${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value)}</strong>
+    </div>
+  `;
+}
+
+function renderGateSummary(current: WorkItemCurrentState): string {
+  if (!current.lane?.gate) return "";
+  const checks = current.lane.gate.checks || [];
+  return `
+    <div class="gate-summary">
+      <div>
+        <span class="meta-label">Gate</span>
+        <strong>${escapeHtml(current.lane.gate.title || `${current.lane.title} gate`)}</strong>
+      </div>
+      ${checks.length ? `
+        <ul>
+          ${checks.map((check) => `<li>${escapeHtml(check)}</li>`).join("")}
+        </ul>
+      ` : '<p>No gate checks configured.</p>'}
+    </div>
   `;
 }
 
@@ -1041,6 +1207,47 @@ function resolveAgentDisplayName(board: Board, agentId: string | null | undefine
   const agent = board.agentSpecs?.find((candidate) => candidate.id === agentId);
   if (!agent) return agentId;
   return agent.role ? `${agent.name} (${agent.role})` : agent.name;
+}
+
+function resolveAgentShortName(board: Board, agentId: string | null | undefined): string {
+  if (!agentId) return "Unassigned";
+  const agent = board.agentSpecs?.find((candidate) => candidate.id === agentId);
+  return agent?.name || agentId;
+}
+
+function formatCardLatestActivity(comment: WorkItemComment | null): string {
+  if (!comment) return "Latest: no activity yet";
+  const pieces = [
+    comment.author || "agent",
+    formatCommentKind(comment.kind),
+    formatRelativeTime(comment.updatedAt || comment.createdAt)
+  ].filter(Boolean);
+  return `Latest: ${pieces.join(" / ")}`;
+}
+
+function formatLatestActivitySentence(comment: WorkItemComment | null): string {
+  if (!comment) return "No activity yet.";
+  const age = formatRelativeTime(comment.updatedAt || comment.createdAt);
+  const suffix = age ? ` ${age}` : "";
+  return `${comment.author || "agent"} posted ${formatCommentKind(comment.kind)}${suffix}.`;
+}
+
+function formatRequestSummary(current: WorkItemCurrentState): string {
+  if (!current.openRequests.length) return "No open requests.";
+  return [
+    formatCount(current.openChangeRequests.length, "change request"),
+    formatCount(current.openQuestions.length, "question"),
+    formatCount(current.openInstructions.length, "instruction")
+  ].filter(Boolean).join(", ");
+}
+
+function formatCount(count: number, singular: string): string {
+  if (!count) return "";
+  return `${count} ${singular}${count === 1 ? "" : "s"}`;
+}
+
+function formatCommentKind(kind: unknown): string {
+  return String(kind || "note").replace(/_/g, " ");
 }
 
 function renderModals(board: Board): void {
@@ -2104,6 +2311,21 @@ function formatDateTime(value: unknown): string {
     dateStyle: "short",
     timeStyle: "short"
   });
+}
+
+function formatRelativeTime(value: unknown): string {
+  if (!value) return "";
+  const date = new Date(String(value));
+  const time = date.getTime();
+  if (Number.isNaN(time)) return "";
+  const elapsedSeconds = Math.max(0, Math.floor((Date.now() - time) / 1000));
+  if (elapsedSeconds < 60) return "just now";
+  const elapsedMinutes = Math.floor(elapsedSeconds / 60);
+  if (elapsedMinutes < 60) return `${elapsedMinutes}m ago`;
+  const elapsedHours = Math.floor(elapsedMinutes / 60);
+  if (elapsedHours < 24) return `${elapsedHours}h ago`;
+  const elapsedDays = Math.floor(elapsedHours / 24);
+  return `${elapsedDays}d ago`;
 }
 
 function optionalText(value: unknown): string | null {
