@@ -9,12 +9,7 @@
   ],
   "functions": {
     "api/index.js": {
-      "includeFiles": [
-        "index.html",
-        "app.js",
-        "styles.css",
-        "robots.txt"
-      ]
+      "includeFiles": "{index.html,app.js,styles.css,robots.txt}"
     }
   },
   "headers": [
