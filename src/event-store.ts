@@ -71,7 +71,8 @@ export function createFileEventStore(dataPath: string = DEFAULT_EVENT_FILE): Eve
       .catch(() => undefined)
       .then(async () => {
         const events = await readEvents();
-        const nextId = nextNumericId(events.at(-1)?.id || null);
+        const latestEvent = events.length ? events[events.length - 1] : null;
+        const nextId = nextNumericId(latestEvent?.id || null);
         const event = normalizeEvent({
           id: String(nextId),
           type: input.type,
@@ -98,7 +99,7 @@ export function createFileEventStore(dataPath: string = DEFAULT_EVENT_FILE): Eve
 
   async function latestId(): Promise<string | null> {
     const events = await readEvents();
-    return events.at(-1)?.id || null;
+    return events.length ? events[events.length - 1].id : null;
   }
 
   return { kind: "file", path: resolvedPath, ensureReady, append, listSince, latestId };
