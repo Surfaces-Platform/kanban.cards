@@ -17,16 +17,17 @@ const execFileAsync = promisify(execFile);
 const REPO_ROOT = path.join(__dirname, "..");
 const DEMO_SCRIPT = path.join(REPO_ROOT, "scripts", "demo.ts");
 const DEMO_STEPS = [
-  "coordinator-intake",
-  "researcher-research",
-  "producer-draft",
+  "product-intake",
+  "traveller-research",
+  "designer-flow",
+  "engineer-build",
   "reviewer-change-request",
-  "producer-revise",
-  "reviewer-release",
-  "coordinator-closeout"
+  "engineer-constraints",
+  "reviewer-approval",
+  "product-closeout"
 ] as const;
 
-test("demo harness prepares scoped configs and runs the launch brief flow", async () => {
+test("demo harness prepares scoped configs and runs the agent trip planner product buildout", async () => {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-cards-demo-"));
   const demoDir = path.join(tempDir, ".demo");
   const homeDir = path.join(tempDir, "home");
@@ -50,10 +51,10 @@ test("demo harness prepares scoped configs and runs the launch brief flow", asyn
 
   try {
     const prepared = await runDemo(["prepare"], env);
-    assert.match(prepared.stdout, /Demo prepared\./);
+    assert.match(prepared.stdout, /Workflow prepared\./);
     assert.doesNotMatch(prepared.stdout, /kcagt_[A-Za-z0-9_-]+/);
 
-    for (const agent of ["coordinator", "researcher", "producer", "reviewer"]) {
+    for (const agent of ["product", "research", "designer", "engineer", "reviewer"]) {
       const configPath = path.join(demoDir, "configs", `${agent}.json`);
       const config = JSON.parse(await fs.readFile(configPath, "utf8"));
       assert.match(config.token, /^kcagt_/);
@@ -67,32 +68,52 @@ test("demo harness prepares scoped configs and runs the launch brief flow", asyn
     }
 
     const verify = await runDemo(["verify"], env);
-    assert.match(verify.stdout, /Demo verification passed\./);
+    assert.match(verify.stdout, /Workflow verification passed\./);
 
     const runState = JSON.parse(await fs.readFile(path.join(demoDir, "run-state.json"), "utf8"));
     assert.deepEqual(runState.completedSteps, [...DEMO_STEPS]);
-    assert.ok(runState.cards.launchBrief);
+    assert.ok(runState.cards.productBrief);
     assert.ok(runState.cards.researchBrief);
-    assert.ok(runState.cards.draftBrief);
-    assert.ok(runState.comments.reviewChangeRequest);
+    assert.ok(runState.cards.experienceMap);
+    assert.ok(runState.cards.planningSlice);
+    assert.ok(runState.comments.constraintChangeRequest);
 
     const workspace = JSON.parse(await fs.readFile(dataPath, "utf8")) as WorkspaceState;
     const board = requireBoard(workspace);
-    assert.equal(board.name, "Orchestrated Agents Demo - Launch Brief");
-    assert.deepEqual(board.lanes.map((lane) => lane.title), ["Intake", "Research", "Draft", "Review", "Release"]);
+    assert.equal(board.name, "Agent Trip Planner MVP Buildout");
+    assert.deepEqual(board.lanes.map((lane) => lane.title), [
+      "Product Intake",
+      "Traveller Research",
+      "Experience Design",
+      "Build",
+      "Review",
+      "Pilot Ready"
+    ]);
 
-    const launchCard = board.workItems.find((item) => item.id === runState.cards.launchBrief);
+    const productCard = board.workItems.find((item) => item.id === runState.cards.productBrief);
     const researchCard = board.workItems.find((item) => item.id === runState.cards.researchBrief);
-    const draftCard = board.workItems.find((item) => item.id === runState.cards.draftBrief);
-    assert.equal(launchCard?.laneId, "release");
-    assert.equal(researchCard?.laneId, "draft");
-    assert.equal(draftCard?.laneId, "release");
+    const designCard = board.workItems.find((item) => item.id === runState.cards.experienceMap);
+    const planningCard = board.workItems.find((item) => item.id === runState.cards.planningSlice);
+    assert.equal(productCard?.laneId, "pilot-ready");
+    assert.equal(researchCard?.laneId, "experience-design");
+    assert.equal(designCard?.laneId, "build");
+    assert.equal(planningCard?.laneId, "pilot-ready");
 
-    const changeRequest = draftCard?.comments.find((comment) => comment.id === runState.comments.reviewChangeRequest);
-    assert.equal(changeRequest?.author, "agent-reviewer");
+    const changeRequest = planningCard?.comments.find((comment) => comment.id === runState.comments.constraintChangeRequest);
+    assert.equal(changeRequest?.author, "agent-qa-reviewer");
     assert.equal(changeRequest?.kind, "change_request");
     assert.equal(changeRequest?.status, "resolved");
-    assert.ok(draftCard?.comments.some((comment) => comment.author === "agent-producer"));
+    assert.ok(productCard?.comments.some((comment) => comment.author === "agent-product-lead" && comment.text.includes("Product Lead created")));
+    assert.ok(researchCard?.comments.some((comment) => comment.author === "agent-traveller-research" && comment.text.includes("created this research card") && comment.text.includes("moved it toward design")));
+    assert.ok(designCard?.comments.some((comment) => comment.author === "agent-experience-designer" && comment.text.includes("created the experience map") && comment.text.includes("moved the card into Build")));
+    assert.ok(planningCard?.comments.some((comment) => comment.author === "agent-product-engineer" && comment.text.includes("created the build slice")));
+    assert.ok(planningCard?.summary.includes("Product Engineer updated the planning slice"));
+    assert.ok(changeRequest?.text.includes("QA Reviewer opened this change request"));
+    assert.ok(planningCard?.comments.some((comment) => comment.author === "agent-product-engineer" && comment.text.includes("Product Engineer resolved the change request")));
+    assert.ok(planningCard?.comments.some((comment) => comment.author === "agent-qa-reviewer" && comment.text.includes("QA Reviewer approved") && comment.text.includes("moved it to Pilot Ready")));
+    assert.ok(productCard?.comments.some((comment) => comment.author === "agent-product-lead" && comment.text.includes("updated the original brief") && comment.text.includes("moved it to Pilot Ready")));
+    assert.ok(productCard?.summary.includes("Product Lead closed the buildout"));
+    assertOperationalBoardCopy(board);
   } finally {
     await closeServer(server);
     await fs.rm(tempDir, { recursive: true, force: true });
@@ -127,9 +148,39 @@ function serverPort(server: Server): number {
 }
 
 function requireBoard(workspace: WorkspaceState): Board {
-  const board = workspace.boards.find((candidate) => candidate.id === "demo-board-launch-brief");
+  const board = workspace.boards.find((candidate) => candidate.id === "agent-trip-planner-mvp-buildout");
   assert.ok(board);
   return board;
+}
+
+function assertOperationalBoardCopy(board: Board): void {
+  const bannedPatterns = [
+    /\bdemo\b/i,
+    /\bthrowaway\b/i,
+    /\brecording\b/i,
+    /\bsample\b/i,
+    /\bfake\b/i,
+    /\bharness\b/i,
+    /\bthis shows\b/i,
+    /\bthis proves\b/i
+  ];
+  const visibleCopy = [
+    board.name,
+    board.flowPrompt,
+    ...board.lanes.flatMap((lane) => [
+      lane.title,
+      lane.description,
+      lane.gate?.title || "",
+      ...(lane.gate?.checks || [])
+    ]),
+    ...board.agentSpecs.flatMap((agent) => [agent.name, agent.role, agent.instructions, agent.skillNotes || ""]),
+    ...board.workItems.flatMap((item) => [
+      item.title,
+      item.summary,
+      ...item.comments.map((comment) => comment.text)
+    ])
+  ];
+  assert.equal(visibleCopy.find((text) => bannedPatterns.some((pattern) => pattern.test(text))), undefined);
 }
 
 function cleanEnv(overrides: NodeJS.ProcessEnv): NodeJS.ProcessEnv {

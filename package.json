@@ -20,6 +20,7 @@
     "demo:server": "NODE_ENV=development VERCEL= KANBAN_CARDS_DATA_PATH=.demo/kanban-cards-state.json KANBAN_CARDS_DATABASE_URL= POSTGRES_URL= DATABASE_URL= KANBAN_CARDS_API_TOKEN= INSTRUCT_API_TOKEN= KANBAN_CARDS_BASIC_USER= KANBAN_CARDS_BASIC_PASSWORD= node dist/src/server.js",
     "demo:step": "tsx scripts/demo.ts step",
     "demo:verify": "tsx scripts/demo.ts verify",
+    "demo:record": "tsx scripts/record-demo.ts",
     "demo:reset": "tsx scripts/demo.ts reset"
   },
   "dependencies": {
@@ -31,6 +32,7 @@
     "@types/node": "^25.8.0",
     "@types/pg": "^8.20.0",
     "esbuild": "^0.28.0",
+    "playwright": "^1.60.0",
     "tsx": "^4.22.0",
     "typescript": "^6.0.3"
   }
