@@ -42,6 +42,17 @@ interface LiveWorkspaceEvent {
   createdAt: string;
 }
 
+interface AuthSession {
+  userId: string;
+  email: string;
+  name: string;
+  workspaceId: string;
+  roles: string[];
+  surfaceAccess: string[];
+  teamId: string;
+  projectId: string;
+}
+
 const API_BASE_URL = window.KANBAN_CARDS_API_BASE_URL || window.INSTRUCT_API_BASE_URL || "/api";
 const API_TOKEN = window.KANBAN_CARDS_API_TOKEN || window.INSTRUCT_API_TOKEN || "";
 const POLL_INTERVAL_MS = 5000;
@@ -95,6 +106,8 @@ let eventSource: EventSource | null = null;
 let pendingRemoteRefresh = false;
 let pendingRemoteRefreshToastShown = false;
 let remoteRefreshInFlight = false;
+let authSession: AuthSession | null = null;
+let authSessionLoaded = false;
 
 const boardCanvas = document.querySelector("#board-canvas") as HTMLElement;
 const inspectorPanel = document.querySelector("#inspector-panel") as HTMLElement;
@@ -102,6 +115,7 @@ const editFlowButton = document.querySelector("#edit-flow") as HTMLButtonElement
 const boardSelect = document.querySelector("#board-select") as HTMLSelectElement | null;
 const newBoardButton = document.querySelector("#new-board") as HTMLButtonElement | null;
 const boardTitle = document.querySelector("#board-title") as HTMLElement | null;
+const accountControl = document.querySelector("#account-control") as HTMLElement | null;
 const toastRegion = document.querySelector("#toast-region") as HTMLElement | null;
 const modalRoot = document.querySelector("#modal-root") as HTMLElement | null;
 
@@ -128,6 +142,20 @@ async function loadState(): Promise<WorkspaceState> {
     apiOnline = false;
     showApiWarning("API unavailable. Showing a local fallback board.");
     return freshWorkspaceState();
+  }
+}
+
+async function loadAuthSession(): Promise<void> {
+  try {
+    const response = await fetch("/auth/session", {
+      headers: { Accept: "application/json" }
+    });
+    authSession = response.ok ? await response.json() as AuthSession : null;
+  } catch (_error) {
+    authSession = null;
+  } finally {
+    authSessionLoaded = true;
+    renderAccountControl();
   }
 }
 
@@ -611,6 +639,21 @@ function renderTopbar(board: Board): void {
   if (boardTitle) boardTitle.textContent = board.name;
 
   if (editFlowButton) editFlowButton.hidden = !Boolean(board.lanes.length && !board.isEditingFlow && !board.configDraft);
+  renderAccountControl();
+}
+
+function renderAccountControl(): void {
+  if (!accountControl) return;
+  if (!authSessionLoaded || !authSession) {
+    accountControl.innerHTML = "";
+    return;
+  }
+
+  const label = authSession.name || authSession.email || authSession.userId || "Signed in";
+  accountControl.innerHTML = `
+    <span class="account-chip" title="${escapeAttribute(authSession.workspaceId)}">${escapeHtml(label)}</span>
+    <a class="secondary-button account-logout" href="/auth/logout?global=1">Logout</a>
+  `;
 }
 
 function renderMetrics(board: Board): void {
@@ -2485,7 +2528,8 @@ if (modalRoot) {
 }
 
 async function initialize() {
-  state = await loadState();
+  const [loadedState] = await Promise.all([loadState(), loadAuthSession()]);
+  state = loadedState;
   render();
   startPolling();
   startLiveUpdates();

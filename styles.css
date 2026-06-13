@@ -132,11 +132,16 @@ button:disabled {
 }
 
 .topbar-left,
+.topbar-right,
 .board-actions {
   align-items: center;
   display: flex;
   gap: 8px;
   min-width: 0;
+}
+
+.topbar-right {
+  justify-content: flex-end;
 }
 
 .product-mark {
@@ -164,6 +169,26 @@ button:disabled {
   min-width: 160px;
   max-width: 260px;
   padding: 0 30px 0 9px;
+}
+
+.account-chip {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--muted);
+  display: inline-flex;
+  font-size: 13px;
+  font-weight: 800;
+  min-height: 32px;
+  max-width: 220px;
+  align-items: center;
+  overflow: hidden;
+  padding: 0 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-logout {
+  text-decoration: none;
 }
 
 .primary-button,

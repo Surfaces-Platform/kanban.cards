@@ -2,7 +2,7 @@
 
 kanban.cards is a private-beta Kanban board for human and agent-controlled cards. Humans use the browser UI to describe or choose a workflow, create cards, and review activity. Agents use the API to create cards, move cards, and post progress or reviewer-facing comments.
 
-For the product thesis and the "why Kanban / why agents using Kanban" framing, see [Product Vision](docs/product-vision.md).
+For the product thesis and the "why Kanban / why agents using Kanban" framing, see [Product Vision](docs/product-vision.md). For the target user, team, project, and agent governance model, see [AI-Native Access Model](docs/ai-native-access-model.md).
 
 ## Local Development
 
@@ -20,9 +20,35 @@ Runtime source lives in TypeScript under `src/`. `src/client/app.ts` builds to `
 Production requires:
 
 - `KANBAN_CARDS_API_TOKEN`: admin compatibility bearer token for emergencies and tests
-- `KANBAN_CARDS_BASIC_USER`: private-beta UI username
-- `KANBAN_CARDS_BASIC_PASSWORD`: private-beta UI password
+- `OIDC_ISSUER`: Auth0/OIDC issuer URL
+- `OIDC_CLIENT_ID`: Auth0/OIDC client ID
+- `OIDC_REDIRECT_URI`: callback URL, usually `https://kanban.cards/auth/callback`
+- `SESSION_SECRET`: unique secret for signing session cookies
+- `PLATFORM_SURFACE_ID`: `kanban.cards`
 - `KANBAN_CARDS_DATABASE_URL`, `POSTGRES_URL`, or `DATABASE_URL`: Postgres connection string
+
+Optional Auth0/OIDC settings:
+
+- `OIDC_CLIENT_SECRET`: client secret when required by the Auth0 application
+- `OIDC_LOGOUT_URL`: Auth0 v2 logout URL, for example `https://<tenant>.auth0.com/v2/logout`
+- `OIDC_POST_LOGOUT_REDIRECT_URI`: post-logout return URL, usually `https://kanban.cards/`
+- `OIDC_WORKSPACE_CLAIM`: override for the workspace claim key
+- `OIDC_SURFACE_ACCESS_CLAIM`: override for the surface access claim key
+- `SESSION_TTL_SECONDS`: session cookie lifetime, default `604800`
+
+Auth0 must allow these callback URLs:
+
+- `https://kanban.cards/auth/callback`
+- `http://127.0.0.1:4317/auth/callback`
+
+Auth0 must allow these logout URLs:
+
+- `https://kanban.cards/`
+- `https://kanban.cards/auth/logout/complete`
+- `http://127.0.0.1:4317/`
+- `http://127.0.0.1:4317/auth/logout/complete`
+
+The Auth0 Post Login Action should emit `https://surfaces.systems/workspace_id` and include `kanban.cards` in `https://surfaces.systems/surface_access`.
 
 Local aliases from the earlier Instruct prototype are still accepted temporarily:
 

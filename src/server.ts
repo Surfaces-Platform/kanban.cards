@@ -19,6 +19,16 @@ import {
 } from "./state-store";
 import { createAgentTokenStore } from "./agent-token-store";
 import { createEventStore } from "./event-store";
+import {
+  clearSessionAndRedirect,
+  getSession,
+  handleCallback,
+  hasPlatformAuthConfig,
+  logout,
+  type PlatformAuthRouteResponse,
+  type PlatformSession,
+  startLogin
+} from "./platform-auth";
 import type {
   AgentInstruction,
   AgentSpec,
@@ -35,7 +45,21 @@ import type {
   WorkspaceState
 } from "./types";
 
-type AdminAuthContext = { kind: "admin"; method: "basic" | "bearer" | "local-open" };
+type SessionAdminAuthContext = {
+  kind: "admin";
+  method: "session";
+  userId: string;
+  email: string;
+  name: string;
+  workspaceId: string;
+  roles: string[];
+  surfaceAccess: string[];
+  teamId: string;
+  projectId: string;
+};
+type AdminAuthContext =
+  | { kind: "admin"; method: "bearer" | "local-open" }
+  | SessionAdminAuthContext;
 type AgentAuthContext = {
   kind: "agent";
   method: "bearer";
@@ -63,8 +87,6 @@ interface CreateAppOptions extends PostgresOptions {
   requireDatabase?: boolean;
   requireAuth?: boolean;
   apiToken?: string;
-  basicUser?: string;
-  basicPassword?: string;
   store?: StateStore;
   tokenStore?: AgentTokenStore;
   eventStore?: EventStore;
@@ -79,8 +101,8 @@ interface CreateAppOptions extends PostgresOptions {
 interface AuthConfig {
   accessAuthRequired: boolean;
   apiToken: string;
-  basicUser: string;
-  basicPassword: string;
+  platformAuthConfigured: boolean;
+  surfaceId: string;
   localWriteOpen: boolean;
   missingRequiredSecrets: string[];
 }
@@ -95,6 +117,7 @@ type AsyncHandler = (req: Request, res: Response, next: NextFunction) => unknown
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 4317;
 const PRODUCT_NAME = "kanban.cards";
+const DEFAULT_PROJECT_ID = "kanban.cards:default";
 const SSE_HEARTBEAT_MS = 25_000;
 const SSE_POLL_MS = 1_000;
 const SSE_BATCH_LIMIT = 200;
@@ -122,6 +145,7 @@ const FALLBACK_INDEX_HTML = `<!doctype html>
         </label>
         <button class="secondary-button" type="button" id="new-board">New board</button>
       </div>
+      <div class="topbar-right" id="account-control"></div>
     </header>
 
     <section class="board-toolbar" aria-label="Board controls">
@@ -227,10 +251,45 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       tokenStorage: tokenStore.kind,
       eventStorage: eventStore.kind,
       authRequired: auth.accessAuthRequired,
+      platformAuthConfigured: auth.platformAuthConfigured,
+      surfaceId: auth.surfaceId,
       writeAuthRequired: !auth.localWriteOpen,
       missingConfig: missingRequiredConfig
     });
   });
+
+  app.get("/auth/login", asyncHandler(async (req, res) => {
+    await sendPlatformAuthResponse(res, await startLogin(toWebRequest(req), { surface: auth.surfaceId }));
+  }));
+
+  app.get("/auth/callback", asyncHandler(async (req, res) => {
+    await sendPlatformAuthResponse(res, await handleCallback(toWebRequest(req), { surface: auth.surfaceId }));
+  }));
+
+  app.get("/auth/logout", asyncHandler(async (req, res) => {
+    await sendPlatformAuthResponse(res, await logout(toWebRequest(req), { global: req.query.global === "1" }));
+  }));
+
+  app.post("/auth/logout", asyncHandler(async (req, res) => {
+    await sendPlatformAuthResponse(res, await logout(toWebRequest(req), { global: req.query.global === "1" }));
+  }));
+
+  app.get("/auth/logout/complete", asyncHandler(async (req, res) => {
+    await sendPlatformAuthResponse(res, clearSessionAndRedirect(toWebRequest(req), "/"));
+  }));
+
+  app.get("/auth/session", asyncHandler(async (req, res) => {
+    if (!auth.platformAuthConfigured) {
+      res.status(401).json({ error: "No active session." });
+      return;
+    }
+    const result = await getSession(toWebRequest(req));
+    if (!result.ok) {
+      res.status(401).json({ error: "No active session." });
+      return;
+    }
+    res.json(publicSession(result.session));
+  }));
 
   app.use(requireAccessAuth(auth, tokenStore, missingRequiredConfig));
 
@@ -693,20 +752,22 @@ function createAuthConfig(options: CreateAppOptions = {}): AuthConfig {
   const productionLike = options.requireAuth ?? Boolean(process.env.VERCEL || process.env.NODE_ENV === "production");
   const apiToken = options.apiToken ?? process.env.KANBAN_CARDS_API_TOKEN ?? process.env.INSTRUCT_API_TOKEN ?? "";
   const apiTokenProvided = Boolean(options.apiToken || process.env.KANBAN_CARDS_API_TOKEN || process.env.INSTRUCT_API_TOKEN);
-  const basicUser = options.basicUser ?? process.env.KANBAN_CARDS_BASIC_USER ?? "";
-  const basicPassword = options.basicPassword ?? process.env.KANBAN_CARDS_BASIC_PASSWORD ?? "";
-  const basicConfigured = Boolean(basicUser && basicPassword);
+  const platformAuthConfigured = hasPlatformAuthConfig();
+  const surfaceId = process.env.PLATFORM_SURFACE_ID?.trim() || PRODUCT_NAME;
   const missingRequiredSecrets: string[] = [];
 
   if (productionLike && !apiToken) missingRequiredSecrets.push("KANBAN_CARDS_API_TOKEN");
-  if (productionLike && !basicUser) missingRequiredSecrets.push("KANBAN_CARDS_BASIC_USER");
-  if (productionLike && !basicPassword) missingRequiredSecrets.push("KANBAN_CARDS_BASIC_PASSWORD");
+  if (productionLike && !process.env.OIDC_ISSUER?.trim()) missingRequiredSecrets.push("OIDC_ISSUER");
+  if (productionLike && !process.env.OIDC_CLIENT_ID?.trim()) missingRequiredSecrets.push("OIDC_CLIENT_ID");
+  if (productionLike && !process.env.OIDC_REDIRECT_URI?.trim()) missingRequiredSecrets.push("OIDC_REDIRECT_URI");
+  if (productionLike && !process.env.SESSION_SECRET?.trim()) missingRequiredSecrets.push("SESSION_SECRET");
+  if (productionLike && process.env.PLATFORM_SURFACE_ID?.trim() !== PRODUCT_NAME) missingRequiredSecrets.push("PLATFORM_SURFACE_ID=kanban.cards");
 
   return {
-    accessAuthRequired: Boolean(productionLike || basicConfigured),
+    accessAuthRequired: Boolean(productionLike || platformAuthConfigured),
     apiToken,
-    basicUser,
-    basicPassword,
+    platformAuthConfigured,
+    surfaceId,
     localWriteOpen: Boolean(!productionLike && !apiTokenProvided),
     missingRequiredSecrets
   };
@@ -733,14 +794,16 @@ function requireAccessAuth(
       return;
     }
 
-    res.set("WWW-Authenticate", 'Basic realm="kanban.cards", charset="UTF-8"');
+    if (isBrowserNavigation(req)) {
+      res.redirect(302, `/auth/login?returnTo=${encodeURIComponent(req.originalUrl || req.url || "/")}`);
+      return;
+    }
+
     res.status(401).json({ error: "Authentication required." });
   });
 }
 
 async function authenticateRequest(req: Request, auth: AuthConfig, tokenStore: AgentTokenStore): Promise<KanbanAuthContext> {
-  if (hasValidBasic(req, auth)) return { kind: "admin", method: "basic" };
-
   const bearerToken = getBearerToken(req);
   if (bearerToken && hasValidAdminBearer(bearerToken, auth)) return { kind: "admin", method: "bearer" };
 
@@ -757,6 +820,11 @@ async function authenticateRequest(req: Request, auth: AuthConfig, tokenStore: A
         lastUsedAt: record.lastUsedAt
       };
     }
+  }
+
+  if (auth.platformAuthConfigured) {
+    const sessionResult = await getSession(toWebRequest(req));
+    if (sessionResult.ok) return sessionAuthContext(sessionResult.session);
   }
 
   if (!auth.accessAuthRequired && auth.localWriteOpen) return { kind: "admin", method: "local-open" };
@@ -797,30 +865,68 @@ function getBearerToken(req: Request): string {
   return match ? match[1] : "";
 }
 
-function hasValidBasic(req: Request, auth: AuthConfig): boolean {
-  if (!auth.basicUser || !auth.basicPassword) return false;
-  const header = req.get("authorization") || "";
-  const match = header.match(/^Basic\s+(.+)$/i);
-  if (!match) return false;
-
-  let decoded = "";
-  try {
-    decoded = Buffer.from(match[1], "base64").toString("utf8");
-  } catch (_error) {
-    return false;
-  }
-
-  const separatorIndex = decoded.indexOf(":");
-  if (separatorIndex < 0) return false;
-  const user = decoded.slice(0, separatorIndex);
-  const password = decoded.slice(separatorIndex + 1);
-  return safeEqual(user, auth.basicUser) && safeEqual(password, auth.basicPassword);
-}
-
 function safeEqual(left: unknown, right: unknown): boolean {
   const leftBuffer = Buffer.from(String(left));
   const rightBuffer = Buffer.from(String(right));
   return leftBuffer.length === rightBuffer.length && crypto.timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function sessionAuthContext(session: PlatformSession): SessionAdminAuthContext {
+  return {
+    kind: "admin",
+    method: "session",
+    userId: session.userId,
+    email: session.email,
+    name: session.name,
+    workspaceId: session.workspaceId,
+    roles: session.roles,
+    surfaceAccess: session.surfaceAccess,
+    teamId: session.workspaceId,
+    projectId: DEFAULT_PROJECT_ID
+  };
+}
+
+function publicSession(session: PlatformSession): PlatformSession & { teamId: string; projectId: string } {
+  return {
+    ...session,
+    teamId: session.workspaceId,
+    projectId: DEFAULT_PROJECT_ID
+  };
+}
+
+function isBrowserNavigation(req: Request): boolean {
+  if (req.path.startsWith("/api/")) return false;
+  const accept = req.get("accept") || "";
+  const mode = req.get("sec-fetch-mode") || "";
+  return mode === "navigate" || accept.includes("text/html") || !req.path.startsWith("/api/");
+}
+
+function toWebRequest(req: Request): globalThis.Request {
+  const protocol = (req.get("x-forwarded-proto") || req.protocol || "http").split(",")[0]?.trim() || "http";
+  const host = (req.get("x-forwarded-host") || req.get("host") || `${DEFAULT_HOST}:${DEFAULT_PORT}`).split(",")[0]?.trim();
+  const url = `${protocol}://${host}${req.originalUrl || req.url}`;
+  const headers = new Headers();
+  for (const [key, value] of Object.entries(req.headers)) {
+    if (Array.isArray(value)) headers.set(key, value.join(", "));
+    else if (value != null) headers.set(key, String(value));
+  }
+  return new globalThis.Request(url, { headers });
+}
+
+async function sendPlatformAuthResponse(res: Response, response: PlatformAuthRouteResponse): Promise<void> {
+  for (const [name, value] of Object.entries(response.headers || {})) {
+    if (name.toLowerCase() === "set-cookie" && Array.isArray(value)) res.setHeader(name, value);
+    else res.setHeader(name, value);
+  }
+  if (response.json !== undefined) {
+    res.status(response.status).json(response.json);
+    return;
+  }
+  if (response.body !== undefined) {
+    res.status(response.status).send(response.body);
+    return;
+  }
+  res.status(response.status).end();
 }
 
 function serveIndex(staticDir: string): RequestHandler {

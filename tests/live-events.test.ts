@@ -16,21 +16,20 @@ interface SseMessage {
 }
 
 test("live events require auth, stream changes, and replay missed events by cursor", async () => {
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-live-events-"));
-  const dataPath = path.join(tempDir, "state.json");
-  const eventDataPath = path.join(tempDir, "events.jsonl");
-  const apiToken = "admin-token";
-  const server = await listen(createApp({
-    dataPath,
-    eventDataPath,
-    requireAuth: true,
-    apiToken,
-    basicUser: "mike",
-    basicPassword: "secret"
-  }));
-  const baseUrl = `http://127.0.0.1:${serverPort(server)}`;
+  await withPlatformAuthEnv(async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-live-events-"));
+    const dataPath = path.join(tempDir, "state.json");
+    const eventDataPath = path.join(tempDir, "events.jsonl");
+    const apiToken = "admin-token";
+    const server = await listen(createApp({
+      dataPath,
+      eventDataPath,
+      requireAuth: true,
+      apiToken
+    }));
+    const baseUrl = `http://127.0.0.1:${serverPort(server)}`;
 
-  try {
+    try {
     const denied = await fetch(`${baseUrl}/api/events`);
     assert.equal(denied.status, 401);
 
@@ -75,10 +74,11 @@ test("live events require auth, stream changes, and replay missed events by curs
     } finally {
       stream.close();
     }
-  } finally {
-    await closeServer(server);
-    await fs.rm(tempDir, { recursive: true, force: true });
-  }
+    } finally {
+      await closeServer(server);
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
 });
 
 class SseMessageReader {
@@ -209,4 +209,33 @@ async function writeJson<T = any>(url: string, headers: Record<string, string>, 
 
 function windowlessSetTimeout(handler: () => void, timeout: number): NodeJS.Timeout {
   return setTimeout(handler, timeout);
+}
+
+async function withPlatformAuthEnv(run: () => Promise<void>): Promise<void> {
+  const restore = setEnv({
+    OIDC_ISSUER: "https://auth.example.com/",
+    OIDC_CLIENT_ID: "test-client",
+    OIDC_REDIRECT_URI: "http://127.0.0.1:4317/auth/callback",
+    SESSION_SECRET: "test-session-secret-with-enough-entropy",
+    PLATFORM_SURFACE_ID: "kanban.cards"
+  });
+  try {
+    await run();
+  } finally {
+    restore();
+  }
+}
+
+function setEnv(values: Record<string, string>): () => void {
+  const previous = new Map<string, string | undefined>();
+  for (const [key, value] of Object.entries(values)) {
+    previous.set(key, process.env[key]);
+    process.env[key] = value;
+  }
+  return () => {
+    for (const [key, value] of previous.entries()) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  };
 }

@@ -11,21 +11,20 @@ import { hashAgentToken } from "../src/agent-token-store";
 import { createApp } from "../src/server";
 
 test("scoped agent tokens are one-time, hashed, revocable, and board-agent limited", async () => {
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-cards-agent-access-"));
-  const dataPath = path.join(tempDir, "state.json");
-  const tokenDataPath = path.join(tempDir, "agent-tokens.json");
-  const adminToken = "admin-token";
-  const server = await listen(createApp({
-    dataPath,
-    tokenDataPath,
-    requireAuth: true,
-    apiToken: adminToken,
-    basicUser: "mike",
-    basicPassword: "secret"
-  }));
-  const baseUrl = `http://127.0.0.1:${serverPort(server)}`;
+  await withPlatformAuthEnv(async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-cards-agent-access-"));
+    const dataPath = path.join(tempDir, "state.json");
+    const tokenDataPath = path.join(tempDir, "agent-tokens.json");
+    const adminToken = "admin-token";
+    const server = await listen(createApp({
+      dataPath,
+      tokenDataPath,
+      requireAuth: true,
+      apiToken: adminToken
+    }));
+    const baseUrl = `http://127.0.0.1:${serverPort(server)}`;
 
-  try {
+    try {
     const board = await writeJson(`${baseUrl}/api/boards`, bearerHeaders(adminToken), {
       name: "Scoped board",
       lanes: [
@@ -126,10 +125,11 @@ test("scoped agent tokens are one-time, hashed, revocable, and board-agent limit
 
     const afterRevoke = await fetch(`${baseUrl}/api/agent/session`, { headers: agentHeaders });
     assert.equal(afterRevoke.status, 401);
-  } finally {
-    await closeServer(server);
-    await fs.rm(tempDir, { recursive: true, force: true });
-  }
+    } finally {
+      await closeServer(server);
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
 });
 
 function lane(title: string, description: string, defaultOwnerAgentId: string | null = null, defaultReviewerAgentId: string | null = null) {
@@ -203,4 +203,33 @@ async function writeJson<T = any>(url: string, headers: Record<string, string>, 
     assert.fail(`${url} returned ${response.status}: ${await response.text()}`);
   }
   return response.json() as Promise<T>;
+}
+
+async function withPlatformAuthEnv(run: () => Promise<void>): Promise<void> {
+  const restore = setEnv({
+    OIDC_ISSUER: "https://auth.example.com/",
+    OIDC_CLIENT_ID: "test-client",
+    OIDC_REDIRECT_URI: "http://127.0.0.1:4317/auth/callback",
+    SESSION_SECRET: "test-session-secret-with-enough-entropy",
+    PLATFORM_SURFACE_ID: "kanban.cards"
+  });
+  try {
+    await run();
+  } finally {
+    restore();
+  }
+}
+
+function setEnv(values: Record<string, string>): () => void {
+  const previous = new Map<string, string | undefined>();
+  for (const [key, value] of Object.entries(values)) {
+    previous.set(key, process.env[key]);
+    process.env[key] = value;
+  }
+  return () => {
+    for (const [key, value] of previous.entries()) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  };
 }
