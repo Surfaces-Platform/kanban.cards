@@ -122,7 +122,6 @@ const FALLBACK_INDEX_HTML = `<!doctype html>
         </label>
         <button class="secondary-button" type="button" id="new-board">New board</button>
       </div>
-      <button class="primary-button" type="button" id="new-work-item" disabled title="Configure lanes before adding cards.">New card</button>
     </header>
 
     <section class="board-toolbar" aria-label="Board controls">

@@ -1023,6 +1023,25 @@ textarea.form-control {
   text-align: center;
 }
 
+.empty-lane {
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 900;
+  min-height: 44px;
+  width: 100%;
+}
+
+.empty-lane:hover,
+.empty-lane:focus-visible {
+  background: var(--accent-soft);
+  border-color: rgba(47, 95, 143, 0.35);
+  color: var(--accent-strong);
+  outline: 3px solid rgba(47, 95, 143, 0.2);
+  outline-offset: 2px;
+}
+
 .chip {
   align-items: center;
   background: var(--panel);

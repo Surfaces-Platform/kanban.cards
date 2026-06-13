@@ -78,6 +78,7 @@ let flowMessageTone: "neutral" | "warning" | "success" = "neutral";
 let templateFormOpen = false;
 let editingTemplateId: string | null = null;
 let workItemDialogOpen = false;
+let workItemDialogLaneId: string | null = null;
 let flowActionsMenuOpen = false;
 let deleteBoardDialogOpen = false;
 let agentConnectDialogOpen = false;
@@ -97,7 +98,6 @@ let remoteRefreshInFlight = false;
 
 const boardCanvas = document.querySelector("#board-canvas") as HTMLElement;
 const inspectorPanel = document.querySelector("#inspector-panel") as HTMLElement;
-const newWorkItemButton = document.querySelector("#new-work-item") as HTMLButtonElement | null;
 const editFlowButton = document.querySelector("#edit-flow") as HTMLButtonElement | null;
 const boardSelect = document.querySelector("#board-select") as HTMLSelectElement | null;
 const newBoardButton = document.querySelector("#new-board") as HTMLButtonElement | null;
@@ -610,16 +610,7 @@ function renderTopbar(board: Board): void {
 
   if (boardTitle) boardTitle.textContent = board.name;
 
-  const configured = Boolean(board.lanes.length && !board.isEditingFlow && !board.configDraft);
-  if (editFlowButton) editFlowButton.hidden = !configured;
-  if (newWorkItemButton) {
-    newWorkItemButton.disabled = !configured;
-    newWorkItemButton.title = configured
-      ? "Create a card on this board."
-      : board.lanes.length
-        ? "Apply or cancel flow edits before adding cards."
-        : "Configure lanes before adding cards.";
-  }
+  if (editFlowButton) editFlowButton.hidden = !Boolean(board.lanes.length && !board.isEditingFlow && !board.configDraft);
 }
 
 function renderMetrics(board: Board): void {
@@ -661,11 +652,15 @@ function renderBoard(board: Board): void {
           <span class="lane-count">${laneItems.length}</span>
         </div>
         <div class="work-item-stack">
-          ${laneItems.length ? laneItems.map((item) => renderWorkItemCard(item, board)).join("") : '<p class="empty-lane">No cards</p>'}
+          ${laneItems.length ? laneItems.map((item) => renderWorkItemCard(item, board)).join("") : renderEmptyLaneCta(lane)}
         </div>
       </section>
     `;
   }).join("");
+}
+
+function renderEmptyLaneCta(lane: Lane): string {
+  return `<button class="empty-lane empty-lane-cta" type="button" data-action="open-work-item-dialog" data-lane-id="${escapeAttribute(lane.id)}">+ New Card</button>`;
 }
 
 function renderLaneDescription(lane: Lane): string {
@@ -1335,9 +1330,11 @@ function renderConnectAgentDialog(board: Board): string {
 
 function renderCreateWorkItemDialog(board: Board): string {
   const firstLane = board.lanes[0] || ({} as Partial<Lane>);
+  const selectedLane = board.lanes.find((lane) => lane.id === workItemDialogLaneId) || firstLane;
+  const selectedLaneId = selectedLane.id || "";
   const agentOptions = renderAgentOptions(board.agentSpecs || []);
   const laneOptions = board.lanes.map((lane) => `
-    <option value="${escapeAttribute(lane.id)}">${escapeHtml(lane.title)}</option>
+    <option value="${escapeAttribute(lane.id)}" ${lane.id === selectedLaneId ? "selected" : ""}>${escapeHtml(lane.title)}</option>
   `).join("");
 
   return `
@@ -1357,12 +1354,12 @@ function renderCreateWorkItemDialog(board: Board): string {
           ${renderSelectField({ label: "Lane", optionsHtml: laneOptions, attributes: { "data-work-item-field": "laneId" } })}
           ${board.agentSpecs?.length ? "" : '<p class="empty-note">No board agents configured yet. Add agents in Edit flow to make assignments selectable.</p>'}
           ${renderFieldGrid(`
-            ${renderSelectField({ label: "Owner agent", optionsHtml: agentOptions(firstLane.defaultOwnerAgentId), attributes: { "data-work-item-field": "ownerAgentId" } })}
-            ${renderSelectField({ label: "Reviewer agent", optionsHtml: agentOptions(firstLane.defaultReviewerAgentId), attributes: { "data-work-item-field": "reviewerAgentId" } })}
+            ${renderSelectField({ label: "Owner agent", optionsHtml: agentOptions(selectedLane.defaultOwnerAgentId), attributes: { "data-work-item-field": "ownerAgentId" } })}
+            ${renderSelectField({ label: "Reviewer agent", optionsHtml: agentOptions(selectedLane.defaultReviewerAgentId), attributes: { "data-work-item-field": "reviewerAgentId" } })}
           `)}
           <div class="modal-actions">
-            <button class="primary-button" type="button" data-action="create-work-item">Create card</button>
             <button class="secondary-button" type="button" data-action="cancel-work-item">Cancel</button>
+            <button class="primary-button" type="submit" data-action="create-work-item">Create card</button>
           </div>
         </form>
       </section>
@@ -1400,7 +1397,7 @@ function createNewBoard(): void {
   flowMessageTone = "neutral";
   templateFormOpen = false;
   editingTemplateId = null;
-  workItemDialogOpen = false;
+  resetWorkItemDialogState();
   flowActionsMenuOpen = false;
   deleteBoardDialogOpen = false;
   resetAgentConnectDialog();
@@ -1415,7 +1412,7 @@ function switchBoard(boardId: string): void {
   flowMessageTone = "neutral";
   templateFormOpen = false;
   editingTemplateId = null;
-  workItemDialogOpen = false;
+  resetWorkItemDialogState();
   flowActionsMenuOpen = false;
   deleteBoardDialogOpen = false;
   resetAgentConnectDialog();
@@ -1443,7 +1440,7 @@ function useTemplate(templateId: string): void {
   flowMessageTone = "neutral";
   templateFormOpen = false;
   editingTemplateId = null;
-  workItemDialogOpen = false;
+  resetWorkItemDialogState();
   flowActionsMenuOpen = false;
   deleteBoardDialogOpen = false;
   resetAgentConnectDialog();
@@ -1461,14 +1458,21 @@ function canCreateWorkItems(board: Board): boolean {
   return Boolean(board?.lanes?.length && !board.isEditingFlow && !board.configDraft);
 }
 
-function openWorkItemDialog(): void {
+function resetWorkItemDialogState(): void {
+  workItemDialogOpen = false;
+  workItemDialogLaneId = null;
+}
+
+function openWorkItemDialog(laneId: string | null = null): void {
   const board = getActiveBoard();
   if (!canCreateWorkItems(board)) {
+    workItemDialogLaneId = null;
     showToast(board.lanes.length ? "Apply or cancel flow edits before adding cards." : "Configure lanes before adding cards.");
     return;
   }
 
   workItemDialogOpen = true;
+  workItemDialogLaneId = board.lanes.some((lane) => lane.id === laneId) ? laneId : null;
   deleteBoardDialogOpen = false;
   resetAgentConnectDialog();
   flowActionsMenuOpen = false;
@@ -1477,7 +1481,7 @@ function openWorkItemDialog(): void {
 }
 
 function closeWorkItemDialog(): void {
-  workItemDialogOpen = false;
+  resetWorkItemDialogState();
   render();
 }
 
@@ -1490,7 +1494,7 @@ async function openAgentConnectDialog(agentId: string | undefined): Promise<void
     return;
   }
 
-  workItemDialogOpen = false;
+  resetWorkItemDialogState();
   deleteBoardDialogOpen = false;
   flowActionsMenuOpen = false;
   agentConnectDialogOpen = true;
@@ -1633,7 +1637,7 @@ function createWorkItemFromForm(action: HTMLElement): void {
   board.workItems.push(item);
   board.selectedId = item.id;
   touchBoard(board);
-  workItemDialogOpen = false;
+  resetWorkItemDialogState();
   saveState();
   showToast("Card created.");
   render();
@@ -1834,7 +1838,7 @@ function toggleFlowActionsMenu(): void {
 function openDeleteBoardDialog(): void {
   flowActionsMenuOpen = false;
   deleteBoardDialogOpen = true;
-  workItemDialogOpen = false;
+  resetWorkItemDialogState();
   resetAgentConnectDialog();
   render();
   (modalRoot?.querySelector("[data-delete-confirm]") as HTMLElement | null)?.focus();
@@ -2358,6 +2362,7 @@ boardCanvas.addEventListener("click", (event: MouseEvent) => {
     const templateId = action.dataset.templateId;
 
     if (action.dataset.action === "toggle-flow-menu") toggleFlowActionsMenu();
+    if (action.dataset.action === "open-work-item-dialog") openWorkItemDialog(action.dataset.laneId || null);
     if (action.dataset.action === "open-delete-board") openDeleteBoardDialog();
     if (action.dataset.action === "generate-flow") generateDraftFromPrompt();
     if (action.dataset.action === "apply-board") applyBoard();
@@ -2422,10 +2427,6 @@ if (newBoardButton) {
   newBoardButton.addEventListener("click", createNewBoard);
 }
 
-if (newWorkItemButton) {
-  newWorkItemButton.addEventListener("click", openWorkItemDialog);
-}
-
 if (boardSelect) {
   boardSelect.addEventListener("change", (event) => {
     switchBoard((event.target as HTMLSelectElement).value);
@@ -2438,18 +2439,29 @@ if (modalRoot) {
     const action = target.closest("[data-action]") as HTMLElement | null;
     if (!action) return;
     if (action.dataset.action === "close-modal" && target === action) {
-      workItemDialogOpen = false;
+      resetWorkItemDialogState();
       deleteBoardDialogOpen = false;
       resetAgentConnectDialog();
       render();
     }
     if (action.dataset.action === "cancel-work-item") closeWorkItemDialog();
-    if (action.dataset.action === "create-work-item") createWorkItemFromForm(action);
+    if (action.dataset.action === "create-work-item") {
+      event.preventDefault();
+      createWorkItemFromForm(action);
+    }
     if (action.dataset.action === "cancel-agent-connect") closeAgentConnectDialog();
     if (action.dataset.action === "create-agent-token") createAgentTokenFromForm(action);
     if (action.dataset.action === "revoke-agent-token") revokeAgentToken(action.dataset.tokenId);
     if (action.dataset.action === "cancel-delete-board") closeDeleteBoardDialog();
     if (action.dataset.action === "confirm-delete-board") deleteCurrentBoardFromDialog(action);
+  });
+
+  modalRoot.addEventListener("submit", (event: SubmitEvent) => {
+    const form = event.target as HTMLElement;
+    if (!form.matches("[data-work-item-form]")) return;
+    event.preventDefault();
+    const action = form.querySelector('[data-action="create-work-item"]') as HTMLElement | null;
+    if (action) createWorkItemFromForm(action);
   });
 
   modalRoot.addEventListener("input", (event: Event) => {
@@ -2465,7 +2477,7 @@ if (modalRoot) {
   modalRoot.addEventListener("keydown", (event: KeyboardEvent) => {
     if (event.key !== "Escape") return;
     if (!workItemDialogOpen && !deleteBoardDialogOpen && !agentConnectDialogOpen) return;
-    workItemDialogOpen = false;
+    resetWorkItemDialogState();
     deleteBoardDialogOpen = false;
     resetAgentConnectDialog();
     render();
