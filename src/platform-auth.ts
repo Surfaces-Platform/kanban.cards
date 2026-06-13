@@ -199,7 +199,7 @@ export async function handleCallback(req: Request, opts: { surface?: string } = 
           }
         : undefined;
     const sessionResult = validateClaims(claims, surface, claimMapping);
-    if (!sessionResult.ok) {
+    if (sessionResult.ok === false) {
       return withSetCookies(errorResponse(sessionResult.code, 403), clearPkceStateCookies(prod));
     }
 
