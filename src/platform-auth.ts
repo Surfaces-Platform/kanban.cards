@@ -180,12 +180,12 @@ export async function handleCallback(req: Request, opts: { surface?: string } = 
     const stateFromIdp = url.searchParams.get("state");
     prod = isProductionRequest(req);
 
-    if (!code || !stateFromIdp) return errorResponse(AUTH_INVALID_STATE, 400);
+    if (!code || !stateFromIdp) return invalidStateRedirect(prod);
 
     const verifier = getCookieValue(req, pkceCookieName(prod));
     const statePayload = await readStateCookie(req, config.sessionSecret, prod);
     if (!verifier || !statePayload || statePayload.state !== stateFromIdp || normalizeSurface(statePayload.surface) !== surface) {
-      return withSetCookies(errorResponse(AUTH_INVALID_STATE, 400), clearPkceStateCookies(prod));
+      return invalidStateRedirect(prod);
     }
 
     const discovery = await fetchOidcConfig(config.oidcIssuer);
@@ -369,6 +369,10 @@ function withSetCookies(response: PlatformAuthRouteResponse, cookies: string[]):
       "Set-Cookie": cookies
     }
   };
+}
+
+function invalidStateRedirect(production: boolean): PlatformAuthRouteResponse {
+  return redirectResponse("/auth/login?returnTo=%2F", clearPkceStateCookies(production));
 }
 
 async function fetchOidcConfig(issuer: string): Promise<OidcDiscoveryConfig> {

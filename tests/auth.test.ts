@@ -139,6 +139,14 @@ test("Auth0 login, callback, logout, and returnTo validation use platform claims
       const invalidReturnTo = await fetch(`${baseUrl}/auth/login?returnTo=${encodeURIComponent("https://evil.example/")}`);
       assert.equal(invalidReturnTo.status, 400);
 
+      const staleCallback = await fetch(`${baseUrl}/auth/callback?code=stale-code&state=stale-state`, {
+        redirect: "manual"
+      });
+      assert.equal(staleCallback.status, 302);
+      assert.equal(staleCallback.headers.get("location"), "/auth/login?returnTo=%2F");
+      assert.ok(getSetCookieHeaders(staleCallback).some((cookie) => cookie.startsWith("surfaces_pkce=;")));
+      assert.ok(getSetCookieHeaders(staleCallback).some((cookie) => cookie.startsWith("surfaces_state=;")));
+
       const login = await fetch(`${baseUrl}/auth/login?returnTo=${encodeURIComponent("/api/state?from=login")}`, {
         redirect: "manual"
       });
