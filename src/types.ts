@@ -60,8 +60,25 @@ export interface BoardDraft {
   agentSpecs: AgentSpec[];
 }
 
+export interface Team {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface Project {
+  id: string;
+  teamId: string;
+  name: string;
+  description: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Board {
   id: string;
+  projectId: string;
   name: string;
   lanes: Lane[];
   agentSpecs: AgentSpec[];
@@ -85,6 +102,9 @@ export interface BoardTemplate {
 }
 
 export interface WorkspaceState {
+  team: Team;
+  projects: Project[];
+  activeProjectId: string;
   boards: Board[];
   activeBoardId: string;
   templates: BoardTemplate[];
@@ -108,6 +128,13 @@ export interface TokenRecord {
   label: string;
   tokenHash: string;
   last4: string;
+  teamId: Nullable<string>;
+  projectId: Nullable<string>;
+  sessionId: string;
+  delegatedBy: Nullable<string>;
+  capabilities: string[];
+  expiresAt: Nullable<string>;
+  reason: string;
   createdAt: string;
   lastUsedAt: Nullable<string>;
   revokedAt: Nullable<string>;
@@ -125,6 +152,13 @@ export interface AgentTokenCreateInput {
   boardId: string;
   agentId: string;
   label?: unknown;
+  teamId?: Nullable<string>;
+  projectId?: Nullable<string>;
+  sessionId?: unknown;
+  delegatedBy?: Nullable<string>;
+  capabilities?: unknown;
+  expiresAt?: Nullable<string>;
+  reason?: unknown;
 }
 
 export type WorkspaceEventType = "workspace_changed";

@@ -13,8 +13,10 @@ import type {
   Lane,
   PostgresClient,
   PostgresOptions,
+  Project,
   StateStore,
   StateStoreOptions,
+  Team,
   WorkItem,
   WorkItemComment,
   WorkspaceState
@@ -22,9 +24,13 @@ import type {
 
 export const COMMENT_KINDS = new Set<CommentKind>(["progress", "instruction", "question", "change_request", "note"]);
 export const COMMENT_STATUSES = new Set<CommentStatus>(["open", "acknowledged", "resolved"]);
+export const DEFAULT_TEAM_ID = "kanban.cards:team";
+export const DEFAULT_PROJECT_ID = "kanban.cards:default";
 
 const DEFAULT_WORKSPACE_ID = "default";
 const DEFAULT_TABLE_NAME = "kanban_workspaces";
+const DEFAULT_TEAM_NAME = "kanban.cards";
+const DEFAULT_PROJECT_NAME = "kanban.cards";
 type UnknownRecord = Record<string, any>;
 
 export function createStateStore(options: StateStoreOptions | string = {}): StateStore {
@@ -175,8 +181,14 @@ function resolvePostgresSsl(options: Pick<PostgresOptions, "ssl"> = {}): Postgre
 }
 
 export function freshWorkspaceState(): WorkspaceState {
-  const board = createBoard({ name: "Untitled board" });
+  const now = new Date().toISOString();
+  const team = createTeam({ id: DEFAULT_TEAM_ID, name: DEFAULT_TEAM_NAME, createdAt: now, updatedAt: now });
+  const project = createProject({ id: DEFAULT_PROJECT_ID, teamId: team.id, name: DEFAULT_PROJECT_NAME, createdAt: now, updatedAt: now });
+  const board = createBoard({ name: "Untitled board", projectId: project.id });
   return {
+    team,
+    projects: [project],
+    activeProjectId: project.id,
     boards: [board],
     activeBoardId: board.id,
     templates: []
@@ -185,8 +197,10 @@ export function freshWorkspaceState(): WorkspaceState {
 
 export function createBoard(input: Partial<Board> = {}): Board {
   const now = new Date().toISOString();
+  const projectId = input.projectId || DEFAULT_PROJECT_ID;
   const board = normalizeBoard({
     id: input.id || makeId("board"),
+    projectId,
     name: input.name || "Untitled board",
     lanes: input.lanes || [],
     agentSpecs: input.agentSpecs || [],
@@ -197,24 +211,97 @@ export function createBoard(input: Partial<Board> = {}): Board {
     isEditingFlow: Boolean(input.isEditingFlow),
     createdAt: input.createdAt || now,
     updatedAt: input.updatedAt || now
-  });
+  }, projectId, new Set([projectId]));
   if (!board) throw new Error("Unable to create board.");
   return board;
 }
 
-export function normalizeWorkspace(rawState: unknown): WorkspaceState {
-  const state = isRecord(rawState) ? rawState : {};
-  const boards = Array.isArray(state.boards) ? state.boards.map(normalizeBoard).filter(isNonNull) : [];
-
-  if (!boards.length) boards.push(createBoard({ name: "Untitled board" }));
-
-  const activeBoardId = boards.some((board) => board.id === state.activeBoardId) ? String(state.activeBoardId) : boards[0].id;
-  const templates = Array.isArray(state.templates) ? state.templates.map(normalizeTemplate).filter(isNonNull) : [];
-
-  return { boards, activeBoardId, templates };
+export function createTeam(input: Partial<Team> = {}): Team {
+  const now = new Date().toISOString();
+  const team = normalizeTeam({
+    id: input.id || DEFAULT_TEAM_ID,
+    name: input.name || DEFAULT_TEAM_NAME,
+    createdAt: input.createdAt || now,
+    updatedAt: input.updatedAt || now
+  });
+  if (!team) throw new Error("Unable to create team.");
+  return team;
 }
 
-function normalizeBoard(rawBoard: unknown): Board | null {
+export function createProject(input: Partial<Project> = {}): Project {
+  const now = new Date().toISOString();
+  const project = normalizeProject({
+    id: input.id || makeId("project"),
+    teamId: input.teamId || DEFAULT_TEAM_ID,
+    name: input.name || "Untitled project",
+    description: input.description || "",
+    createdAt: input.createdAt || now,
+    updatedAt: input.updatedAt || now
+  }, input.teamId || DEFAULT_TEAM_ID);
+  if (!project) throw new Error("Unable to create project.");
+  return project;
+}
+
+export function normalizeWorkspace(rawState: unknown): WorkspaceState {
+  const state = isRecord(rawState) ? rawState : {};
+  const team = normalizeTeam(state.team) || createTeam({ id: DEFAULT_TEAM_ID, name: DEFAULT_TEAM_NAME });
+  const projects = Array.isArray(state.projects)
+    ? withUniqueProjectIds(state.projects.map((project) => normalizeProject(project, team.id)).filter(isNonNull), team.id)
+    : [];
+
+  if (!projects.length) {
+    projects.push(createProject({ id: DEFAULT_PROJECT_ID, teamId: team.id, name: DEFAULT_PROJECT_NAME }));
+  }
+
+  const projectIds = new Set(projects.map((project) => project.id));
+  const fallbackProjectId = projects.some((project) => project.id === DEFAULT_PROJECT_ID) ? DEFAULT_PROJECT_ID : projects[0].id;
+  const boards = Array.isArray(state.boards)
+    ? state.boards.map((board) => normalizeBoard(board, fallbackProjectId, projectIds)).filter(isNonNull)
+    : [];
+
+  if (!boards.length) boards.push(createBoard({ name: "Untitled board", projectId: fallbackProjectId }));
+
+  const activeProjectId = projectIds.has(String(state.activeProjectId)) ? String(state.activeProjectId) : fallbackProjectId;
+  const activeProjectBoards = boards.filter((board) => board.projectId === activeProjectId);
+  const activeBoardId = boards.some((board) => board.id === state.activeBoardId)
+    ? String(state.activeBoardId)
+    : (activeProjectBoards[0] || boards[0]).id;
+  const templates = Array.isArray(state.templates) ? state.templates.map(normalizeTemplate).filter(isNonNull) : [];
+
+  return { team, projects, activeProjectId, boards, activeBoardId, templates };
+}
+
+function normalizeTeam(rawTeam: unknown): Team | null {
+  if (!isRecord(rawTeam)) return null;
+  const id = String(rawTeam.id || "").trim();
+  const name = String(rawTeam.name || DEFAULT_TEAM_NAME).trim() || DEFAULT_TEAM_NAME;
+  if (!id) return null;
+  const now = new Date().toISOString();
+  return {
+    id,
+    name,
+    createdAt: String(rawTeam.createdAt || now),
+    updatedAt: String(rawTeam.updatedAt || now)
+  };
+}
+
+function normalizeProject(rawProject: unknown, fallbackTeamId: string = DEFAULT_TEAM_ID): Project | null {
+  if (!isRecord(rawProject)) return null;
+  const id = String(rawProject.id || "").trim();
+  const name = String(rawProject.name || "").trim();
+  if (!id || !name) return null;
+  const now = new Date().toISOString();
+  return {
+    id,
+    teamId: String(rawProject.teamId || fallbackTeamId).trim() || fallbackTeamId,
+    name,
+    description: String(rawProject.description || "").trim(),
+    createdAt: String(rawProject.createdAt || now),
+    updatedAt: String(rawProject.updatedAt || now)
+  };
+}
+
+function normalizeBoard(rawBoard: unknown, fallbackProjectId: string = DEFAULT_PROJECT_ID, projectIds: Set<string> = new Set([DEFAULT_PROJECT_ID])): Board | null {
   if (!isRecord(rawBoard)) return null;
 
   const lanes = Array.isArray(rawBoard.lanes) ? withUniqueLaneIds(rawBoard.lanes.map(normalizeLane).filter(isNonNull)) : [];
@@ -230,10 +317,13 @@ function normalizeBoard(rawBoard: unknown): Board | null {
   const selectedId = workItems.some((item) => item.id === rawBoard.selectedId) ? String(rawBoard.selectedId) : null;
   const configDraft = normalizeDraft(rawBoard.configDraft);
   const name = String(rawBoard.name || "Untitled board").trim() || "Untitled board";
+  const requestedProjectId = String(rawBoard.projectId || "").trim();
+  const projectId = requestedProjectId && projectIds.has(requestedProjectId) ? requestedProjectId : fallbackProjectId;
   const now = new Date().toISOString();
 
   return {
     id: String(rawBoard.id || makeId("board")),
+    projectId,
     name,
     lanes: normalizedLanes,
     agentSpecs,
@@ -268,6 +358,21 @@ function normalizeTemplate(rawTemplate: unknown): BoardTemplate | null {
     agentSpecs,
     createdAt: String(rawTemplate.createdAt || new Date().toISOString())
   };
+}
+
+function withUniqueProjectIds(projects: Project[], fallbackTeamId: string): Project[] {
+  const used = new Map<string, number>();
+  return projects.map((project) => {
+    const preferredId = String(project.id || "").trim();
+    const baseId = preferredId || makeId("project");
+    const nextCount = (used.get(baseId) || 0) + 1;
+    used.set(baseId, nextCount);
+    return {
+      ...project,
+      id: nextCount === 1 ? baseId : `${baseId}-${nextCount}`,
+      teamId: project.teamId || fallbackTeamId
+    };
+  });
 }
 
 function normalizeDraft(draft: unknown): BoardDraft | null {
@@ -440,6 +545,10 @@ export function findBoard(state: WorkspaceState, boardId: string | null | undefi
   return state.boards.find((board) => board.id === boardId) || null;
 }
 
+export function findProject(state: WorkspaceState, projectId: string | null | undefined): Project | null {
+  return state.projects.find((project) => project.id === projectId) || null;
+}
+
 export function findWorkItem(board: Board | null | undefined, itemId: string | null | undefined): WorkItem | null {
   return board?.workItems.find((item) => item.id === itemId) || null;
 }
@@ -450,6 +559,10 @@ export function findComment(item: WorkItem | null | undefined, commentId: string
 
 export function touchBoard(board: Board): void {
   board.updatedAt = new Date().toISOString();
+}
+
+export function touchProject(project: Project): void {
+  project.updatedAt = new Date().toISOString();
 }
 
 export function touchWorkItem(item: WorkItem): void {

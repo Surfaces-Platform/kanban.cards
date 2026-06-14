@@ -45,6 +45,9 @@ test("scoped agent tokens are one-time, hashed, revocable, and board-agent limit
     assert.match(createdToken.token, /^kcagt_/);
     assert.equal(createdToken.agentId, "agent-a");
     assert.equal(createdToken.last4, createdToken.token.slice(-4));
+    assert.match(createdToken.sessionId, /^agsess_/);
+    assert.equal(createdToken.projectId, board.projectId);
+    assert.deepEqual(createdToken.capabilities, ["view", "create", "update", "comment", "move"]);
     assert.equal(Object.hasOwn(createdToken, "tokenHash"), false);
 
     const tokenFile = JSON.parse(await fs.readFile(tokenDataPath, "utf8"));
@@ -62,6 +65,8 @@ test("scoped agent tokens are one-time, hashed, revocable, and board-agent limit
     assert.equal(session.mode, "agent");
     assert.equal(session.board.id, board.id);
     assert.equal(session.agent.id, "agent-a");
+    assert.equal(session.token.sessionId, createdToken.sessionId);
+    assert.equal(session.token.projectId, board.projectId);
 
     const usedTokens = await getJson(`${baseUrl}/api/boards/${board.id}/agent-tokens`, bearerHeaders(adminToken));
     assert.ok(usedTokens.tokens[0].lastUsedAt);
@@ -86,6 +91,20 @@ test("scoped agent tokens are one-time, hashed, revocable, and board-agent limit
       laneId: board.lanes[1].id
     }, "PATCH");
     assert.equal(moved.laneId, board.lanes[1].id);
+
+    const approvalDenied = await fetch(`${baseUrl}/api/boards/${board.id}/work-items/${createdCard.id}`, {
+      method: "PATCH",
+      headers: { ...agentHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({ approvals: [{ by: "agent-a" }] })
+    });
+    assert.equal(approvalDenied.status, 403);
+
+    const deliveryDenied = await fetch(`${baseUrl}/api/boards/${board.id}/work-items/${createdCard.id}`, {
+      method: "PATCH",
+      headers: { ...agentHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({ delivered: true })
+    });
+    assert.equal(deliveryDenied.status, 403);
 
     const comment = await writeJson(`${baseUrl}/api/boards/${board.id}/work-items/${createdCard.id}/comments`, agentHeaders, {
       kind: "progress",

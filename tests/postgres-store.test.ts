@@ -13,6 +13,13 @@ type TokenRow = {
   label: string;
   token_hash: string;
   last4: string;
+  team_id: string | null;
+  project_id: string | null;
+  session_id: string;
+  delegated_by: string | null;
+  capabilities: string[];
+  expires_at: Date | null;
+  reason: string;
   created_at: Date;
   last_used_at: Date | null;
   revoked_at: Date | null;
@@ -128,7 +135,14 @@ class FakeTokenPool {
 
   async query(sql: string, args: any[] = []): Promise<QueryResult> {
     const normalizedSql = sql.replace(/\s+/g, " ").trim().toUpperCase();
-    if (normalizedSql.startsWith("CREATE TABLE") || normalizedSql.startsWith("CREATE INDEX")) {
+    if (normalizedSql.startsWith("CREATE TABLE") || normalizedSql.startsWith("CREATE INDEX") || normalizedSql.startsWith("ALTER TABLE")) {
+      return { rows: [] };
+    }
+
+    if (normalizedSql.startsWith("UPDATE") && normalizedSql.includes("SET SESSION_ID")) {
+      for (const token of this.tokens) {
+        if (!token.session_id) token.session_id = `legacy:${token.id}`;
+      }
       return { rows: [] };
     }
 
@@ -140,6 +154,13 @@ class FakeTokenPool {
         label: args[3],
         token_hash: args[4],
         last4: args[5],
+        team_id: args[6],
+        project_id: args[7],
+        session_id: args[8],
+        delegated_by: args[9],
+        capabilities: JSON.parse(args[10]),
+        expires_at: args[11] ? new Date(args[11]) : null,
+        reason: args[12],
         created_at: new Date(),
         last_used_at: null,
         revoked_at: null
@@ -158,7 +179,11 @@ class FakeTokenPool {
     }
 
     if (normalizedSql.startsWith("UPDATE") && normalizedSql.includes("SET LAST_USED_AT")) {
-      const token = this.tokens.find((candidate: TokenRow) => candidate.token_hash === args[0] && !candidate.revoked_at);
+      const token = this.tokens.find((candidate: TokenRow) =>
+        candidate.token_hash === args[0] &&
+        !candidate.revoked_at &&
+        (!candidate.expires_at || candidate.expires_at.getTime() > Date.now())
+      );
       if (!token) return { rows: [] };
       token.last_used_at = new Date();
       return { rows: [publicTokenRow(token)] };
@@ -182,6 +207,13 @@ function publicTokenRow(row: TokenRow): any {
     agent_id: row.agent_id,
     label: row.label,
     last4: row.last4,
+    team_id: row.team_id,
+    project_id: row.project_id,
+    session_id: row.session_id,
+    delegated_by: row.delegated_by,
+    capabilities: row.capabilities,
+    expires_at: row.expires_at,
+    reason: row.reason,
     created_at: row.created_at,
     last_used_at: row.last_used_at,
     revoked_at: row.revoked_at

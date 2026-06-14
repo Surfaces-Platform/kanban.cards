@@ -1,0 +1,229 @@
+import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import type { Server } from "node:http";
+import type { AddressInfo } from "node:net";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+import type { Express } from "express";
+
+import { createFileAgentTokenStore, hashAgentToken } from "../src/agent-token-store";
+import { createSessionCookie } from "../src/platform-auth";
+import { createApp } from "../src/server";
+import { DEFAULT_PROJECT_ID, DEFAULT_TEAM_ID, normalizeWorkspace } from "../src/state-store";
+
+test("legacy workspace state normalizes into Team, Project, and board ownership", () => {
+  const state = normalizeWorkspace({
+    boards: [
+      {
+        id: "board-legacy",
+        name: "Legacy board",
+        lanes: [],
+        agentSpecs: [],
+        workItems: [],
+        selectedId: null
+      }
+    ],
+    activeBoardId: "board-legacy",
+    templates: []
+  });
+
+  assert.equal(state.team.id, DEFAULT_TEAM_ID);
+  assert.equal(state.projects.length, 1);
+  assert.equal(state.projects[0].id, DEFAULT_PROJECT_ID);
+  assert.equal(state.activeProjectId, DEFAULT_PROJECT_ID);
+  assert.equal(state.boards[0].projectId, DEFAULT_PROJECT_ID);
+});
+
+test("project APIs create, rename, activate, and scope board listing", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-project-api-"));
+  const dataPath = path.join(tempDir, "state.json");
+  const token = "admin-token";
+  const server = await listen(createApp({ dataPath, apiToken: token }));
+  const baseUrl = `http://127.0.0.1:${serverPort(server)}`;
+
+  try {
+    const initial = await getJson(`${baseUrl}/api/projects`, bearerHeaders(token));
+    assert.equal(initial.activeProjectId, DEFAULT_PROJECT_ID);
+    assert.equal(initial.projects.length, 1);
+
+    const project = await writeJson(`${baseUrl}/api/projects`, bearerHeaders(token), { name: "Access Model", active: true });
+    assert.equal(project.name, "Access Model");
+    assert.equal(project.teamId, DEFAULT_TEAM_ID);
+
+    const activeBoard = await writeJson(`${baseUrl}/api/boards`, bearerHeaders(token), { name: "Active project board" });
+    assert.equal(activeBoard.projectId, project.id);
+
+    const defaultBoard = await writeJson(`${baseUrl}/api/boards`, bearerHeaders(token), {
+      name: "Default project board",
+      projectId: DEFAULT_PROJECT_ID
+    });
+    assert.equal(defaultBoard.projectId, DEFAULT_PROJECT_ID);
+
+    const activeBoards = await getJson(`${baseUrl}/api/boards`, bearerHeaders(token));
+    assert.deepEqual(activeBoards.boards.map((board: any) => board.id), [activeBoard.id]);
+
+    const defaultBoards = await getJson(`${baseUrl}/api/boards?projectId=${encodeURIComponent(DEFAULT_PROJECT_ID)}`, bearerHeaders(token));
+    assert.ok(defaultBoards.boards.some((board: any) => board.id === defaultBoard.id));
+    assert.ok(defaultBoards.boards.every((board: any) => board.projectId === DEFAULT_PROJECT_ID));
+
+    const renamed = await writeJson(`${baseUrl}/api/projects/${project.id}`, bearerHeaders(token), {
+      name: "Access Model Runtime",
+      active: true
+    }, "PATCH");
+    assert.equal(renamed.name, "Access Model Runtime");
+  } finally {
+    await closeServer(server);
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("session users can use project APIs with Auth0 workspace as team seed", async () => {
+  await withPlatformAuthEnv(async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-session-project-api-"));
+    const dataPath = path.join(tempDir, "state.json");
+    const server = await listen(createApp({ dataPath, requireAuth: true, apiToken: "admin-token" }));
+    const baseUrl = `http://127.0.0.1:${serverPort(server)}`;
+    const sessionCookie = await createSessionCookie({
+      userId: "auth0|project-user",
+      email: "project@example.com",
+      name: "Project User",
+      workspaceId: "ws_project",
+      roles: ["admin"],
+      surfaceAccess: ["kanban.cards"]
+    }, "test-session-secret-with-enough-entropy", false, 3600);
+
+    try {
+      const project = await writeJson(`${baseUrl}/api/projects`, cookieHeaders(sessionCookie), { name: "Session project" });
+      assert.equal(project.teamId, "ws_project");
+
+      const session = await getJson(`${baseUrl}/auth/session`, cookieHeaders(sessionCookie));
+      assert.equal(session.teamId, "ws_project");
+      assert.equal(session.projectId, DEFAULT_PROJECT_ID);
+    } finally {
+      await closeServer(server);
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+test("agent tokens normalize legacy sessions and reject expired sessions", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-agent-session-store-"));
+  const tokenPath = path.join(tempDir, "tokens.json");
+  const legacyToken = "kcagt_legacy_token";
+  const store = createFileAgentTokenStore(tokenPath);
+
+  try {
+    await fs.writeFile(tokenPath, JSON.stringify({
+      tokens: [
+        {
+          id: "agtok_legacy",
+          boardId: "board-1",
+          agentId: "agent-a",
+          label: "Legacy token",
+          tokenHash: hashAgentToken(legacyToken),
+          last4: legacyToken.slice(-4),
+          createdAt: new Date().toISOString(),
+          lastUsedAt: null,
+          revokedAt: null
+        }
+      ]
+    }));
+
+    const legacy = await store.verify(legacyToken);
+    assert.equal(legacy?.sessionId, "legacy:agtok_legacy");
+    assert.deepEqual(legacy?.capabilities, ["view", "create", "update", "comment", "move"]);
+
+    const expired = await store.create({
+      boardId: "board-1",
+      agentId: "agent-a",
+      expiresAt: "2000-01-01T00:00:00.000Z"
+    });
+    assert.equal(await store.verify(expired.token), null);
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+function bearerHeaders(token: string): Record<string, string> {
+  return {
+    Authorization: `Bearer ${token}`
+  };
+}
+
+function cookieHeaders(cookie: string): Record<string, string> {
+  return {
+    Cookie: cookie.split(";")[0]
+  };
+}
+
+async function listen(app: Express): Promise<Server> {
+  return new Promise<Server>((resolve) => {
+    const server = app.listen(0, "127.0.0.1", () => resolve(server));
+  });
+}
+
+async function closeServer(server: Server): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    server.close((error?: Error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+}
+
+function serverPort(server: Server): number {
+  return (server.address() as AddressInfo).port;
+}
+
+async function getJson<T = any>(url: string, headers: Record<string, string> = {}): Promise<T> {
+  const response = await fetch(url, { headers });
+  if (!response.ok) {
+    assert.fail(`${url} returned ${response.status}: ${await response.text()}`);
+  }
+  return response.json() as Promise<T>;
+}
+
+async function writeJson<T = any>(url: string, headers: Record<string, string>, body: unknown, method = "POST"): Promise<T> {
+  const response = await fetch(url, {
+    method,
+    headers: {
+      ...headers,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+  if (!response.ok) {
+    assert.fail(`${url} returned ${response.status}: ${await response.text()}`);
+  }
+  return response.json() as Promise<T>;
+}
+
+async function withPlatformAuthEnv(run: () => Promise<void>): Promise<void> {
+  const restore = setEnv({
+    OIDC_ISSUER: "https://auth.example.com/",
+    OIDC_CLIENT_ID: "test-client",
+    OIDC_REDIRECT_URI: "http://127.0.0.1:4317/auth/callback",
+    SESSION_SECRET: "test-session-secret-with-enough-entropy",
+    PLATFORM_SURFACE_ID: "kanban.cards"
+  });
+  try {
+    await run();
+  } finally {
+    restore();
+  }
+}
+
+function setEnv(values: Record<string, string>): () => void {
+  const previous = new Map<string, string | undefined>();
+  for (const [key, value] of Object.entries(values)) {
+    previous.set(key, process.env[key]);
+    process.env[key] = value;
+  }
+  return () => {
+    for (const [key, value] of previous.entries()) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  };
+}

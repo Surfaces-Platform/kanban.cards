@@ -53,6 +53,9 @@ test("live events require auth, stream changes, and replay missed events by curs
       const changedData = JSON.parse(changed.data);
       assert.equal(changedData.boardId, board.id);
       assert.equal(changedData.payload.reason, "card_created");
+      assert.equal(changedData.payload.action, "create");
+      assert.equal(changedData.payload.resource.type, "card");
+      assert.equal(changedData.payload.actor.type, "service");
 
       stream.close();
 
@@ -68,6 +71,9 @@ test("live events require auth, stream changes, and replay missed events by curs
         const missedData = JSON.parse(missed.data);
         assert.equal(missedData.boardId, board.id);
         assert.equal(missedData.payload.reason, "comment_created");
+        assert.equal(missedData.payload.action, "comment");
+        assert.equal(missedData.payload.resource.type, "comment");
+        assert.equal(missedData.payload.actor.method, "bearer");
       } finally {
         replay.close();
       }

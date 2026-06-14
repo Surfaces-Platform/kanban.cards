@@ -16,8 +16,9 @@ The current product has a private-beta access model:
 - Admin API access uses one compatibility bearer token.
 - Agent API access uses hashed, revocable bearer tokens scoped to one board and one agent.
 - Auth0 `workspaceId` is captured as the seed team boundary for the future Team/Project model.
+- Workspace state persists a compatible `Team`, `Project`, `activeProjectId`, and `board.projectId` model while keeping boards top-level for current UI compatibility.
 - Boards contain lanes, agent specs, cards, comments, and review state.
-- Comments and workspace events provide the early audit trail.
+- Comments and workspace events provide the early audit trail, with mutation events carrying actor, resource, action, delegation, reason, and timestamp provenance.
 
 That is enough for private beta work and scoped local agents. It is not a full user, team, project, membership, session, or policy model yet.
 
@@ -25,7 +26,7 @@ The current pieces map into the target model this way:
 
 - Auth0 session auth maps to early user identity and team seed context.
 - The admin compatibility bearer token maps to break-glass private-beta admin access.
-- Board-scoped agent tokens map to early delegated agent sessions.
+- Board-scoped agent tokens map to delegated agent sessions, with legacy tokens normalized into board-scoped sessions.
 - Board, comment, and event history map to the seed audit trail.
 
 ## Target Shape
@@ -153,13 +154,18 @@ For agent work, provenance matters as much as permission. A reviewer should be a
 
 ## Future Implementation Outline
 
-This is the intended direction for a later runtime implementation:
+The current runtime implementation starts this direction with compatible JSON-state evolution:
 
-- Add persisted `Team` and `Project` records to the workspace model, using the Auth0 `workspaceId` as the initial team seed and a default project for existing boards.
+- Persist `Team` and `Project` records in the workspace model, with a default project for existing boards.
 - Make boards project-scoped while preserving current board IDs and card history.
-- Add memberships and roles at the team and project level.
 - Evolve board-scoped agent tokens into agent sessions with explicit delegation metadata.
-- Move authorization checks into a shared policy layer at the API boundary.
-- Extend workspace events or audit records so each mutation includes actor, delegation, resource, action, and reason.
+- Record mutation provenance in workspace events.
 
-Auth0 session auth, the break-glass admin bearer token, and current agent tokens remain the production mechanism until that later implementation pass.
+Future passes should add:
+
+- Memberships and roles at the team and project level.
+- A fuller shared policy layer at the API boundary.
+- Tool connection resources and review requirements.
+- UI for project settings, membership, and invitations.
+
+Auth0 session auth, the break-glass admin bearer token, and scoped agent sessions remain the production mechanism.

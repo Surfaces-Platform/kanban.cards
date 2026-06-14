@@ -401,13 +401,9 @@ const stepHandlers: Record<StepName, (runState: DemoRunState) => Promise<string[
       "--text",
       "Security Reviewer approved the release after token revocation, live event replay, database initialization, and rollback evidence matched the security gate."
     ]);
-    await cliJson<WorkItem>(runState, "security", [
-      "approve-card",
-      "--item",
-      implementationCardId,
-      "--text",
-      "Security gate approved for private beta release."
-    ]);
+    await adminJson<WorkItem>(runState, `/boards/${encodeURIComponent(runState.boardId)}/work-items/${encodeURIComponent(implementationCardId)}`, {
+      approvals: [{ by: "human-security-admin", text: "Security gate approved for private beta release.", createdAt: new Date().toISOString() }]
+    }, "PATCH");
     const moved = await cliJson<WorkItem>(runState, "security", ["move-card", "--item", implementationCardId, "--lane", "release-ready"]);
     return [`Security Reviewer approved and moved "${moved.title}" to Release Ready.`];
   },
@@ -430,10 +426,11 @@ const stepHandlers: Record<StepName, (runState: DemoRunState) => Promise<string[
       "--item",
       releaseCardId,
       "--summary",
-      "Release Coordinator closed the release after security approval, token rotation evidence, live event replay validation, database initialization, and rollback ownership were complete.",
-      "--delivered",
-      "true"
+      "Release Coordinator closed the release after security approval, token rotation evidence, live event replay validation, database initialization, and rollback ownership were complete."
     ]);
+    await adminJson<WorkItem>(runState, `/boards/${encodeURIComponent(runState.boardId)}/work-items/${encodeURIComponent(releaseCardId)}`, {
+      delivered: true
+    }, "PATCH");
     const moved = await cliJson<WorkItem>(runState, "coordinator", ["move-card", "--item", releaseCardId, "--lane", "release-ready"]);
     return [`Release Coordinator closed out "${moved.title}" in Release Ready.`];
   }
@@ -581,6 +578,18 @@ async function cliJson<T>(runState: DemoRunState, agentKey: AgentKey, args: stri
   if (!configPath) throw new Error(`Missing config for ${agentKey}. Run npm run demo:prepare.`);
   const output = await runClient([args[0], "--config", configPath, ...args.slice(1)]);
   return JSON.parse(output) as T;
+}
+
+async function adminJson<T>(runState: DemoRunState, pathSuffix: string, body: unknown, method = "POST"): Promise<T> {
+  const response = await fetch(`${runState.apiBaseUrl}${pathSuffix}`, {
+    method,
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+  if (!response.ok) throw new Error(`Admin API request failed with ${response.status}: ${await response.text()}`);
+  return response.json() as Promise<T>;
 }
 
 async function runClient(args: string[]): Promise<string> {

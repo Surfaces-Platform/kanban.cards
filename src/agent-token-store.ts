@@ -16,6 +16,7 @@ import type {
 
 const DEFAULT_TABLE_NAME = "agent_access_tokens";
 const DEFAULT_TOKEN_FILE = path.join(__dirname, "data", "agent-access-tokens.json");
+const DEFAULT_AGENT_CAPABILITIES = ["view", "create", "update", "comment", "move"];
 type UnknownRecord = Record<string, any>;
 
 export function createAgentTokenStore(options: AgentTokenStoreOptions = {}): AgentTokenStore {
@@ -97,6 +98,13 @@ export function createFileAgentTokenStore(dataPath: string = DEFAULT_TOKEN_FILE)
       label: input.label || "Local agent",
       tokenHash: hashAgentToken(rawToken),
       last4: rawToken.slice(-4),
+      teamId: input.teamId || null,
+      projectId: input.projectId || null,
+      sessionId: input.sessionId || `agsess_${crypto.randomUUID()}`,
+      delegatedBy: input.delegatedBy || null,
+      capabilities: input.capabilities || DEFAULT_AGENT_CAPABILITIES,
+      expiresAt: input.expiresAt || null,
+      reason: input.reason || "Board-scoped agent access.",
       createdAt: now,
       lastUsedAt: null,
       revokedAt: null
@@ -116,7 +124,7 @@ export function createFileAgentTokenStore(dataPath: string = DEFAULT_TOKEN_FILE)
     const tokenHash = hashAgentToken(rawToken);
     const now = new Date().toISOString();
     return updateTokens((tokens) => {
-      const record = tokens.find((candidate) => candidate.tokenHash === tokenHash && !candidate.revokedAt);
+      const record = tokens.find((candidate) => candidate.tokenHash === tokenHash && !candidate.revokedAt && !isExpired(candidate.expiresAt));
       if (!record) return null;
       record.lastUsedAt = now;
       return toPublicTokenRecord(record);
@@ -157,13 +165,29 @@ export function createPostgresAgentTokenStore(options: AgentTokenStoreOptions = 
           label text NOT NULL,
           token_hash text NOT NULL UNIQUE,
           last4 text NOT NULL,
+          team_id text,
+          project_id text,
+          session_id text,
+          delegated_by text,
+          capabilities jsonb NOT NULL DEFAULT '["view","create","update","comment","move"]'::jsonb,
+          expires_at timestamptz,
+          reason text NOT NULL DEFAULT 'Board-scoped agent access.',
           created_at timestamptz NOT NULL DEFAULT now(),
           last_used_at timestamptz,
           revoked_at timestamptz
         )
       `)
+        .then(() => client.query(`ALTER TABLE ${tableName} ADD COLUMN IF NOT EXISTS team_id text`))
+        .then(() => client.query(`ALTER TABLE ${tableName} ADD COLUMN IF NOT EXISTS project_id text`))
+        .then(() => client.query(`ALTER TABLE ${tableName} ADD COLUMN IF NOT EXISTS session_id text`))
+        .then(() => client.query(`ALTER TABLE ${tableName} ADD COLUMN IF NOT EXISTS delegated_by text`))
+        .then(() => client.query(`ALTER TABLE ${tableName} ADD COLUMN IF NOT EXISTS capabilities jsonb NOT NULL DEFAULT '["view","create","update","comment","move"]'::jsonb`))
+        .then(() => client.query(`ALTER TABLE ${tableName} ADD COLUMN IF NOT EXISTS expires_at timestamptz`))
+        .then(() => client.query(`ALTER TABLE ${tableName} ADD COLUMN IF NOT EXISTS reason text NOT NULL DEFAULT 'Board-scoped agent access.'`))
+        .then(() => client.query(`UPDATE ${tableName} SET session_id = 'legacy:' || id WHERE session_id IS NULL`))
         .then(() => client.query(`CREATE INDEX IF NOT EXISTS ${tableName}_board_id_idx ON ${tableName} (board_id)`))
-        .then(() => client.query(`CREATE INDEX IF NOT EXISTS ${tableName}_token_hash_idx ON ${tableName} (token_hash)`));
+        .then(() => client.query(`CREATE INDEX IF NOT EXISTS ${tableName}_token_hash_idx ON ${tableName} (token_hash)`))
+        .then(() => client.query(`CREATE INDEX IF NOT EXISTS ${tableName}_session_id_idx ON ${tableName} (session_id)`));
       if (client === pool) readyPromise = ready;
       await ready;
       return;
@@ -175,7 +199,7 @@ export function createPostgresAgentTokenStore(options: AgentTokenStoreOptions = 
   async function list(boardId: string): Promise<PublicTokenRecord[]> {
     await ensureReady();
     const result = await pool.query(
-      `SELECT id, board_id, agent_id, label, last4, created_at, last_used_at, revoked_at
+      `SELECT id, board_id, agent_id, label, last4, team_id, project_id, session_id, delegated_by, capabilities, expires_at, reason, created_at, last_used_at, revoked_at
        FROM ${tableName}
        WHERE board_id = $1 AND revoked_at IS NULL
        ORDER BY created_at DESC`,
@@ -189,10 +213,24 @@ export function createPostgresAgentTokenStore(options: AgentTokenStoreOptions = 
     const rawToken = generateAgentToken();
     const id = input.id || `agtok_${crypto.randomUUID()}`;
     const result = await pool.query(
-      `INSERT INTO ${tableName} (id, board_id, agent_id, label, token_hash, last4, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, now())
-       RETURNING id, board_id, agent_id, label, last4, created_at, last_used_at, revoked_at`,
-      [id, input.boardId, input.agentId, sanitizeLabel(input.label), hashAgentToken(rawToken), rawToken.slice(-4)]
+      `INSERT INTO ${tableName} (id, board_id, agent_id, label, token_hash, last4, team_id, project_id, session_id, delegated_by, capabilities, expires_at, reason, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13, now())
+       RETURNING id, board_id, agent_id, label, last4, team_id, project_id, session_id, delegated_by, capabilities, expires_at, reason, created_at, last_used_at, revoked_at`,
+      [
+        id,
+        input.boardId,
+        input.agentId,
+        sanitizeLabel(input.label),
+        hashAgentToken(rawToken),
+        rawToken.slice(-4),
+        nullableString(input.teamId),
+        nullableString(input.projectId),
+        sanitizeSessionId(input.sessionId) || `agsess_${crypto.randomUUID()}`,
+        nullableString(input.delegatedBy),
+        JSON.stringify(normalizeCapabilities(input.capabilities)),
+        nullableDate(input.expiresAt),
+        sanitizeReason(input.reason)
+      ]
     );
     const tokenRecord = toPublicTokenRecord(result.rows[0]);
     if (!tokenRecord) throw new Error("Unable to create public agent token record.");
@@ -204,8 +242,8 @@ export function createPostgresAgentTokenStore(options: AgentTokenStoreOptions = 
     const result = await pool.query(
       `UPDATE ${tableName}
        SET last_used_at = now()
-       WHERE token_hash = $1 AND revoked_at IS NULL
-       RETURNING id, board_id, agent_id, label, last4, created_at, last_used_at, revoked_at`,
+       WHERE token_hash = $1 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now())
+       RETURNING id, board_id, agent_id, label, last4, team_id, project_id, session_id, delegated_by, capabilities, expires_at, reason, created_at, last_used_at, revoked_at`,
       [hashAgentToken(rawToken)]
     );
     return result.rows[0] ? toPublicTokenRecord(result.rows[0]) : null;
@@ -217,7 +255,7 @@ export function createPostgresAgentTokenStore(options: AgentTokenStoreOptions = 
       `UPDATE ${tableName}
        SET revoked_at = COALESCE(revoked_at, now())
        WHERE board_id = $1 AND id = $2
-       RETURNING id, board_id, agent_id, label, last4, created_at, last_used_at, revoked_at`,
+       RETURNING id, board_id, agent_id, label, last4, team_id, project_id, session_id, delegated_by, capabilities, expires_at, reason, created_at, last_used_at, revoked_at`,
       [boardId, tokenId]
     );
     return result.rows[0] ? toPublicTokenRecord(result.rows[0]) : null;
@@ -242,6 +280,7 @@ function normalizeTokenRecord(record: unknown): TokenRecord | null {
   const tokenHash = String(record.tokenHash || record.token_hash || "").trim();
   const last4 = String(record.last4 || "").trim();
   if (!id || !boardId || !agentId || !tokenHash || !last4) return null;
+  const sessionId = sanitizeSessionId(record.sessionId || record.session_id) || `legacy:${id}`;
 
   return {
     id,
@@ -250,6 +289,13 @@ function normalizeTokenRecord(record: unknown): TokenRecord | null {
     label: sanitizeLabel(record.label),
     tokenHash,
     last4,
+    teamId: nullableString(record.teamId || record.team_id),
+    projectId: nullableString(record.projectId || record.project_id),
+    sessionId,
+    delegatedBy: nullableString(record.delegatedBy || record.delegated_by),
+    capabilities: normalizeCapabilities(record.capabilities),
+    expiresAt: nullableDate(record.expiresAt || record.expires_at),
+    reason: sanitizeReason(record.reason || "Legacy board-scoped token."),
     createdAt: dateToIso(record.createdAt || record.created_at) || new Date().toISOString(),
     lastUsedAt: dateToIso(record.lastUsedAt || record.last_used_at),
     revokedAt: dateToIso(record.revokedAt || record.revoked_at)
@@ -263,6 +309,7 @@ function toPublicTokenRecord(record: unknown): PublicTokenRecord | null {
   const agentId = String(record.agentId || record.agent_id || "").trim();
   const last4 = String(record.last4 || "").trim();
   if (!id || !boardId || !agentId || !last4) return null;
+  const sessionId = sanitizeSessionId(record.sessionId || record.session_id) || `legacy:${id}`;
 
   return {
     id,
@@ -270,6 +317,13 @@ function toPublicTokenRecord(record: unknown): PublicTokenRecord | null {
     agentId,
     label: sanitizeLabel(record.label),
     last4,
+    teamId: nullableString(record.teamId || record.team_id),
+    projectId: nullableString(record.projectId || record.project_id),
+    sessionId,
+    delegatedBy: nullableString(record.delegatedBy || record.delegated_by),
+    capabilities: normalizeCapabilities(record.capabilities),
+    expiresAt: nullableDate(record.expiresAt || record.expires_at),
+    reason: sanitizeReason(record.reason || "Legacy board-scoped token."),
     createdAt: dateToIso(record.createdAt || record.created_at) || new Date().toISOString(),
     lastUsedAt: dateToIso(record.lastUsedAt || record.last_used_at),
     revokedAt: dateToIso(record.revokedAt || record.revoked_at)
@@ -278,6 +332,39 @@ function toPublicTokenRecord(record: unknown): PublicTokenRecord | null {
 
 function sanitizeLabel(label: unknown): string {
   return String(label || "Local agent").trim().slice(0, 120) || "Local agent";
+}
+
+function sanitizeSessionId(value: unknown): string | null {
+  const text = String(value || "").trim();
+  if (!text) return null;
+  return text.slice(0, 160);
+}
+
+function sanitizeReason(value: unknown): string {
+  return String(value || "Board-scoped agent access.").trim().slice(0, 500) || "Board-scoped agent access.";
+}
+
+function normalizeCapabilities(value: unknown): string[] {
+  const rawValues = Array.isArray(value) ? value : DEFAULT_AGENT_CAPABILITIES;
+  const capabilities = rawValues
+    .map((capability) => String(capability || "").trim())
+    .filter(Boolean);
+  return [...new Set(capabilities.length ? capabilities : DEFAULT_AGENT_CAPABILITIES)].slice(0, 20);
+}
+
+function nullableString(value: unknown): string | null {
+  if (value == null) return null;
+  const text = String(value).trim();
+  return text || null;
+}
+
+function nullableDate(value: unknown): string | null {
+  return dateToIso(value);
+}
+
+function isExpired(value: unknown): boolean {
+  const expiresAt = dateToIso(value);
+  return Boolean(expiresAt && new Date(expiresAt).getTime() <= Date.now());
 }
 
 function dateToIso(value: unknown): string | null {

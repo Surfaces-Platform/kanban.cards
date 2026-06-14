@@ -1,4 +1,4 @@
-import type { AgentSpec, Board, BoardDraft, BoardTemplate, Lane, PublicTokenRecord, WorkItem, WorkItemComment, WorkspaceState } from "../types";
+import type { AgentSpec, Board, BoardDraft, BoardTemplate, Lane, Project, PublicTokenRecord, Team, WorkItem, WorkItemComment, WorkspaceState } from "../types";
 
 declare global {
   interface Window {
@@ -59,6 +59,10 @@ const POLL_INTERVAL_MS = 5000;
 const MAX_LANES = 8;
 const MIN_LANES = 2;
 const OPEN_REQUEST_COMMENT_KINDS = ["instruction", "question", "change_request"] as const;
+const DEFAULT_TEAM_ID = "kanban.cards:team";
+const DEFAULT_PROJECT_ID = "kanban.cards:default";
+const DEFAULT_TEAM_NAME = "kanban.cards";
+const DEFAULT_PROJECT_NAME = "kanban.cards";
 
 const BUILT_IN_TEMPLATES: TemplateLike[] = [
   {
@@ -160,8 +164,14 @@ async function loadAuthSession(): Promise<void> {
 }
 
 function freshWorkspaceState(): WorkspaceState {
-  const board = createBoard("Untitled board");
+  const now = new Date().toISOString();
+  const team = createTeam({ id: DEFAULT_TEAM_ID, name: DEFAULT_TEAM_NAME, createdAt: now, updatedAt: now });
+  const project = createProject({ id: DEFAULT_PROJECT_ID, teamId: team.id, name: DEFAULT_PROJECT_NAME, createdAt: now, updatedAt: now });
+  const board = createBoard("Untitled board", { projectId: project.id });
   return {
+    team,
+    projects: [project],
+    activeProjectId: project.id,
     boards: [board],
     activeBoardId: board.id,
     templates: []
@@ -187,8 +197,10 @@ function migrateSingleBoardState(rawState: any): WorkspaceState {
 
 function createBoard(name: string, overrides: Partial<Board> = {}): Board {
   const now = new Date().toISOString();
+  const projectId = overrides.projectId || DEFAULT_PROJECT_ID;
   const board = normalizeBoard({
     id: makeId("board"),
+    projectId,
     name,
     lanes: [],
     agentSpecs: [],
@@ -200,30 +212,90 @@ function createBoard(name: string, overrides: Partial<Board> = {}): Board {
     createdAt: now,
     updatedAt: now,
     ...overrides
-  });
+  }, projectId, new Set([projectId]));
   if (!board) throw new Error("Unable to create board.");
   return board;
 }
 
 function normalizeWorkspace(rawState: any): WorkspaceState {
+  const team = normalizeTeam(rawState?.team) || createTeam({ id: DEFAULT_TEAM_ID, name: DEFAULT_TEAM_NAME });
+  const projects: Project[] = Array.isArray(rawState?.projects)
+    ? withUniqueProjectIds(rawState.projects.map((project: any) => normalizeProject(project, team.id)).filter(isNonNull), team.id)
+    : [];
+  if (!projects.length) projects.push(createProject({ id: DEFAULT_PROJECT_ID, teamId: team.id, name: DEFAULT_PROJECT_NAME }));
+  const projectIds = new Set(projects.map((project) => project.id));
+  const fallbackProjectId = projectIds.has(DEFAULT_PROJECT_ID) ? DEFAULT_PROJECT_ID : projects[0].id;
   const boards: Board[] = Array.isArray(rawState?.boards)
-    ? rawState.boards.map(normalizeBoard).filter(isNonNull)
+    ? rawState.boards.map((board: any) => normalizeBoard(board, fallbackProjectId, projectIds)).filter(isNonNull)
     : [];
 
-  if (!boards.length) boards.push(createBoard("Untitled board"));
+  if (!boards.length) boards.push(createBoard("Untitled board", { projectId: fallbackProjectId }));
 
+  const activeProjectId = projectIds.has(String(rawState?.activeProjectId)) ? String(rawState.activeProjectId) : fallbackProjectId;
+  const activeProjectBoards = boards.filter((board) => board.projectId === activeProjectId);
   const activeBoardId = boards.some((board) => board.id === rawState?.activeBoardId)
     ? rawState.activeBoardId
-    : boards[0].id;
+    : (activeProjectBoards[0] || boards[0]).id;
 
   const templates: BoardTemplate[] = Array.isArray(rawState?.templates)
     ? rawState.templates.map(normalizeTemplate).filter(isNonNull)
     : [];
 
-  return { boards, activeBoardId, templates };
+  return { team, projects, activeProjectId, boards, activeBoardId, templates };
 }
 
-function normalizeBoard(rawBoard: any): Board | null {
+function createTeam(input: Partial<Team> = {}): Team {
+  const now = new Date().toISOString();
+  return {
+    id: String(input.id || DEFAULT_TEAM_ID).trim() || DEFAULT_TEAM_ID,
+    name: String(input.name || DEFAULT_TEAM_NAME).trim() || DEFAULT_TEAM_NAME,
+    createdAt: String(input.createdAt || now),
+    updatedAt: String(input.updatedAt || now)
+  };
+}
+
+function createProject(input: Partial<Project> = {}): Project {
+  const now = new Date().toISOString();
+  return {
+    id: String(input.id || makeId("project")).trim() || makeId("project"),
+    teamId: String(input.teamId || DEFAULT_TEAM_ID).trim() || DEFAULT_TEAM_ID,
+    name: String(input.name || "Untitled project").trim() || "Untitled project",
+    description: String(input.description || "").trim(),
+    createdAt: String(input.createdAt || now),
+    updatedAt: String(input.updatedAt || now)
+  };
+}
+
+function normalizeTeam(rawTeam: any): Team | null {
+  if (!rawTeam || typeof rawTeam !== "object") return null;
+  const id = String(rawTeam.id || "").trim();
+  if (!id) return null;
+  return createTeam(rawTeam);
+}
+
+function normalizeProject(rawProject: any, fallbackTeamId: string): Project | null {
+  if (!rawProject || typeof rawProject !== "object") return null;
+  const id = String(rawProject.id || "").trim();
+  const name = String(rawProject.name || "").trim();
+  if (!id || !name) return null;
+  return createProject({ ...rawProject, id, name, teamId: rawProject.teamId || fallbackTeamId });
+}
+
+function withUniqueProjectIds(projects: Project[], fallbackTeamId: string): Project[] {
+  const used = new Map<string, number>();
+  return projects.map((project) => {
+    const baseId = project.id || makeId("project");
+    const nextCount = (used.get(baseId) || 0) + 1;
+    used.set(baseId, nextCount);
+    return {
+      ...project,
+      id: nextCount === 1 ? baseId : `${baseId}-${nextCount}`,
+      teamId: project.teamId || fallbackTeamId
+    };
+  });
+}
+
+function normalizeBoard(rawBoard: any, fallbackProjectId: string = DEFAULT_PROJECT_ID, projectIds: Set<string> = new Set([DEFAULT_PROJECT_ID])): Board | null {
   if (!rawBoard || typeof rawBoard !== "object") return null;
 
   const lanes = Array.isArray(rawBoard.lanes)
@@ -242,9 +314,12 @@ function normalizeBoard(rawBoard: any): Board | null {
     : null;
   const configDraft = normalizeDraft(rawBoard.configDraft);
   const name = String(rawBoard.name || "Untitled board").trim() || "Untitled board";
+  const requestedProjectId = String(rawBoard.projectId || "").trim();
+  const projectId = requestedProjectId && projectIds.has(requestedProjectId) ? requestedProjectId : fallbackProjectId;
 
   return {
     id: String(rawBoard.id || makeId("board")),
+    projectId,
     name,
     lanes: normalizedLanes,
     agentSpecs,
@@ -1433,7 +1508,7 @@ function renderDeleteBoardDialog(board: Board): string {
 }
 
 function createNewBoard(): void {
-  const board = createBoard(uniqueBoardName("Untitled board"));
+  const board = createBoard(uniqueBoardName("Untitled board"), { projectId: state.activeProjectId || DEFAULT_PROJECT_ID });
   state.boards.push(board);
   state.activeBoardId = board.id;
   flowMessage = "";
