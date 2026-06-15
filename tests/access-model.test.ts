@@ -33,6 +33,8 @@ test("legacy workspace state normalizes into Team, Project, and board ownership"
   assert.equal(state.projects[0].id, DEFAULT_PROJECT_ID);
   assert.equal(state.activeProjectId, DEFAULT_PROJECT_ID);
   assert.equal(state.boards[0].projectId, DEFAULT_PROJECT_ID);
+  assert.deepEqual(state.members, []);
+  assert.deepEqual(state.invites, []);
 });
 
 test("project APIs create, rename, activate, and scope board listing", async () => {
@@ -100,6 +102,147 @@ test("session users can use project APIs with Auth0 workspace as team seed", asy
       const session = await getJson(`${baseUrl}/auth/session`, cookieHeaders(sessionCookie));
       assert.equal(session.teamId, "ws_project");
       assert.equal(session.projectId, project.id);
+      assert.equal(session.role, "owner");
+      assert.equal(session.isTeamMember, true);
+      assert.deepEqual(session.projectIds, ["*"]);
+    } finally {
+      await closeServer(server);
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+test("team invite acceptance hashes one-time tokens and grants member-scoped card access", async () => {
+  await withPlatformAuthEnv(async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-team-invites-"));
+    const dataPath = path.join(tempDir, "state.json");
+    const server = await listen(createApp({ dataPath, requireAuth: true, apiToken: "admin-token" }));
+    const baseUrl = `http://127.0.0.1:${serverPort(server)}`;
+    const ownerCookie = await sessionCookie("auth0|owner", "owner@example.com", "Owner User", "ws_team_invites");
+    const memberCookie = await sessionCookie("auth0|member", "member@example.com", "Member User", "ws_team_invites");
+
+    try {
+      const ownerSession = await getJson(`${baseUrl}/auth/session`, cookieHeaders(ownerCookie));
+      assert.equal(ownerSession.role, "owner");
+      assert.equal(ownerSession.isTeamMember, true);
+
+      const board = await writeJson(`${baseUrl}/api/boards`, cookieHeaders(ownerCookie), { name: "Member board" });
+      await writeJson(`${baseUrl}/api/boards/${board.id}`, cookieHeaders(ownerCookie), {
+        lanes: [
+          { id: "todo", title: "To do", description: "", defaultOwnerAgentId: null, defaultReviewerAgentId: null, gate: { title: "To do gate", checks: ["Ready"] } }
+        ],
+        agentSpecs: []
+      }, "PATCH");
+
+      const invitePayload = await writeJson(`${baseUrl}/api/team/invites`, cookieHeaders(ownerCookie), {
+        email: "member@example.com",
+        role: "member",
+        projectIds: ["*"]
+      });
+      assert.equal(invitePayload.invite.email, "member@example.com");
+      assert.equal(invitePayload.invite.role, "member");
+      assert.equal(invitePayload.invite.tokenHash, undefined);
+      assert.match(invitePayload.acceptUrl, /\/invites\/accept\?token=/);
+      const inviteToken = new URL(invitePayload.acceptUrl).searchParams.get("token") || "";
+      assert.ok(inviteToken.startsWith("kcinv_"));
+
+      const rawState = JSON.parse(await fs.readFile(dataPath, "utf8"));
+      assert.equal(rawState.invites.length, 1);
+      assert.equal(typeof rawState.invites[0].tokenHash, "string");
+      assert.notEqual(rawState.invites[0].tokenHash, inviteToken);
+
+      const nonMemberState = await fetch(`${baseUrl}/api/state`, { headers: cookieHeaders(memberCookie) });
+      assert.equal(nonMemberState.status, 403);
+
+      const accepted = await writeJson(`${baseUrl}/api/invites/accept`, cookieHeaders(memberCookie), { token: inviteToken });
+      assert.equal(accepted.member.role, "member");
+      assert.equal(accepted.invite.status, "accepted");
+      assert.equal(accepted.invite.tokenHash, undefined);
+
+      const memberSession = await getJson(`${baseUrl}/auth/session`, cookieHeaders(memberCookie));
+      assert.equal(memberSession.role, "member");
+      assert.equal(memberSession.isTeamMember, true);
+
+      const secondAccept = await fetch(`${baseUrl}/api/invites/accept`, {
+        method: "POST",
+        headers: { ...cookieHeaders(memberCookie), "Content-Type": "application/json" },
+        body: JSON.stringify({ token: inviteToken })
+      });
+      assert.equal(secondAccept.status, 404);
+
+      const memberTeam = await fetch(`${baseUrl}/api/team`, { headers: cookieHeaders(memberCookie) });
+      assert.equal(memberTeam.status, 403);
+
+      const memberCreateBoard = await fetch(`${baseUrl}/api/boards`, {
+        method: "POST",
+        headers: { ...cookieHeaders(memberCookie), "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Denied board" })
+      });
+      assert.equal(memberCreateBoard.status, 403);
+
+      const memberToken = await fetch(`${baseUrl}/api/boards/${board.id}/agent-tokens`, {
+        method: "POST",
+        headers: { ...cookieHeaders(memberCookie), "Content-Type": "application/json" },
+        body: JSON.stringify({ agentId: "agent-a" })
+      });
+      assert.equal(memberToken.status, 403);
+
+      const card = await writeJson(`${baseUrl}/api/boards/${board.id}/work-items`, cookieHeaders(memberCookie), {
+        title: "Member card",
+        laneId: "todo"
+      });
+      assert.equal(card.title, "Member card");
+    } finally {
+      await closeServer(server);
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+test("admins can invite admins and members but cannot manage owners", async () => {
+  await withPlatformAuthEnv(async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-team-admins-"));
+    const dataPath = path.join(tempDir, "state.json");
+    const server = await listen(createApp({ dataPath, requireAuth: true, apiToken: "admin-token" }));
+    const baseUrl = `http://127.0.0.1:${serverPort(server)}`;
+    const ownerCookie = await sessionCookie("auth0|owner", "owner@example.com", "Owner User", "ws_team_admins");
+    const adminCookie = await sessionCookie("auth0|admin", "admin@example.com", "Admin User", "ws_team_admins");
+
+    try {
+      await getJson(`${baseUrl}/auth/session`, cookieHeaders(ownerCookie));
+      const adminInvite = await writeJson(`${baseUrl}/api/team/invites`, cookieHeaders(ownerCookie), {
+        email: "admin@example.com",
+        role: "admin",
+        projectIds: ["*"]
+      });
+      const adminToken = new URL(adminInvite.acceptUrl).searchParams.get("token") || "";
+      await writeJson(`${baseUrl}/api/invites/accept`, cookieHeaders(adminCookie), { token: adminToken });
+
+      const ownerTeam = await getJson(`${baseUrl}/api/team`, cookieHeaders(ownerCookie));
+      const owner = ownerTeam.members.find((member: any) => member.email === "owner@example.com");
+      assert.ok(owner);
+
+      const ownerInviteDenied = await fetch(`${baseUrl}/api/team/invites`, {
+        method: "POST",
+        headers: { ...cookieHeaders(adminCookie), "Content-Type": "application/json" },
+        body: JSON.stringify({ email: "new-owner@example.com", role: "owner", projectIds: ["*"] })
+      });
+      assert.equal(ownerInviteDenied.status, 403);
+
+      const ownerPatchDenied = await fetch(`${baseUrl}/api/team/members/${owner.id}`, {
+        method: "PATCH",
+        headers: { ...cookieHeaders(adminCookie), "Content-Type": "application/json" },
+        body: JSON.stringify({ role: "member", projectIds: ["*"] })
+      });
+      assert.equal(ownerPatchDenied.status, 403);
+
+      const memberInvite = await writeJson(`${baseUrl}/api/team/invites`, cookieHeaders(adminCookie), {
+        email: "new-member@example.com",
+        role: "member",
+        projectIds: ["*"]
+      });
+      assert.equal(memberInvite.invite.role, "member");
+      assert.equal(memberInvite.invite.tokenHash, undefined);
     } finally {
       await closeServer(server);
       await fs.rm(tempDir, { recursive: true, force: true });
@@ -212,6 +355,17 @@ async function withPlatformAuthEnv(run: () => Promise<void>): Promise<void> {
   } finally {
     restore();
   }
+}
+
+async function sessionCookie(userId: string, email: string, name: string, workspaceId: string): Promise<string> {
+  return createSessionCookie({
+    userId,
+    email,
+    name,
+    workspaceId,
+    roles: ["admin"],
+    surfaceAccess: ["kanban.cards"]
+  }, "test-session-secret-with-enough-entropy", false, 3600);
 }
 
 function setEnv(values: Record<string, string>): () => void {

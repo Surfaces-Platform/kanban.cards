@@ -1502,6 +1502,10 @@ textarea.form-control {
   width: min(100%, 760px);
 }
 
+.team-settings-modal {
+  width: min(100%, 880px);
+}
+
 .modal-header {
   align-items: start;
   display: flex;
@@ -1607,6 +1611,91 @@ textarea.form-control {
 
 .token-metadata {
   background: var(--paper);
+}
+
+.team-settings-grid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr);
+}
+
+.team-list {
+  display: grid;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.team-row {
+  align-items: start;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+}
+
+.team-row-main {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.team-row-main span,
+.team-row-main time {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.team-row-controls {
+  align-items: end;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(110px, 0.5fr) minmax(160px, 1fr) auto auto;
+}
+
+.team-invite-form {
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 12px;
+}
+
+.copy-link-block {
+  align-items: end;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 10px;
+}
+
+.copy-link-block .meta-label {
+  grid-column: 1 / -1;
+}
+
+.copy-link-block input {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  min-width: 0;
+  padding: 8px 9px;
+}
+
+.invite-page {
+  align-items: center;
+  display: grid;
+  min-height: 100vh;
+  padding: 20px;
+}
+
+.invite-card {
+  justify-self: center;
 }
 
 .toast-region {
@@ -1844,9 +1933,20 @@ th {
   }
 
   .token-row,
+  .team-row-controls,
+  .copy-link-block,
   .activity-event-header {
     align-items: stretch;
+    grid-template-columns: 1fr;
+  }
+
+  .token-row,
+  .activity-event-header {
     flex-direction: column;
+  }
+
+  .team-settings-grid {
+    grid-template-columns: 1fr;
   }
 
   .full-field {

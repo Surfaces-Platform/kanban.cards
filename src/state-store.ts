@@ -18,6 +18,10 @@ import type {
   StateStore,
   StateStoreOptions,
   Team,
+  TeamInvite,
+  TeamInviteStatus,
+  TeamMember,
+  TeamRole,
   WorkItem,
   WorkItemComment,
   WorkspaceState
@@ -32,6 +36,8 @@ const DEFAULT_WORKSPACE_ID = "default";
 const DEFAULT_TABLE_NAME = "kanban_workspaces";
 const DEFAULT_TEAM_NAME = "kanban.cards";
 const DEFAULT_PROJECT_NAME = "kanban.cards";
+const TEAM_ROLES = new Set<TeamRole>(["owner", "admin", "member"]);
+const TEAM_INVITE_STATUSES = new Set<TeamInviteStatus>(["pending", "accepted", "revoked"]);
 type UnknownRecord = Record<string, any>;
 
 export function createStateStore(options: StateStoreOptions | string = {}): StateStore {
@@ -183,6 +189,8 @@ export function freshWorkspaceState(): WorkspaceState {
     team,
     projects: [project],
     activeProjectId: project.id,
+    members: [],
+    invites: [],
     boards: [board],
     activeBoardId: board.id,
     templates: []
@@ -236,6 +244,46 @@ export function createProject(input: Partial<Project> = {}): Project {
   return project;
 }
 
+export function createTeamMember(input: Partial<TeamMember> = {}): TeamMember {
+  const now = new Date().toISOString();
+  const member = normalizeTeamMember({
+    id: input.id || makeId("member"),
+    teamId: input.teamId || DEFAULT_TEAM_ID,
+    userId: input.userId || "",
+    email: input.email || "",
+    name: input.name || "",
+    role: input.role || "member",
+    projectIds: input.projectIds || ["*"],
+    createdAt: input.createdAt || now,
+    updatedAt: input.updatedAt || now,
+    lastSeenAt: input.lastSeenAt || now
+  }, input.teamId || DEFAULT_TEAM_ID, new Set([...(input.projectIds || []), DEFAULT_PROJECT_ID]));
+  if (!member) throw new Error("Unable to create team member.");
+  return member;
+}
+
+export function createTeamInvite(input: Partial<TeamInvite> = {}): TeamInvite {
+  const now = new Date().toISOString();
+  const invite = normalizeTeamInvite({
+    id: input.id || makeId("invite"),
+    teamId: input.teamId || DEFAULT_TEAM_ID,
+    email: input.email || "",
+    role: input.role || "member",
+    projectIds: input.projectIds || ["*"],
+    tokenHash: input.tokenHash || "",
+    invitedBy: input.invitedBy || "",
+    acceptedBy: input.acceptedBy || null,
+    status: input.status || "pending",
+    expiresAt: input.expiresAt || new Date(Date.now() + 1000 * 60 * 60 * 24 * 14).toISOString(),
+    createdAt: input.createdAt || now,
+    updatedAt: input.updatedAt || now,
+    acceptedAt: input.acceptedAt || null,
+    revokedAt: input.revokedAt || null
+  }, input.teamId || DEFAULT_TEAM_ID, new Set([...(input.projectIds || []), DEFAULT_PROJECT_ID]));
+  if (!invite) throw new Error("Unable to create team invite.");
+  return invite;
+}
+
 export function normalizeWorkspace(rawState: unknown): WorkspaceState {
   const state = isRecord(rawState) ? rawState : {};
   const team = normalizeTeam(state.team) || createTeam({ id: DEFAULT_TEAM_ID, name: DEFAULT_TEAM_NAME });
@@ -260,9 +308,15 @@ export function normalizeWorkspace(rawState: unknown): WorkspaceState {
   const activeBoardId = boards.some((board) => board.id === state.activeBoardId)
     ? String(state.activeBoardId)
     : (activeProjectBoards[0] || boards[0]).id;
+  const members = Array.isArray(state.members)
+    ? withUniqueTeamMembers(state.members.map((member) => normalizeTeamMember(member, team.id, projectIds)).filter(isNonNull))
+    : [];
+  const invites = Array.isArray(state.invites)
+    ? withUniqueInviteIds(state.invites.map((invite) => normalizeTeamInvite(invite, team.id, projectIds)).filter(isNonNull))
+    : [];
   const templates = Array.isArray(state.templates) ? state.templates.map(normalizeTemplate).filter(isNonNull) : [];
 
-  return { team, projects, activeProjectId, boards, activeBoardId, templates };
+  return { team, projects, activeProjectId, members, invites, boards, activeBoardId, templates };
 }
 
 function normalizeTeam(rawTeam: unknown): Team | null {
@@ -292,6 +346,52 @@ function normalizeProject(rawProject: unknown, fallbackTeamId: string = DEFAULT_
     description: String(rawProject.description || "").trim(),
     createdAt: String(rawProject.createdAt || now),
     updatedAt: String(rawProject.updatedAt || now)
+  };
+}
+
+function normalizeTeamMember(rawMember: unknown, fallbackTeamId: string = DEFAULT_TEAM_ID, projectIds: Set<string> = new Set([DEFAULT_PROJECT_ID])): TeamMember | null {
+  if (!isRecord(rawMember)) return null;
+  const id = String(rawMember.id || "").trim();
+  const userId = String(rawMember.userId || "").trim();
+  const email = normalizeEmail(rawMember.email);
+  if (!id || !userId || !email) return null;
+  const now = new Date().toISOString();
+  return {
+    id,
+    teamId: String(rawMember.teamId || fallbackTeamId).trim() || fallbackTeamId,
+    userId,
+    email,
+    name: String(rawMember.name || email).trim() || email,
+    role: TEAM_ROLES.has(rawMember.role as TeamRole) ? rawMember.role as TeamRole : "member",
+    projectIds: normalizeProjectIds(rawMember.projectIds, projectIds),
+    createdAt: String(rawMember.createdAt || now),
+    updatedAt: String(rawMember.updatedAt || now),
+    lastSeenAt: String(rawMember.lastSeenAt || rawMember.updatedAt || now)
+  };
+}
+
+function normalizeTeamInvite(rawInvite: unknown, fallbackTeamId: string = DEFAULT_TEAM_ID, projectIds: Set<string> = new Set([DEFAULT_PROJECT_ID])): TeamInvite | null {
+  if (!isRecord(rawInvite)) return null;
+  const id = String(rawInvite.id || "").trim();
+  const email = normalizeEmail(rawInvite.email);
+  const tokenHash = String(rawInvite.tokenHash || "").trim();
+  if (!id || !email || !tokenHash) return null;
+  const now = new Date().toISOString();
+  return {
+    id,
+    teamId: String(rawInvite.teamId || fallbackTeamId).trim() || fallbackTeamId,
+    email,
+    role: TEAM_ROLES.has(rawInvite.role as TeamRole) ? rawInvite.role as TeamRole : "member",
+    projectIds: normalizeProjectIds(rawInvite.projectIds, projectIds),
+    tokenHash,
+    invitedBy: String(rawInvite.invitedBy || "").trim(),
+    acceptedBy: nullableString(rawInvite.acceptedBy),
+    status: TEAM_INVITE_STATUSES.has(rawInvite.status as TeamInviteStatus) ? rawInvite.status as TeamInviteStatus : "pending",
+    expiresAt: String(rawInvite.expiresAt || new Date(Date.now() + 1000 * 60 * 60 * 24 * 14).toISOString()),
+    createdAt: String(rawInvite.createdAt || now),
+    updatedAt: String(rawInvite.updatedAt || now),
+    acceptedAt: nullableString(rawInvite.acceptedAt),
+    revokedAt: nullableString(rawInvite.revokedAt)
   };
 }
 
@@ -367,6 +467,42 @@ function withUniqueProjectIds(projects: Project[], fallbackTeamId: string): Proj
       teamId: project.teamId || fallbackTeamId
     };
   });
+}
+
+function withUniqueTeamMembers(members: TeamMember[]): TeamMember[] {
+  const used = new Set<string>();
+  const result: TeamMember[] = [];
+  for (const member of members) {
+    const userKey = `user:${member.userId}`;
+    const emailKey = `email:${member.email}`;
+    if (used.has(userKey) || used.has(emailKey)) continue;
+    used.add(userKey);
+    used.add(emailKey);
+    result.push(member);
+  }
+  return result;
+}
+
+function withUniqueInviteIds(invites: TeamInvite[]): TeamInvite[] {
+  const used = new Map<string, number>();
+  return invites.map((invite) => {
+    const baseId = String(invite.id || "").trim() || makeId("invite");
+    const nextCount = (used.get(baseId) || 0) + 1;
+    used.set(baseId, nextCount);
+    return {
+      ...invite,
+      id: nextCount === 1 ? baseId : `${baseId}-${nextCount}`
+    };
+  });
+}
+
+function normalizeProjectIds(value: unknown, projectIds: Set<string>): string[] {
+  if (Array.isArray(value)) {
+    if (value.some((projectId) => String(projectId || "").trim() === "*")) return ["*"];
+    const normalized = Array.from(new Set(value.map((projectId) => String(projectId || "").trim()).filter((projectId) => projectIds.has(projectId))));
+    return normalized.length ? normalized : ["*"];
+  }
+  return ["*"];
 }
 
 function normalizeDraft(draft: unknown): BoardDraft | null {
@@ -543,6 +679,23 @@ export function findProject(state: WorkspaceState, projectId: string | null | un
   return state.projects.find((project) => project.id === projectId) || null;
 }
 
+export function findTeamMember(state: WorkspaceState, memberId: string | null | undefined): TeamMember | null {
+  return state.members.find((member) => member.id === memberId) || null;
+}
+
+export function findTeamMemberByIdentity(state: WorkspaceState, identity: { userId?: string | null; email?: string | null }): TeamMember | null {
+  const userId = String(identity.userId || "").trim();
+  const email = normalizeEmail(identity.email);
+  return state.members.find((member) => {
+    if (userId && member.userId === userId) return true;
+    return Boolean(email && member.email === email);
+  }) || null;
+}
+
+export function findTeamInvite(state: WorkspaceState, inviteId: string | null | undefined): TeamInvite | null {
+  return state.invites.find((invite) => invite.id === inviteId) || null;
+}
+
 export function findWorkItem(board: Board | null | undefined, itemId: string | null | undefined): WorkItem | null {
   return board?.workItems.find((item) => item.id === itemId) || null;
 }
@@ -563,6 +716,14 @@ export function touchWorkItem(item: WorkItem): void {
   item.updatedAt = new Date().toISOString();
 }
 
+export function touchTeamMember(member: TeamMember): void {
+  member.updatedAt = new Date().toISOString();
+}
+
+export function touchTeamInvite(invite: TeamInvite): void {
+  invite.updatedAt = new Date().toISOString();
+}
+
 function slugify(value: unknown): string {
   return String(value || "")
     .toLowerCase()
@@ -580,6 +741,10 @@ function nullableString(value: unknown): string | null {
   if (value == null) return null;
   const text = String(value).trim();
   return text || null;
+}
+
+function normalizeEmail(value: unknown): string {
+  return String(value || "").trim().toLowerCase();
 }
 
 function isRecord(value: unknown): value is UnknownRecord {
