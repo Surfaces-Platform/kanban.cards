@@ -163,6 +163,14 @@ const FALLBACK_INDEX_HTML = `<!doctype html>
     <header class="topbar">
       <div class="topbar-left">
         <a class="product-mark" href="./" aria-label="kanban.cards home">kanban.cards</a>
+        <label class="project-switcher" for="project-select">
+          <span class="sr-only">Project</span>
+          <select id="project-select">
+            <option>kanban.cards</option>
+          </select>
+        </label>
+        <button class="secondary-button" type="button" id="project-settings">Project settings</button>
+        <button class="secondary-button" type="button" id="new-project">New project</button>
         <label class="board-switcher" for="board-select">
           <span class="sr-only">Board</span>
           <select id="board-select">
@@ -185,6 +193,7 @@ const FALLBACK_INDEX_HTML = `<!doctype html>
         </div>
       </div>
       <div class="board-actions">
+        <button class="secondary-button" type="button" id="board-settings" hidden>Board settings</button>
         <button class="secondary-button" type="button" id="edit-flow" hidden>Edit flow</button>
       </div>
     </section>
