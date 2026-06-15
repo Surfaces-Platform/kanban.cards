@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { createPostgresAgentTokenStore, hashAgentToken } from "../src/agent-token-store";
+import { normalizePostgresConnectionString } from "../src/postgres-config";
 import { createBoard, createPostgresStateStore } from "../src/state-store";
 import type { WorkspaceState } from "../src/types";
 
@@ -80,6 +81,17 @@ test("Postgres agent token store persists hashes and supports verify and revoke"
   assert.ok(revoked);
   assert.ok(revoked.revokedAt);
   assert.equal(await store.verify(created.token), null);
+});
+
+test("Postgres connection strings use explicit SSL mode to avoid pg runtime warnings", () => {
+  assert.equal(
+    normalizePostgresConnectionString("postgres://user:pass@example.com/db?sslmode=require"),
+    "postgres://user:pass@example.com/db?sslmode=verify-full"
+  );
+  assert.equal(
+    normalizePostgresConnectionString("postgres://user:pass@example.com/db?sslmode=require&uselibpqcompat=true"),
+    "postgres://user:pass@example.com/db?sslmode=require&uselibpqcompat=true"
+  );
 });
 
 class FakePool {

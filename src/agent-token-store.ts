@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { Pool } from "pg";
 
+import { normalizePostgresConnectionString, resolvePostgresSsl } from "./postgres-config";
 import type {
   AgentTokenCreateInput,
   AgentTokenStore,
@@ -149,7 +150,7 @@ export function createPostgresAgentTokenStore(options: AgentTokenStoreOptions = 
   const pool =
     options.pool ||
     new Pool({
-      connectionString: options.connectionString,
+      connectionString: normalizePostgresConnectionString(options.connectionString),
       ssl: resolvePostgresSsl(options)
     });
   let readyPromise: Promise<unknown> | null = null;
@@ -372,13 +373,6 @@ function dateToIso(value: unknown): string | null {
   if (value instanceof Date) return value.toISOString();
   const date = new Date(String(value));
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
-}
-
-function resolvePostgresSsl(options: Pick<PostgresOptions, "ssl"> = {}): PostgresOptions["ssl"] | undefined {
-  if (options.ssl !== undefined) return options.ssl;
-  if (process.env.KANBAN_CARDS_POSTGRES_SSL === "disable") return false;
-  if (process.env.NODE_ENV === "production" || process.env.VERCEL) return { rejectUnauthorized: false };
-  return undefined;
 }
 
 function isRecord(value: unknown): value is UnknownRecord {

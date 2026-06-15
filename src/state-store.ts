@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { Pool } from "pg";
 
+import { normalizePostgresConnectionString, resolvePostgresSsl } from "./postgres-config";
 import type {
   AgentSpec,
   Board,
@@ -98,7 +99,7 @@ export function createPostgresStateStore(options: StateStoreOptions = {}): State
   const pool =
     options.pool ||
     new Pool({
-      connectionString: options.connectionString,
+      connectionString: normalizePostgresConnectionString(options.connectionString),
       ssl: resolvePostgresSsl(options)
     });
   let readyPromise: Promise<unknown> | null = null;
@@ -171,13 +172,6 @@ export function createPostgresStateStore(options: StateStoreOptions = {}): State
   }
 
   return { kind: "postgres", path: `${tableName}:${workspaceId}`, read, write, update };
-}
-
-function resolvePostgresSsl(options: Pick<PostgresOptions, "ssl"> = {}): PostgresOptions["ssl"] | undefined {
-  if (options.ssl !== undefined) return options.ssl;
-  if (process.env.KANBAN_CARDS_POSTGRES_SSL === "disable") return false;
-  if (process.env.NODE_ENV === "production" || process.env.VERCEL) return { rejectUnauthorized: false };
-  return undefined;
 }
 
 export function freshWorkspaceState(): WorkspaceState {

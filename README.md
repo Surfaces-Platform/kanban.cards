@@ -68,7 +68,13 @@ npm run db:init
 
 `db:init` initializes both the workspace table and the `agent_access_tokens` table.
 
-Seed or update the access rollout roadmap board through the API:
+Seed or update the access rollout roadmap board from an authenticated production session:
+
+1. Sign in to `https://kanban.cards`.
+2. Open `https://kanban.cards/admin/roadmap-seed`.
+3. Run `Dry run`, then `Seed roadmap`.
+
+For automation or break-glass operations, the CLI can still use the admin compatibility bearer:
 
 ```bash
 KANBAN_CARDS_API_BASE_URL=https://kanban.cards/api \

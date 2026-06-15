@@ -120,7 +120,17 @@ Escalate if production logs show repeated `500` responses, Auth0 config errors, 
 
 ## Roadmap Seed
 
-Dry-run first:
+Preferred production path:
+
+1. Sign in to `https://kanban.cards` with an Auth0 user that has `surface_access: kanban.cards`.
+2. Open `https://kanban.cards/admin/roadmap-seed`.
+3. Run `Dry run`.
+4. Run `Seed roadmap`.
+5. Return to `https://kanban.cards` and verify `kanban.cards Product Roadmap` exists with the expected cards.
+
+This path uses the authenticated session for authorization and the server runtime config for internal API access, so the break-glass bearer token is not copied into a local shell.
+
+CLI fallback for automation or break-glass operations:
 
 ```bash
 KANBAN_CARDS_API_BASE_URL=https://kanban.cards/api \
@@ -128,7 +138,7 @@ KANBAN_CARDS_API_TOKEN='<admin-token>' \
 npm run roadmap:seed -- --dry-run
 ```
 
-Apply the seed:
+Apply the seed through the CLI:
 
 ```bash
 KANBAN_CARDS_API_BASE_URL=https://kanban.cards/api \
