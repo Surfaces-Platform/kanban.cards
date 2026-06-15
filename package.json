@@ -7,6 +7,7 @@
     "start": "npm run build && node dist/src/server.js",
     "dev": "tsx src/server.ts",
     "db:init": "tsx scripts/init-db.ts",
+    "roadmap:seed": "tsx scripts/seed-roadmap.ts",
     "clean": "rm -rf dist public/app.js public/styles.css public/robots.txt .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs",
     "build": "npm run clean && npm run build:server && npm run build:client && npm run build:cli && npm run build:static",
     "build:server": "tsc -p tsconfig.node.json",
@@ -17,7 +18,7 @@
     "check": "npm run typecheck && npm run build && tsx scripts/check-ui-contract.ts",
     "test": "npm run build && node --import tsx --test tests/*.test.ts",
     "demo:prepare": "npm run build && tsx scripts/demo.ts prepare",
-    "demo:server": "NODE_ENV=development VERCEL= KANBAN_CARDS_DATA_PATH=.demo/kanban-cards-state.json KANBAN_CARDS_DATABASE_URL= POSTGRES_URL= DATABASE_URL= KANBAN_CARDS_API_TOKEN= INSTRUCT_API_TOKEN= KANBAN_CARDS_BASIC_USER= KANBAN_CARDS_BASIC_PASSWORD= node dist/src/server.js",
+    "demo:server": "NODE_ENV=development VERCEL= KANBAN_CARDS_DATA_PATH=.demo/kanban-cards-state.json KANBAN_CARDS_DATABASE_URL= POSTGRES_URL= DATABASE_URL= KANBAN_CARDS_API_TOKEN= INSTRUCT_API_TOKEN= node dist/src/server.js",
     "demo:step": "tsx scripts/demo.ts step",
     "demo:verify": "tsx scripts/demo.ts verify",
     "demo:record": "tsx scripts/record-demo.ts",
@@ -25,6 +26,7 @@
   },
   "dependencies": {
     "express": "^5.2.1",
+    "jose": "^6.2.3",
     "pg": "^8.16.3"
   },
   "devDependencies": {

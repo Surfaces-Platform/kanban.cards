@@ -11,21 +11,20 @@ import { hashAgentToken } from "../src/agent-token-store";
 import { createApp } from "../src/server";
 
 test("scoped agent tokens are one-time, hashed, revocable, and board-agent limited", async () => {
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-cards-agent-access-"));
-  const dataPath = path.join(tempDir, "state.json");
-  const tokenDataPath = path.join(tempDir, "agent-tokens.json");
-  const adminToken = "admin-token";
-  const server = await listen(createApp({
-    dataPath,
-    tokenDataPath,
-    requireAuth: true,
-    apiToken: adminToken,
-    basicUser: "mike",
-    basicPassword: "secret"
-  }));
-  const baseUrl = `http://127.0.0.1:${serverPort(server)}`;
+  await withPlatformAuthEnv(async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-cards-agent-access-"));
+    const dataPath = path.join(tempDir, "state.json");
+    const tokenDataPath = path.join(tempDir, "agent-tokens.json");
+    const adminToken = "admin-token";
+    const server = await listen(createApp({
+      dataPath,
+      tokenDataPath,
+      requireAuth: true,
+      apiToken: adminToken
+    }));
+    const baseUrl = `http://127.0.0.1:${serverPort(server)}`;
 
-  try {
+    try {
     const board = await writeJson(`${baseUrl}/api/boards`, bearerHeaders(adminToken), {
       name: "Scoped board",
       lanes: [
@@ -46,6 +45,9 @@ test("scoped agent tokens are one-time, hashed, revocable, and board-agent limit
     assert.match(createdToken.token, /^kcagt_/);
     assert.equal(createdToken.agentId, "agent-a");
     assert.equal(createdToken.last4, createdToken.token.slice(-4));
+    assert.match(createdToken.sessionId, /^agsess_/);
+    assert.equal(createdToken.projectId, board.projectId);
+    assert.deepEqual(createdToken.capabilities, ["view", "create", "update", "comment", "move"]);
     assert.equal(Object.hasOwn(createdToken, "tokenHash"), false);
 
     const tokenFile = JSON.parse(await fs.readFile(tokenDataPath, "utf8"));
@@ -63,6 +65,8 @@ test("scoped agent tokens are one-time, hashed, revocable, and board-agent limit
     assert.equal(session.mode, "agent");
     assert.equal(session.board.id, board.id);
     assert.equal(session.agent.id, "agent-a");
+    assert.equal(session.token.sessionId, createdToken.sessionId);
+    assert.equal(session.token.projectId, board.projectId);
 
     const usedTokens = await getJson(`${baseUrl}/api/boards/${board.id}/agent-tokens`, bearerHeaders(adminToken));
     assert.ok(usedTokens.tokens[0].lastUsedAt);
@@ -77,6 +81,9 @@ test("scoped agent tokens are one-time, hashed, revocable, and board-agent limit
     });
     assert.equal(boardPatchDenied.status, 403);
 
+    const boardEventsDenied = await fetch(`${baseUrl}/api/boards/${board.id}/events`, { headers: agentHeaders });
+    assert.equal(boardEventsDenied.status, 403);
+
     const createdCard = await writeJson(`${baseUrl}/api/boards/${board.id}/work-items`, agentHeaders, {
       title: "Agent-owned card",
       laneId: board.lanes[0].id
@@ -88,12 +95,35 @@ test("scoped agent tokens are one-time, hashed, revocable, and board-agent limit
     }, "PATCH");
     assert.equal(moved.laneId, board.lanes[1].id);
 
+    const approvalDenied = await fetch(`${baseUrl}/api/boards/${board.id}/work-items/${createdCard.id}`, {
+      method: "PATCH",
+      headers: { ...agentHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({ approvals: [{ by: "agent-a" }] })
+    });
+    assert.equal(approvalDenied.status, 403);
+
+    const deliveryDenied = await fetch(`${baseUrl}/api/boards/${board.id}/work-items/${createdCard.id}`, {
+      method: "PATCH",
+      headers: { ...agentHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({ delivered: true })
+    });
+    assert.equal(deliveryDenied.status, 403);
+
     const comment = await writeJson(`${baseUrl}/api/boards/${board.id}/work-items/${createdCard.id}/comments`, agentHeaders, {
       kind: "progress",
       text: "Ready for review.",
       author: "spoofed"
     });
     assert.equal(comment.author, "agent-a");
+
+    const cardEvents = await getJson(`${baseUrl}/api/boards/${board.id}/events?cardId=${encodeURIComponent(createdCard.id)}&limit=10`, bearerHeaders(adminToken));
+    const agentCommentEvent = cardEvents.events.find((event: any) => event.payload.reason === "comment_created");
+    assert.equal(agentCommentEvent.payload.actor.type, "agent");
+    assert.equal(agentCommentEvent.payload.actor.agentId, "agent-a");
+    assert.equal(agentCommentEvent.payload.delegation.sessionId, createdToken.sessionId);
+    assert.deepEqual(agentCommentEvent.payload.delegation.capabilities, ["view", "create", "update", "comment", "move"]);
+    assert.equal(JSON.stringify(cardEvents).includes(hashAgentToken(createdToken.token)), false);
+    assert.equal(JSON.stringify(cardEvents).includes(createdToken.token), false);
 
     const wrongOwner = await fetch(`${baseUrl}/api/boards/${board.id}/work-items`, {
       method: "POST",
@@ -118,6 +148,73 @@ test("scoped agent tokens are one-time, hashed, revocable, and board-agent limit
     });
     assert.equal(otherPatch.status, 403);
 
+    const viewOnlyToken = await writeJson(`${baseUrl}/api/boards/${board.id}/agent-tokens`, bearerHeaders(adminToken), {
+      agentId: "agent-a",
+      label: "View only",
+      capabilities: ["view"]
+    });
+    const viewOnlyHeaders = bearerHeaders(viewOnlyToken.token);
+    const visibleBoard = await getJson(`${baseUrl}/api/boards/${board.id}`, viewOnlyHeaders);
+    assert.equal(visibleBoard.id, board.id);
+    const createDenied = await fetch(`${baseUrl}/api/boards/${board.id}/work-items`, {
+      method: "POST",
+      headers: { ...viewOnlyHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: "Denied by missing create",
+        laneId: board.lanes[0].id
+      })
+    });
+    assert.equal(createDenied.status, 403);
+
+    const createOnlyToken = await writeJson(`${baseUrl}/api/boards/${board.id}/agent-tokens`, bearerHeaders(adminToken), {
+      agentId: "agent-a",
+      label: "Create only",
+      capabilities: ["create"]
+    });
+    const viewDenied = await fetch(`${baseUrl}/api/boards/${board.id}`, {
+      headers: bearerHeaders(createOnlyToken.token)
+    });
+    assert.equal(viewDenied.status, 403);
+
+    const noMoveToken = await writeJson(`${baseUrl}/api/boards/${board.id}/agent-tokens`, bearerHeaders(adminToken), {
+      agentId: "agent-a",
+      label: "No move",
+      capabilities: ["view", "create", "update", "comment"]
+    });
+    const moveDenied = await fetch(`${baseUrl}/api/boards/${board.id}/work-items/${createdCard.id}`, {
+      method: "PATCH",
+      headers: { ...bearerHeaders(noMoveToken.token), "Content-Type": "application/json" },
+      body: JSON.stringify({ laneId: board.lanes[0].id })
+    });
+    assert.equal(moveDenied.status, 403);
+
+    const noUpdateToken = await writeJson(`${baseUrl}/api/boards/${board.id}/agent-tokens`, bearerHeaders(adminToken), {
+      agentId: "agent-a",
+      label: "No update",
+      capabilities: ["view", "create", "comment", "move"]
+    });
+    const updateDenied = await fetch(`${baseUrl}/api/boards/${board.id}/work-items/${createdCard.id}`, {
+      method: "PATCH",
+      headers: { ...bearerHeaders(noUpdateToken.token), "Content-Type": "application/json" },
+      body: JSON.stringify({ summary: "Denied by missing update" })
+    });
+    assert.equal(updateDenied.status, 403);
+
+    const noCommentToken = await writeJson(`${baseUrl}/api/boards/${board.id}/agent-tokens`, bearerHeaders(adminToken), {
+      agentId: "agent-a",
+      label: "No comment",
+      capabilities: ["view", "create", "update", "move"]
+    });
+    const commentDenied = await fetch(`${baseUrl}/api/boards/${board.id}/work-items/${createdCard.id}/comments`, {
+      method: "POST",
+      headers: { ...bearerHeaders(noCommentToken.token), "Content-Type": "application/json" },
+      body: JSON.stringify({
+        kind: "progress",
+        text: "Denied by missing comment"
+      })
+    });
+    assert.equal(commentDenied.status, 403);
+
     const revoked = await fetch(`${baseUrl}/api/boards/${board.id}/agent-tokens/${createdToken.id}`, {
       method: "DELETE",
       headers: bearerHeaders(adminToken)
@@ -126,10 +223,11 @@ test("scoped agent tokens are one-time, hashed, revocable, and board-agent limit
 
     const afterRevoke = await fetch(`${baseUrl}/api/agent/session`, { headers: agentHeaders });
     assert.equal(afterRevoke.status, 401);
-  } finally {
-    await closeServer(server);
-    await fs.rm(tempDir, { recursive: true, force: true });
-  }
+    } finally {
+      await closeServer(server);
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
 });
 
 function lane(title: string, description: string, defaultOwnerAgentId: string | null = null, defaultReviewerAgentId: string | null = null) {
@@ -203,4 +301,33 @@ async function writeJson<T = any>(url: string, headers: Record<string, string>, 
     assert.fail(`${url} returned ${response.status}: ${await response.text()}`);
   }
   return response.json() as Promise<T>;
+}
+
+async function withPlatformAuthEnv(run: () => Promise<void>): Promise<void> {
+  const restore = setEnv({
+    OIDC_ISSUER: "https://auth.example.com/",
+    OIDC_CLIENT_ID: "test-client",
+    OIDC_REDIRECT_URI: "http://127.0.0.1:4317/auth/callback",
+    SESSION_SECRET: "test-session-secret-with-enough-entropy",
+    PLATFORM_SURFACE_ID: "kanban.cards"
+  });
+  try {
+    await run();
+  } finally {
+    restore();
+  }
+}
+
+function setEnv(values: Record<string, string>): () => void {
+  const previous = new Map<string, string | undefined>();
+  for (const [key, value] of Object.entries(values)) {
+    previous.set(key, process.env[key]);
+    process.env[key] = value;
+  }
+  return () => {
+    for (const [key, value] of previous.entries()) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  };
 }

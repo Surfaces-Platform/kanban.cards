@@ -60,8 +60,25 @@ export interface BoardDraft {
   agentSpecs: AgentSpec[];
 }
 
+export interface Team {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface Project {
+  id: string;
+  teamId: string;
+  name: string;
+  description: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Board {
   id: string;
+  projectId: string;
   name: string;
   lanes: Lane[];
   agentSpecs: AgentSpec[];
@@ -85,6 +102,9 @@ export interface BoardTemplate {
 }
 
 export interface WorkspaceState {
+  team: Team;
+  projects: Project[];
+  activeProjectId: string;
   boards: Board[];
   activeBoardId: string;
   templates: BoardTemplate[];
@@ -108,10 +128,19 @@ export interface TokenRecord {
   label: string;
   tokenHash: string;
   last4: string;
+  teamId: Nullable<string>;
+  projectId: Nullable<string>;
+  sessionId: string;
+  delegatedBy: Nullable<string>;
+  capabilities: string[];
+  expiresAt: Nullable<string>;
+  reason: string;
   createdAt: string;
   lastUsedAt: Nullable<string>;
   revokedAt: Nullable<string>;
 }
+
+export type AgentCapability = "view" | "create" | "update" | "comment" | "move";
 
 export type PublicTokenRecord = Omit<TokenRecord, "tokenHash">;
 
@@ -125,22 +154,78 @@ export interface AgentTokenCreateInput {
   boardId: string;
   agentId: string;
   label?: unknown;
+  teamId?: Nullable<string>;
+  projectId?: Nullable<string>;
+  sessionId?: unknown;
+  delegatedBy?: Nullable<string>;
+  capabilities?: unknown;
+  expiresAt?: Nullable<string>;
+  reason?: unknown;
 }
 
 export type WorkspaceEventType = "workspace_changed";
+export type WorkspaceEventActorType = "anonymous" | "agent" | "user" | "service";
+
+export interface WorkspaceEventActorProvenance extends JsonObject {
+  type: WorkspaceEventActorType;
+  userId?: string;
+  email?: string;
+  name?: string;
+  agentId?: string;
+  tokenId?: string;
+  sessionId?: string;
+  boardId?: string;
+  teamId?: Nullable<string>;
+  projectId?: Nullable<string>;
+  method?: string;
+}
+
+export interface WorkspaceEventDelegationProvenance extends JsonObject {
+  sessionId: string;
+  delegatedBy: Nullable<string>;
+  capabilities: string[];
+  expiresAt: Nullable<string>;
+  reason: string;
+}
+
+export interface WorkspaceEventResourcePayload extends JsonObject {
+  type: string;
+  id?: Nullable<string>;
+  cardId?: Nullable<string>;
+}
+
+export interface WorkspaceEventPayload extends JsonObject {
+  reason?: string;
+  action?: string;
+  resource?: WorkspaceEventResourcePayload;
+  actor?: WorkspaceEventActorProvenance;
+  delegation?: Nullable<WorkspaceEventDelegationProvenance>;
+  timestamp?: string;
+  updatedAt?: string;
+  projectId?: string;
+  activeProjectId?: string;
+  agentId?: string;
+  tokenId?: string;
+}
 
 export interface WorkspaceEvent {
   id: string;
   type: WorkspaceEventType;
   boardId: Nullable<string>;
-  payload: JsonObject;
+  payload: WorkspaceEventPayload;
   createdAt: string;
 }
 
 export interface WorkspaceEventCreateInput {
   type: WorkspaceEventType;
   boardId?: Nullable<string>;
-  payload?: JsonObject;
+  payload?: WorkspaceEventPayload;
+}
+
+export interface WorkspaceEventListRecentOptions {
+  boardId?: Nullable<string>;
+  cardId?: Nullable<string>;
+  limit?: number;
 }
 
 export interface StateStore {
@@ -167,6 +252,7 @@ export interface EventStore {
   ensureReady(): Promise<void>;
   append(input: WorkspaceEventCreateInput): Promise<WorkspaceEvent>;
   listSince(sinceId: string | null, limit?: number): Promise<WorkspaceEvent[]>;
+  listRecent(options?: WorkspaceEventListRecentOptions): Promise<WorkspaceEvent[]>;
   latestId(): Promise<string | null>;
 }
 

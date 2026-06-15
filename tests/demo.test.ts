@@ -39,9 +39,7 @@ test("demo harness prepares scoped configs and runs the private beta security re
     tokenStore: createFileAgentTokenStore(tokenDataPath),
     requireAuth: false,
     requireDatabase: false,
-    apiToken: "",
-    basicUser: "",
-    basicPassword: ""
+    apiToken: ""
   }));
   const env = cleanEnv({
     HOME: homeDir,

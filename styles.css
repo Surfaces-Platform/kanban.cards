@@ -17,7 +17,7 @@
   --ok-soft: #e7f3ec;
   --warn: #876416;
   --warn-soft: #fbf2d7;
-  --topbar: 52px;
+  --topbar: 64px;
   --toolbar: 48px;
   --max: 1040px;
 }
@@ -132,11 +132,21 @@ button:disabled {
 }
 
 .topbar-left,
+.topbar-right,
 .board-actions {
   align-items: center;
   display: flex;
   gap: 8px;
   min-width: 0;
+}
+
+.topbar-left {
+  flex: 1 1 auto;
+}
+
+.topbar-right {
+  flex: 0 1 auto;
+  justify-content: flex-end;
 }
 
 .product-mark {
@@ -150,10 +160,12 @@ button:disabled {
   text-decoration: none;
 }
 
+.project-switcher,
 .board-switcher {
   min-width: 0;
 }
 
+.project-switcher select,
 .board-switcher select {
   background: var(--paper);
   border: 1px solid var(--line);
@@ -164,6 +176,61 @@ button:disabled {
   min-width: 160px;
   max-width: 260px;
   padding: 0 30px 0 9px;
+}
+
+.project-switcher select {
+  min-width: 150px;
+}
+
+.board-switcher select:disabled {
+  background: var(--panel);
+  color: var(--quiet);
+}
+
+.account-chip {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--muted);
+  display: inline-flex;
+  font-size: 13px;
+  font-weight: 800;
+  min-height: 32px;
+  max-width: 220px;
+  align-items: center;
+  overflow: hidden;
+  padding: 0 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-context {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.account-meta {
+  color: var(--muted);
+  display: grid;
+  gap: 2px;
+  grid-template-columns: repeat(2, minmax(0, max-content));
+  max-width: 360px;
+  min-width: 0;
+}
+
+.account-meta span {
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1.15;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-logout {
+  text-decoration: none;
 }
 
 .primary-button,
@@ -342,6 +409,18 @@ button:disabled {
 .empty-board > p:last-child,
 .empty-inspector > p:last-child {
   max-width: 430px;
+}
+
+.empty-project {
+  gap: 12px;
+  max-width: 560px;
+}
+
+.empty-project-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .flow-panel {
@@ -1249,9 +1328,98 @@ textarea.form-control {
   overflow-wrap: anywhere;
 }
 
+.settings-meta-grid,
+.metadata-grid {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 0;
+  overflow: hidden;
+}
+
+.settings-meta-grid > div,
+.metadata-grid > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 8px;
+}
+
+.settings-meta-grid > div:nth-child(odd),
+.metadata-grid > div:nth-child(odd) {
+  border-right: 1px solid var(--line);
+}
+
+.settings-meta-grid > div:nth-child(n + 3),
+.metadata-grid > div:nth-child(n + 3) {
+  border-top: 1px solid var(--line);
+}
+
+.metadata-grid.compact {
+  background: var(--paper);
+}
+
+.settings-meta-grid dt,
+.metadata-grid dt {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  margin: 0;
+  text-transform: uppercase;
+}
+
+.settings-meta-grid dd,
+.metadata-grid dd {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 800;
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .comment-thread {
   display: grid;
   gap: 8px;
+}
+
+.activity-provenance,
+.activity-event-list {
+  display: grid;
+  gap: 8px;
+}
+
+.activity-event {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+}
+
+.activity-event-header {
+  align-items: start;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.activity-event-header strong {
+  font-size: 12px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.activity-event-header time {
+  color: var(--muted);
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 800;
+  white-space: nowrap;
 }
 
 .comment-card {
@@ -1325,8 +1493,13 @@ textarea.form-control {
   border-color: rgba(160, 68, 43, 0.38);
 }
 
+.project-settings-modal,
+.board-settings-modal {
+  width: min(100%, 560px);
+}
+
 .agent-connect-modal {
-  width: min(100%, 640px);
+  width: min(100%, 760px);
 }
 
 .modal-header {
@@ -1386,6 +1559,11 @@ textarea.form-control {
   gap: 8px;
 }
 
+.new-token-metadata {
+  display: grid;
+  gap: 8px;
+}
+
 .token-list {
   display: grid;
   gap: 8px;
@@ -1395,7 +1573,7 @@ textarea.form-control {
 }
 
 .token-row {
-  align-items: center;
+  align-items: start;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -1405,10 +1583,19 @@ textarea.form-control {
   padding: 10px;
 }
 
-.token-row div {
+.token-row-main,
+.token-row-heading {
   display: grid;
-  gap: 2px;
+  gap: 6px;
   min-width: 0;
+}
+
+.token-row-main {
+  flex: 1 1 auto;
+}
+
+.token-row-heading {
+  gap: 2px;
 }
 
 .token-row span,
@@ -1416,6 +1603,10 @@ textarea.form-control {
   color: var(--muted);
   font-size: 12px;
   font-weight: 800;
+}
+
+.token-metadata {
+  background: var(--paper);
 }
 
 .toast-region {
@@ -1549,6 +1740,27 @@ th {
     padding: 8px;
   }
 
+  .topbar-left,
+  .topbar-right,
+  .account-context {
+    align-items: stretch;
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+  }
+
+  .project-switcher,
+  .board-switcher,
+  .project-switcher select,
+  .board-switcher select {
+    flex: 1 1 180px;
+    max-width: none;
+  }
+
+  .account-meta {
+    grid-template-columns: 1fr;
+    max-width: none;
+  }
+
   .board-context,
   .board-counts {
     align-items: stretch;
@@ -1602,7 +1814,9 @@ th {
   .phase-list,
   .two-col,
   .current-state-grid,
-  .detail-meta-grid {
+  .detail-meta-grid,
+  .settings-meta-grid,
+  .metadata-grid {
     grid-template-columns: 1fr;
   }
 
@@ -1617,6 +1831,22 @@ th {
   .detail-meta-grid > div + div {
     border-left: 0;
     border-top: 1px solid var(--line);
+  }
+
+  .settings-meta-grid > div:nth-child(odd),
+  .metadata-grid > div:nth-child(odd) {
+    border-right: 0;
+  }
+
+  .settings-meta-grid > div:nth-child(n + 2),
+  .metadata-grid > div:nth-child(n + 2) {
+    border-top: 1px solid var(--line);
+  }
+
+  .token-row,
+  .activity-event-header {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .full-field {

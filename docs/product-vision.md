@@ -43,6 +43,14 @@ In kanban.cards, agents can create cards, update summaries, post comments, respo
 
 That makes the agent less like an opaque chat session and more like a participant in a workflow. The agent still does the work, but the team can see what it did, what remains open, and why the card moved.
 
+## Access and Governance
+
+Reviewable agent work needs scoped authority. The target access model treats users, teams, projects, boards, cards, and agent sessions as explicit parts of the workflow.
+
+An agent should act through delegated access: a bounded grant for a project, board, card, action set, and review requirement. That keeps the board useful as a shared operating surface because the same place shows the work, the authority behind the work, and the evidence left for review.
+
+The current Auth0 session auth, break-glass admin token, and board-scoped agent tokens are early infrastructure for that direction. The fuller model is described in [AI-Native Access Model](ai-native-access-model.md).
+
 ## What Good Looks Like
 
 A good workflow is visible while it is happening.

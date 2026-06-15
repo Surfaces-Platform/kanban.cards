@@ -6,20 +6,36 @@ import express, { type ErrorRequestHandler, type NextFunction, type Request, typ
 import {
   COMMENT_KINDS,
   COMMENT_STATUSES,
+  DEFAULT_PROJECT_ID,
+  DEFAULT_TEAM_ID,
   createBoard,
+  createProject,
   createComment,
   createStateStore,
   createWorkItem,
   findBoard,
   findComment,
+  findProject,
   findWorkItem,
   normalizeWorkspace,
   touchBoard,
+  touchProject,
   touchWorkItem
 } from "./state-store";
 import { createAgentTokenStore } from "./agent-token-store";
 import { createEventStore } from "./event-store";
+import {
+  clearSessionAndRedirect,
+  getSession,
+  handleCallback,
+  hasPlatformAuthConfig,
+  logout,
+  type PlatformAuthRouteResponse,
+  type PlatformSession,
+  startLogin
+} from "./platform-auth";
 import type {
+  AgentCapability,
   AgentInstruction,
   AgentSpec,
   AgentTokenStore,
@@ -28,14 +44,42 @@ import type {
   CommentStatus,
   EventStore,
   PostgresOptions,
+  Project,
   StateStore,
   WorkspaceEvent,
+  WorkspaceEventActorProvenance,
+  WorkspaceEventDelegationProvenance,
+  WorkspaceEventPayload,
   WorkItem,
   WorkItemComment,
   WorkspaceState
 } from "./types";
 
-type AdminAuthContext = { kind: "admin"; method: "basic" | "bearer" | "local-open" };
+type SessionAdminAuthContext = {
+  kind: "admin";
+  method: "session";
+  userId: string;
+  email: string;
+  name: string;
+  workspaceId: string;
+  roles: string[];
+  surfaceAccess: string[];
+  teamId: string;
+  projectId: string;
+};
+type AdminAuthContext =
+  | {
+      kind: "admin";
+      method: "bearer" | "local-open";
+      userId: string;
+      email: string;
+      name: string;
+      roles: string[];
+      surfaceAccess: string[];
+      teamId: string;
+      projectId: string;
+    }
+  | SessionAdminAuthContext;
 type AgentAuthContext = {
   kind: "agent";
   method: "bearer";
@@ -43,6 +87,13 @@ type AgentAuthContext = {
   boardId: string;
   agentId: string;
   last4: string;
+  teamId: string | null;
+  projectId: string | null;
+  sessionId: string;
+  delegatedBy: string | null;
+  capabilities: string[];
+  expiresAt: string | null;
+  reason: string;
   lastUsedAt: string | null;
 };
 type AnonymousAuthContext = { kind: "anonymous" };
@@ -63,8 +114,6 @@ interface CreateAppOptions extends PostgresOptions {
   requireDatabase?: boolean;
   requireAuth?: boolean;
   apiToken?: string;
-  basicUser?: string;
-  basicPassword?: string;
   store?: StateStore;
   tokenStore?: AgentTokenStore;
   eventStore?: EventStore;
@@ -79,8 +128,8 @@ interface CreateAppOptions extends PostgresOptions {
 interface AuthConfig {
   accessAuthRequired: boolean;
   apiToken: string;
-  basicUser: string;
-  basicPassword: string;
+  platformAuthConfigured: boolean;
+  surfaceId: string;
   localWriteOpen: boolean;
   missingRequiredSecrets: string[];
 }
@@ -122,6 +171,7 @@ const FALLBACK_INDEX_HTML = `<!doctype html>
         </label>
         <button class="secondary-button" type="button" id="new-board">New board</button>
       </div>
+      <div class="topbar-right" id="account-control"></div>
     </header>
 
     <section class="board-toolbar" aria-label="Board controls">
@@ -227,12 +277,48 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       tokenStorage: tokenStore.kind,
       eventStorage: eventStore.kind,
       authRequired: auth.accessAuthRequired,
+      platformAuthConfigured: auth.platformAuthConfigured,
+      surfaceId: auth.surfaceId,
       writeAuthRequired: !auth.localWriteOpen,
       missingConfig: missingRequiredConfig
     });
   });
 
-  app.use(requireAccessAuth(auth, tokenStore, missingRequiredConfig));
+  app.get("/auth/login", asyncHandler(async (req, res) => {
+    await sendPlatformAuthResponse(res, await startLogin(toWebRequest(req), { surface: auth.surfaceId }));
+  }));
+
+  app.get("/auth/callback", asyncHandler(async (req, res) => {
+    await sendPlatformAuthResponse(res, await handleCallback(toWebRequest(req), { surface: auth.surfaceId }));
+  }));
+
+  app.get("/auth/logout", asyncHandler(async (req, res) => {
+    await sendPlatformAuthResponse(res, await logout(toWebRequest(req), { global: req.query.global === "1" }));
+  }));
+
+  app.post("/auth/logout", asyncHandler(async (req, res) => {
+    await sendPlatformAuthResponse(res, await logout(toWebRequest(req), { global: req.query.global === "1" }));
+  }));
+
+  app.get("/auth/logout/complete", asyncHandler(async (req, res) => {
+    await sendPlatformAuthResponse(res, clearSessionAndRedirect(toWebRequest(req), "/"));
+  }));
+
+  app.get("/auth/session", asyncHandler(async (req, res) => {
+    if (!auth.platformAuthConfigured) {
+      res.status(401).json({ error: "No active session." });
+      return;
+    }
+    const result = await getSession(toWebRequest(req));
+    if (!result.ok) {
+      res.status(401).json({ error: "No active session." });
+      return;
+    }
+    const activeProjectId = await readActiveProjectId(store);
+    res.json(publicSession(result.session, activeProjectId));
+  }));
+
+  app.use(requireAccessAuth(auth, tokenStore, store, missingRequiredConfig));
 
   app.get("/", serveIndex(staticDir));
   app.get("/index.html", serveIndex(staticDir));
@@ -247,7 +333,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
 
   app.put("/api/state", requireAdminAuth(), asyncHandler(async (req, res) => {
     const saved = await store.write(req.body);
-    await publishWorkspaceEvent(null, "workspace_saved");
+    await publishWorkspaceEvent(req, null, "update", { type: "workspace" }, "workspace_saved");
     res.json(saved);
   }));
 
@@ -256,7 +342,53 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     await streamWorkspaceEvents(req, res);
   }));
 
-  app.get("/api/boards", asyncHandler(async (req, res) => {
+  app.get("/api/projects", requireAdminAuth(), asyncHandler(async (_req, res) => {
+    const state = await store.read();
+    res.json({ team: state.team, projects: state.projects, activeProjectId: state.activeProjectId });
+  }));
+
+  app.post("/api/projects", requireAdminAuth(), asyncHandler(async (req, res) => {
+    const { result } = await store.update((state) => {
+      const teamId = effectiveTeamId(req, state);
+      ensureStateTeam(state, teamId);
+      const project = createProject({
+        teamId,
+        name: normalizeProjectName(req.body?.name),
+        description: typeof req.body?.description === "string" ? req.body.description : ""
+      });
+      state.projects.push(project);
+      if (req.body?.active !== false) state.activeProjectId = project.id;
+      return project;
+    });
+    await publishWorkspaceEvent(req, null, "create", { type: "project", id: result.id }, "project_created", { projectId: result.id });
+    res.status(201).json(result);
+  }));
+
+  app.patch("/api/projects/:projectId", requireAdminAuth(), asyncHandler(async (req, res) => {
+    const projectId = routeParam(req, "projectId");
+    const { state, result } = await store.update((workspace) => {
+      const project = findProject(workspace, projectId);
+      if (!project) throw httpError(404, "Project not found.");
+      if (typeof req.body?.name === "string") project.name = normalizeProjectName(req.body.name);
+      if (typeof req.body?.description === "string") project.description = req.body.description.trim();
+      if (req.body?.active === true) {
+        workspace.activeProjectId = project.id;
+        if (!workspace.boards.some((board) => board.id === workspace.activeBoardId && board.projectId === project.id)) {
+          const projectBoard = workspace.boards.find((board) => board.projectId === project.id);
+          if (projectBoard) workspace.activeBoardId = projectBoard.id;
+        }
+      }
+      touchProject(project);
+      return project;
+    });
+    await publishWorkspaceEvent(req, null, "update", { type: "project", id: result.id }, "project_updated", {
+      projectId: result.id,
+      activeProjectId: state.activeProjectId
+    });
+    res.json(result);
+  }));
+
+  app.get("/api/boards", requireAgentCapability("view"), asyncHandler(async (req, res) => {
     const state = await store.read();
     if (isAgentAuth(req)) {
       const board = findBoard(state, req.kanbanAuth.boardId);
@@ -264,19 +396,36 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       res.json({ boards: [board], activeBoardId: board.id });
       return;
     }
-    res.json({ boards: state.boards, activeBoardId: state.activeBoardId });
+    const projectId = requestedProjectId(req, state);
+    const boards = state.boards.filter((board) => board.projectId === projectId);
+    const activeBoardId = boards.some((board) => board.id === state.activeBoardId) ? state.activeBoardId : boards[0]?.id || null;
+    res.json({ boards, activeBoardId, activeProjectId: projectId });
   }));
 
-  app.get("/api/boards/:boardId", asyncHandler(async (req, res) => {
+  app.get("/api/boards/:boardId", requireAgentCapability("view"), asyncHandler(async (req, res) => {
     const boardId = routeParam(req, "boardId");
     requireBoardAccess(req, boardId);
     const state = await store.read();
     const board = findBoard(state, boardId);
     if (!board) throw httpError(404, "Board not found.");
+    requireBoardProjectAccess(req, board);
     res.json(board);
   }));
 
-  app.get("/api/agent/instructions", asyncHandler(async (req, res) => {
+  app.get("/api/boards/:boardId/events", requireAdminAuth(), asyncHandler(async (req, res) => {
+    const boardId = routeParam(req, "boardId");
+    const state = await store.read();
+    const board = findBoard(state, boardId);
+    if (!board) throw httpError(404, "Board not found.");
+    const events = await eventStore.listRecent({
+      boardId,
+      cardId: queryString(req.query.cardId),
+      limit: queryLimit(req.query.limit)
+    });
+    res.json({ events });
+  }));
+
+  app.get("/api/agent/instructions", requireAgentCapability("view"), asyncHandler(async (req, res) => {
     const state = await store.read();
     if (isAgentAuth(req)) {
       res.json({ instructions: collectAgentInstructions(state, req.kanbanAuth.agentId, req.kanbanAuth.boardId) });
@@ -285,7 +434,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     res.json({ instructions: collectAgentInstructions(state, req.query.agentId) });
   }));
 
-  app.get("/api/agent/session", asyncHandler(async (req, res) => {
+  app.get("/api/agent/session", requireAgentCapability("view"), asyncHandler(async (req, res) => {
     if (isAdminAuth(req)) {
       res.json({ mode: "admin" });
       return;
@@ -295,6 +444,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     const state = await store.read();
     const board = findBoard(state, req.kanbanAuth.boardId);
     if (!board) throw httpError(404, "Board not found.");
+    requireBoardProjectAccess(req, board);
     const agent = findAgentSpec(board, req.kanbanAuth.agentId);
     if (!agent) throw httpError(404, "Agent not found.");
     res.json({
@@ -303,6 +453,13 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       agent,
       token: {
         id: req.kanbanAuth.tokenId,
+        sessionId: req.kanbanAuth.sessionId,
+        teamId: req.kanbanAuth.teamId,
+        projectId: req.kanbanAuth.projectId || board.projectId,
+        delegatedBy: req.kanbanAuth.delegatedBy,
+        capabilities: req.kanbanAuth.capabilities,
+        expiresAt: req.kanbanAuth.expiresAt,
+        reason: req.kanbanAuth.reason,
         last4: req.kanbanAuth.last4,
         lastUsedAt: req.kanbanAuth.lastUsedAt
       }
@@ -321,9 +478,19 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     const created = await tokenStore.create({
       boardId: board.id,
       agentId: agent.id,
-      label: req.body?.label
+      label: req.body?.label,
+      teamId: effectiveTeamId(req, state),
+      projectId: board.projectId,
+      delegatedBy: actorId(req.kanbanAuth),
+      capabilities: req.body?.capabilities,
+      expiresAt: nullableString(req.body?.expiresAt),
+      reason: req.body?.reason || `Board-scoped access for ${agent.name}.`
     });
-    await publishWorkspaceEvent(board.id, "agent_token_created");
+    await publishWorkspaceEvent(req, board.id, "create", { type: "agent_session", id: created.tokenRecord.sessionId }, "agent_token_created", {
+      projectId: board.projectId,
+      agentId: agent.id,
+      tokenId: created.tokenRecord.id
+    });
     res.status(201).json({
       ...created.tokenRecord,
       token: created.token
@@ -346,18 +513,24 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     if (!board) throw httpError(404, "Board not found.");
     const tokenRecord = await tokenStore.revoke(board.id, tokenId);
     if (!tokenRecord) throw httpError(404, "Token not found.");
-    await publishWorkspaceEvent(board.id, "agent_token_revoked");
+    await publishWorkspaceEvent(req, board.id, "revoke", { type: "agent_session", id: tokenRecord.sessionId }, "agent_token_revoked", {
+      projectId: board.projectId,
+      agentId: tokenRecord.agentId,
+      tokenId: tokenRecord.id
+    });
     res.json(tokenRecord);
   }));
 
   app.post("/api/boards", requireAdminAuth(), asyncHandler(async (req, res) => {
     const { result } = await store.update((state) => {
-      const board = createBoard(req.body || {});
+      const projectId = normalizeProjectId(req.body?.projectId) || state.activeProjectId || DEFAULT_PROJECT_ID;
+      if (!findProject(state, projectId)) throw httpError(404, "Project not found.");
+      const board = createBoard({ ...(req.body || {}), projectId });
       state.boards.push(board);
       state.activeBoardId = board.id;
       return board;
     });
-    await publishWorkspaceEvent(result.id, "board_created");
+    await publishWorkspaceEvent(req, result.id, "create", { type: "board", id: result.id }, "board_created", { projectId: result.projectId });
     res.status(201).json(result);
   }));
 
@@ -367,6 +540,10 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       const board = findBoard(state, boardId);
       if (!board) throw httpError(404, "Board not found.");
       if (typeof req.body.name === "string") board.name = req.body.name;
+      if (typeof req.body.projectId === "string" && req.body.projectId !== board.projectId) {
+        if (!findProject(state, req.body.projectId)) throw httpError(404, "Project not found.");
+        board.projectId = req.body.projectId;
+      }
       if (typeof req.body.flowPrompt === "string") board.flowPrompt = req.body.flowPrompt;
       if (Object.prototype.hasOwnProperty.call(req.body, "configDraft")) board.configDraft = req.body.configDraft;
       if (Object.prototype.hasOwnProperty.call(req.body, "isEditingFlow")) board.isEditingFlow = Boolean(req.body.isEditingFlow);
@@ -376,16 +553,17 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       touchBoard(board);
       return board;
     });
-    await publishWorkspaceEvent(result.id, "board_updated");
+    await publishWorkspaceEvent(req, result.id, "update", { type: "board", id: result.id }, "board_updated", { projectId: result.projectId });
     res.json(result);
   }));
 
-  app.post("/api/boards/:boardId/work-items", requireWriteAuth(), asyncHandler(async (req, res) => {
+  app.post("/api/boards/:boardId/work-items", requireWriteAuth(), requireAgentCapability("create"), asyncHandler(async (req, res) => {
     const boardId = routeParam(req, "boardId");
     requireBoardAccess(req, boardId);
     const { result } = await store.update((state) => {
       const board = findBoard(state, boardId);
       if (!board) throw httpError(404, "Board not found.");
+      requireBoardProjectAccess(req, board);
       if (!String(req.body.title || "").trim()) throw httpError(400, "Card title is required.");
       const input = isAgentAuth(req) ? withAgentCreateDefaults(req, req.body || {}) : req.body;
       const item = createWorkItem(input, board);
@@ -395,43 +573,47 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       }
       board.workItems.push(item);
       touchBoard(board);
-      return item;
+      return { item, projectId: board.projectId };
     });
-    await publishWorkspaceEvent(boardId, "card_created");
-    res.status(201).json(result);
+    await publishWorkspaceEvent(req, boardId, "create", { type: "card", id: result.item.id }, "card_created", { projectId: result.projectId });
+    res.status(201).json(result.item);
   }));
 
   app.patch("/api/boards/:boardId/work-items/:itemId", requireWriteAuth(), asyncHandler(async (req, res) => {
     const boardId = routeParam(req, "boardId");
     const itemId = routeParam(req, "itemId");
     requireBoardAccess(req, boardId);
+    requireAgentWorkItemPatchCapabilities(req);
     const { result } = await store.update((state) => {
       const board = findBoard(state, boardId);
       if (!board) throw httpError(404, "Board not found.");
+      requireBoardProjectAccess(req, board);
       const item = findWorkItem(board, itemId);
       if (!item) throw httpError(404, "Card not found.");
       if (isAgentAuth(req) && !isItemAssignedToAgent(item, req.kanbanAuth.agentId)) {
         throw httpError(403, "Agent tokens can only update cards assigned to that agent.");
       }
+      if (isAgentAuth(req)) assertAgentWorkItemPatchAllowed(req.body || {});
       applyWorkItemPatch(board, item, req.body || {});
       if (isAgentAuth(req) && !isItemAssignedToAgent(item, req.kanbanAuth.agentId)) {
         throw httpError(403, "Agent tokens cannot remove themselves from an assigned card.");
       }
       touchWorkItem(item);
       touchBoard(board);
-      return item;
+      return { item, projectId: board.projectId };
     });
-    await publishWorkspaceEvent(boardId, "card_updated");
-    res.json(result);
+    await publishWorkspaceEvent(req, boardId, "update", { type: "card", id: result.item.id }, "card_updated", { projectId: result.projectId });
+    res.json(result.item);
   }));
 
-  app.post("/api/boards/:boardId/work-items/:itemId/comments", requireWriteAuth(), asyncHandler(async (req, res) => {
+  app.post("/api/boards/:boardId/work-items/:itemId/comments", requireWriteAuth(), requireAgentCapability("comment"), asyncHandler(async (req, res) => {
     const boardId = routeParam(req, "boardId");
     const itemId = routeParam(req, "itemId");
     requireBoardAccess(req, boardId);
     const { result } = await store.update((state) => {
       const board = findBoard(state, boardId);
       if (!board) throw httpError(404, "Board not found.");
+      requireBoardProjectAccess(req, board);
       const item = findWorkItem(board, itemId);
       if (!item) throw httpError(404, "Card not found.");
       if (isAgentAuth(req) && !isItemAssignedToAgent(item, req.kanbanAuth.agentId)) {
@@ -443,13 +625,13 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       item.comments.push(comment);
       touchWorkItem(item);
       touchBoard(board);
-      return comment;
+      return { comment, projectId: board.projectId };
     });
-    await publishWorkspaceEvent(boardId, "comment_created");
-    res.status(201).json(result);
+    await publishWorkspaceEvent(req, boardId, "comment", { type: "comment", id: result.comment.id, cardId: itemId }, "comment_created", { projectId: result.projectId });
+    res.status(201).json(result.comment);
   }));
 
-  app.patch("/api/boards/:boardId/work-items/:itemId/comments/:commentId", requireWriteAuth(), asyncHandler(async (req, res) => {
+  app.patch("/api/boards/:boardId/work-items/:itemId/comments/:commentId", requireWriteAuth(), requireAgentCapability("comment"), asyncHandler(async (req, res) => {
     const boardId = routeParam(req, "boardId");
     const itemId = routeParam(req, "itemId");
     const commentId = routeParam(req, "commentId");
@@ -457,6 +639,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     const { result } = await store.update((state) => {
       const board = findBoard(state, boardId);
       if (!board) throw httpError(404, "Board not found.");
+      requireBoardProjectAccess(req, board);
       const item = findWorkItem(board, itemId);
       if (!item) throw httpError(404, "Card not found.");
       if (isAgentAuth(req) && !isItemAssignedToAgent(item, req.kanbanAuth.agentId)) {
@@ -467,10 +650,10 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       applyCommentPatch(comment, isAgentAuth(req) ? filterAgentCommentPatch(req.body || {}, comment, req.kanbanAuth.agentId) : req.body || {});
       touchWorkItem(item);
       touchBoard(board);
-      return comment;
+      return { comment, projectId: board.projectId };
     });
-    await publishWorkspaceEvent(boardId, "comment_updated");
-    res.json(result);
+    await publishWorkspaceEvent(req, boardId, "update", { type: "comment", id: result.comment.id, cardId: itemId }, "comment_updated", { projectId: result.projectId });
+    res.json(result.comment);
   }));
 
   app.use((req: Request, res: Response) => {
@@ -487,14 +670,29 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
 
   return app;
 
-  async function publishWorkspaceEvent(boardId: string | null, reason: string): Promise<WorkspaceEvent> {
+  async function publishWorkspaceEvent(
+    req: Request | null,
+    boardId: string | null,
+    action: string,
+    resource: { type: string; id?: string | null; cardId?: string | null },
+    reason: string,
+    extraPayload: Record<string, unknown> = {}
+  ): Promise<WorkspaceEvent> {
+    const timestamp = new Date().toISOString();
+    const payload: WorkspaceEventPayload = {
+      ...extraPayload,
+      reason,
+      action,
+      resource,
+      actor: describeActor(req?.kanbanAuth),
+      delegation: describeDelegation(req?.kanbanAuth),
+      timestamp,
+      updatedAt: timestamp
+    };
     const event = await eventStore.append({
       type: "workspace_changed",
       boardId,
-      payload: {
-        reason,
-        updatedAt: new Date().toISOString()
-      }
+      payload
     });
     notifyEventSubscribers(eventSubscribers);
     return event;
@@ -617,6 +815,122 @@ function applyCommentPatch(comment: WorkItemComment, patch: UnknownRecord): void
   comment.updatedAt = new Date().toISOString();
 }
 
+function assertAgentWorkItemPatchAllowed(patch: UnknownRecord): void {
+  if (Object.prototype.hasOwnProperty.call(patch, "approvals")) {
+    throw httpError(403, "Agent sessions cannot change approvals.");
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, "delivered")) {
+    throw httpError(403, "Agent sessions cannot mark cards delivered.");
+  }
+}
+
+function requireAgentCapability(capability: AgentCapability): RequestHandler {
+  return (req: Request, _res: Response, next: NextFunction) => {
+    if (isAgentAuth(req)) assertAgentHasCapability(req, capability);
+    next();
+  };
+}
+
+function requireAgentWorkItemPatchCapabilities(req: Request): void {
+  if (!isAgentAuth(req)) return;
+  const patch = isRecord(req.body) ? req.body : {};
+  const patchKeys = Object.keys(patch);
+  const changesLane = Object.prototype.hasOwnProperty.call(patch, "laneId");
+  const changesCardFields = patchKeys.some((key) => key !== "laneId");
+
+  if (changesLane) assertAgentHasCapability(req, "move");
+  if (changesCardFields || !changesLane) assertAgentHasCapability(req, "update");
+}
+
+function assertAgentHasCapability(req: Request, capability: AgentCapability): void {
+  if (!isAgentAuth(req)) return;
+  if (!req.kanbanAuth.capabilities.includes(capability)) {
+    throw httpError(403, `Agent token is missing the "${capability}" capability.`);
+  }
+}
+
+function requestedProjectId(req: Request, state: WorkspaceState): string {
+  const queryProjectId = Array.isArray(req.query.projectId) ? req.query.projectId[0] : req.query.projectId;
+  const normalized = normalizeProjectId(queryProjectId);
+  if (normalized && findProject(state, normalized)) return normalized;
+  return state.activeProjectId || DEFAULT_PROJECT_ID;
+}
+
+function normalizeProjectId(value: unknown): string | null {
+  const text = String(value || "").trim();
+  return text || null;
+}
+
+function normalizeProjectName(value: unknown): string {
+  return String(value || "Untitled project").trim().slice(0, 120) || "Untitled project";
+}
+
+function effectiveTeamId(req: Request, state: WorkspaceState): string {
+  if (isAdminAuth(req) && req.kanbanAuth.method === "session") return req.kanbanAuth.teamId;
+  return state.team?.id || DEFAULT_TEAM_ID;
+}
+
+function ensureStateTeam(state: WorkspaceState, teamId: string): void {
+  if (!teamId || state.team.id === teamId) return;
+  state.team.id = teamId;
+  for (const project of state.projects) {
+    if (!project.teamId || project.teamId === DEFAULT_TEAM_ID) project.teamId = teamId;
+  }
+}
+
+function describeActor(auth: KanbanAuthContext | undefined): WorkspaceEventActorProvenance {
+  if (!auth || auth.kind === "anonymous") return { type: "anonymous" };
+  if (auth.kind === "agent") {
+    return {
+      type: "agent",
+      agentId: auth.agentId,
+      tokenId: auth.tokenId,
+      sessionId: auth.sessionId,
+      boardId: auth.boardId,
+      teamId: auth.teamId,
+      projectId: auth.projectId,
+      method: auth.method
+    };
+  }
+  if (auth.method === "session") {
+    return {
+      type: "user",
+      userId: auth.userId,
+      email: auth.email,
+      name: auth.name,
+      teamId: auth.teamId,
+      projectId: auth.projectId,
+      method: auth.method
+    };
+  }
+  return {
+    type: "service",
+    userId: auth.userId,
+    name: auth.name,
+    teamId: auth.teamId,
+    projectId: auth.projectId,
+    method: auth.method
+  };
+}
+
+function describeDelegation(auth: KanbanAuthContext | undefined): WorkspaceEventDelegationProvenance | null {
+  if (!auth || auth.kind !== "agent") return null;
+  return {
+    sessionId: auth.sessionId,
+    delegatedBy: auth.delegatedBy,
+    capabilities: auth.capabilities,
+    expiresAt: auth.expiresAt,
+    reason: auth.reason
+  };
+}
+
+function actorId(auth: KanbanAuthContext | undefined): string | null {
+  if (!auth || auth.kind === "anonymous") return null;
+  if (auth.kind === "agent") return `agent:${auth.agentId}`;
+  if (auth.method === "session") return `user:${auth.userId}`;
+  return `service:${auth.userId}`;
+}
+
 function collectAgentInstructions(state: WorkspaceState, agentId: unknown, boardId: unknown = null): AgentInstruction[] {
   const normalizedAgentId = nullableString(agentId);
   const normalizedBoardId = nullableString(boardId);
@@ -681,6 +995,12 @@ function requireBoardAccess(req: Request, boardId: string): void {
   }
 }
 
+function requireBoardProjectAccess(req: Request, board: Board): void {
+  if (isAgentAuth(req) && req.kanbanAuth.projectId && req.kanbanAuth.projectId !== board.projectId) {
+    throw httpError(403, "Agent session is scoped to a different project.");
+  }
+}
+
 function isAdminAuth(req: Request): req is Request & { kanbanAuth: AdminAuthContext } {
   return req.kanbanAuth?.kind === "admin";
 }
@@ -693,20 +1013,22 @@ function createAuthConfig(options: CreateAppOptions = {}): AuthConfig {
   const productionLike = options.requireAuth ?? Boolean(process.env.VERCEL || process.env.NODE_ENV === "production");
   const apiToken = options.apiToken ?? process.env.KANBAN_CARDS_API_TOKEN ?? process.env.INSTRUCT_API_TOKEN ?? "";
   const apiTokenProvided = Boolean(options.apiToken || process.env.KANBAN_CARDS_API_TOKEN || process.env.INSTRUCT_API_TOKEN);
-  const basicUser = options.basicUser ?? process.env.KANBAN_CARDS_BASIC_USER ?? "";
-  const basicPassword = options.basicPassword ?? process.env.KANBAN_CARDS_BASIC_PASSWORD ?? "";
-  const basicConfigured = Boolean(basicUser && basicPassword);
+  const platformAuthConfigured = hasPlatformAuthConfig();
+  const surfaceId = process.env.PLATFORM_SURFACE_ID?.trim() || PRODUCT_NAME;
   const missingRequiredSecrets: string[] = [];
 
   if (productionLike && !apiToken) missingRequiredSecrets.push("KANBAN_CARDS_API_TOKEN");
-  if (productionLike && !basicUser) missingRequiredSecrets.push("KANBAN_CARDS_BASIC_USER");
-  if (productionLike && !basicPassword) missingRequiredSecrets.push("KANBAN_CARDS_BASIC_PASSWORD");
+  if (productionLike && !process.env.OIDC_ISSUER?.trim()) missingRequiredSecrets.push("OIDC_ISSUER");
+  if (productionLike && !process.env.OIDC_CLIENT_ID?.trim()) missingRequiredSecrets.push("OIDC_CLIENT_ID");
+  if (productionLike && !process.env.OIDC_REDIRECT_URI?.trim()) missingRequiredSecrets.push("OIDC_REDIRECT_URI");
+  if (productionLike && !process.env.SESSION_SECRET?.trim()) missingRequiredSecrets.push("SESSION_SECRET");
+  if (productionLike && process.env.PLATFORM_SURFACE_ID?.trim() !== PRODUCT_NAME) missingRequiredSecrets.push("PLATFORM_SURFACE_ID=kanban.cards");
 
   return {
-    accessAuthRequired: Boolean(productionLike || basicConfigured),
+    accessAuthRequired: Boolean(productionLike || platformAuthConfigured),
     apiToken,
-    basicUser,
-    basicPassword,
+    platformAuthConfigured,
+    surfaceId,
     localWriteOpen: Boolean(!productionLike && !apiTokenProvided),
     missingRequiredSecrets
   };
@@ -715,6 +1037,7 @@ function createAuthConfig(options: CreateAppOptions = {}): AuthConfig {
 function requireAccessAuth(
   auth: AuthConfig,
   tokenStore: AgentTokenStore,
+  store: StateStore,
   missingRequiredConfig: string[] = auth.missingRequiredSecrets
 ): RequestHandler {
   return asyncHandler(async (req, res, next) => {
@@ -726,23 +1049,30 @@ function requireAccessAuth(
       return;
     }
 
-    req.kanbanAuth = await authenticateRequest(req, auth, tokenStore);
+    req.kanbanAuth = await authenticateRequest(req, auth, tokenStore, store);
 
     if (!auth.accessAuthRequired || isAdminAuth(req) || isAgentAuth(req)) {
       next();
       return;
     }
 
-    res.set("WWW-Authenticate", 'Basic realm="kanban.cards", charset="UTF-8"');
+    if (isBrowserNavigation(req)) {
+      res.redirect(302, `/auth/login?returnTo=${encodeURIComponent(req.originalUrl || req.url || "/")}`);
+      return;
+    }
+
     res.status(401).json({ error: "Authentication required." });
   });
 }
 
-async function authenticateRequest(req: Request, auth: AuthConfig, tokenStore: AgentTokenStore): Promise<KanbanAuthContext> {
-  if (hasValidBasic(req, auth)) return { kind: "admin", method: "basic" };
-
+async function authenticateRequest(
+  req: Request,
+  auth: AuthConfig,
+  tokenStore: AgentTokenStore,
+  store: StateStore
+): Promise<KanbanAuthContext> {
   const bearerToken = getBearerToken(req);
-  if (bearerToken && hasValidAdminBearer(bearerToken, auth)) return { kind: "admin", method: "bearer" };
+  if (bearerToken && hasValidAdminBearer(bearerToken, auth)) return breakGlassAdminContext("bearer");
 
   if (bearerToken && tokenStore) {
     const record = await tokenStore.verify(bearerToken);
@@ -754,13 +1084,39 @@ async function authenticateRequest(req: Request, auth: AuthConfig, tokenStore: A
         boardId: record.boardId,
         agentId: record.agentId,
         last4: record.last4,
+        teamId: record.teamId,
+        projectId: record.projectId,
+        sessionId: record.sessionId,
+        delegatedBy: record.delegatedBy,
+        capabilities: record.capabilities,
+        expiresAt: record.expiresAt,
+        reason: record.reason,
         lastUsedAt: record.lastUsedAt
       };
     }
   }
 
-  if (!auth.accessAuthRequired && auth.localWriteOpen) return { kind: "admin", method: "local-open" };
+  if (auth.platformAuthConfigured) {
+    const sessionResult = await getSession(toWebRequest(req));
+    if (sessionResult.ok) return sessionAuthContext(sessionResult.session, await readActiveProjectId(store));
+  }
+
+  if (!auth.accessAuthRequired && auth.localWriteOpen) return breakGlassAdminContext("local-open");
   return { kind: "anonymous" };
+}
+
+function breakGlassAdminContext(method: "bearer" | "local-open"): AdminAuthContext {
+  return {
+    kind: "admin",
+    method,
+    userId: method === "bearer" ? "break-glass-admin" : "local-open-admin",
+    email: "",
+    name: method === "bearer" ? "Break-glass admin" : "Local admin",
+    roles: ["admin"],
+    surfaceAccess: [PRODUCT_NAME],
+    teamId: DEFAULT_TEAM_ID,
+    projectId: DEFAULT_PROJECT_ID
+  };
 }
 
 function requireAdminAuth(): RequestHandler {
@@ -797,30 +1153,77 @@ function getBearerToken(req: Request): string {
   return match ? match[1] : "";
 }
 
-function hasValidBasic(req: Request, auth: AuthConfig): boolean {
-  if (!auth.basicUser || !auth.basicPassword) return false;
-  const header = req.get("authorization") || "";
-  const match = header.match(/^Basic\s+(.+)$/i);
-  if (!match) return false;
-
-  let decoded = "";
-  try {
-    decoded = Buffer.from(match[1], "base64").toString("utf8");
-  } catch (_error) {
-    return false;
-  }
-
-  const separatorIndex = decoded.indexOf(":");
-  if (separatorIndex < 0) return false;
-  const user = decoded.slice(0, separatorIndex);
-  const password = decoded.slice(separatorIndex + 1);
-  return safeEqual(user, auth.basicUser) && safeEqual(password, auth.basicPassword);
-}
-
 function safeEqual(left: unknown, right: unknown): boolean {
   const leftBuffer = Buffer.from(String(left));
   const rightBuffer = Buffer.from(String(right));
   return leftBuffer.length === rightBuffer.length && crypto.timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function sessionAuthContext(session: PlatformSession, projectId: string = DEFAULT_PROJECT_ID): SessionAdminAuthContext {
+  return {
+    kind: "admin",
+    method: "session",
+    userId: session.userId,
+    email: session.email,
+    name: session.name,
+    workspaceId: session.workspaceId,
+    roles: session.roles,
+    surfaceAccess: session.surfaceAccess,
+    teamId: session.workspaceId,
+    projectId
+  };
+}
+
+function publicSession(session: PlatformSession, projectId: string = DEFAULT_PROJECT_ID): PlatformSession & { teamId: string; projectId: string } {
+  return {
+    ...session,
+    teamId: session.workspaceId,
+    projectId
+  };
+}
+
+async function readActiveProjectId(store: StateStore): Promise<string> {
+  try {
+    const state = await store.read();
+    return state.activeProjectId || DEFAULT_PROJECT_ID;
+  } catch (_error) {
+    return DEFAULT_PROJECT_ID;
+  }
+}
+
+function isBrowserNavigation(req: Request): boolean {
+  if (req.path.startsWith("/api/")) return false;
+  const accept = req.get("accept") || "";
+  const mode = req.get("sec-fetch-mode") || "";
+  return mode === "navigate" || accept.includes("text/html") || !req.path.startsWith("/api/");
+}
+
+function toWebRequest(req: Request): globalThis.Request {
+  const protocol = (req.get("x-forwarded-proto") || req.protocol || "http").split(",")[0]?.trim() || "http";
+  const host = (req.get("x-forwarded-host") || req.get("host") || `${DEFAULT_HOST}:${DEFAULT_PORT}`).split(",")[0]?.trim();
+  const url = `${protocol}://${host}${req.originalUrl || req.url}`;
+  const headers = new Headers();
+  for (const [key, value] of Object.entries(req.headers)) {
+    if (Array.isArray(value)) headers.set(key, value.join(", "));
+    else if (value != null) headers.set(key, String(value));
+  }
+  return new globalThis.Request(url, { headers });
+}
+
+async function sendPlatformAuthResponse(res: Response, response: PlatformAuthRouteResponse): Promise<void> {
+  for (const [name, value] of Object.entries(response.headers || {})) {
+    if (name.toLowerCase() === "set-cookie" && Array.isArray(value)) res.setHeader(name, value);
+    else res.setHeader(name, value);
+  }
+  if (response.json !== undefined) {
+    res.status(response.status).json(response.json);
+    return;
+  }
+  if (response.body !== undefined) {
+    res.status(response.status).send(response.body);
+    return;
+  }
+  res.status(response.status).end();
 }
 
 function serveIndex(staticDir: string): RequestHandler {
@@ -867,10 +1270,26 @@ function routeParam(req: Request, name: string): string {
   return value || "";
 }
 
+function queryString(value: unknown): string | null {
+  const raw = Array.isArray(value) ? value[0] : value;
+  return nullableString(raw);
+}
+
+function queryLimit(value: unknown): number | undefined {
+  const raw = Array.isArray(value) ? value[0] : value;
+  if (raw == null || raw === "") return undefined;
+  const limit = Number(raw);
+  return Number.isFinite(limit) ? limit : undefined;
+}
+
 function nullableString(value: unknown): string | null {
   if (value == null) return null;
   const text = String(value).trim();
   return text || null;
+}
+
+function isRecord(value: unknown): value is UnknownRecord {
+  return typeof value === "object" && value !== null;
 }
 
 export function startServer(options: CreateAppOptions = {}) {

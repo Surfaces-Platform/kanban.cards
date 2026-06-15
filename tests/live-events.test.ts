@@ -16,21 +16,20 @@ interface SseMessage {
 }
 
 test("live events require auth, stream changes, and replay missed events by cursor", async () => {
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-live-events-"));
-  const dataPath = path.join(tempDir, "state.json");
-  const eventDataPath = path.join(tempDir, "events.jsonl");
-  const apiToken = "admin-token";
-  const server = await listen(createApp({
-    dataPath,
-    eventDataPath,
-    requireAuth: true,
-    apiToken,
-    basicUser: "mike",
-    basicPassword: "secret"
-  }));
-  const baseUrl = `http://127.0.0.1:${serverPort(server)}`;
+  await withPlatformAuthEnv(async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-live-events-"));
+    const dataPath = path.join(tempDir, "state.json");
+    const eventDataPath = path.join(tempDir, "events.jsonl");
+    const apiToken = "admin-token";
+    const server = await listen(createApp({
+      dataPath,
+      eventDataPath,
+      requireAuth: true,
+      apiToken
+    }));
+    const baseUrl = `http://127.0.0.1:${serverPort(server)}`;
 
-  try {
+    try {
     const denied = await fetch(`${baseUrl}/api/events`);
     assert.equal(denied.status, 401);
 
@@ -54,6 +53,9 @@ test("live events require auth, stream changes, and replay missed events by curs
       const changedData = JSON.parse(changed.data);
       assert.equal(changedData.boardId, board.id);
       assert.equal(changedData.payload.reason, "card_created");
+      assert.equal(changedData.payload.action, "create");
+      assert.equal(changedData.payload.resource.type, "card");
+      assert.equal(changedData.payload.actor.type, "service");
 
       stream.close();
 
@@ -66,19 +68,32 @@ test("live events require auth, stream changes, and replay missed events by curs
       const replay = await openSse(`${baseUrl}/api/events?since=${encodeURIComponent(changed.id)}`, bearerHeaders(apiToken));
       try {
         const missed = await replay.messages.next((message) => message.event === "workspace_changed");
-        const missedData = JSON.parse(missed.data);
-        assert.equal(missedData.boardId, board.id);
-        assert.equal(missedData.payload.reason, "comment_created");
-      } finally {
-        replay.close();
-      }
+      const missedData = JSON.parse(missed.data);
+      assert.equal(missedData.boardId, board.id);
+      assert.equal(missedData.payload.reason, "comment_created");
+      assert.equal(missedData.payload.action, "comment");
+      assert.equal(missedData.payload.resource.type, "comment");
+      assert.equal(missedData.payload.actor.method, "bearer");
+
+      const recent = await getJson(`${baseUrl}/api/boards/${board.id}/events?limit=1`, bearerHeaders(apiToken));
+      assert.equal(recent.events.length, 1);
+      assert.equal(recent.events[0].payload.reason, "comment_created");
+      assert.equal(recent.events[0].payload.actor.type, "service");
+
+      const cardEvents = await getJson(`${baseUrl}/api/boards/${board.id}/events?cardId=${encodeURIComponent(item.id)}&limit=10`, bearerHeaders(apiToken));
+      assert.deepEqual(cardEvents.events.map((event: any) => event.payload.reason), ["comment_created", "card_created"]);
+      assert.ok(cardEvents.events.every((event: any) => event.boardId === board.id));
+    } finally {
+      replay.close();
+    }
     } finally {
       stream.close();
     }
-  } finally {
-    await closeServer(server);
-    await fs.rm(tempDir, { recursive: true, force: true });
-  }
+    } finally {
+      await closeServer(server);
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
 });
 
 class SseMessageReader {
@@ -135,6 +150,14 @@ async function openSse(url: string, headers: Record<string, string>): Promise<{
     messages: new SseMessageReader(response.body.getReader()),
     close: () => controller.abort()
   };
+}
+
+async function getJson<T = any>(url: string, headers: Record<string, string> = {}): Promise<T> {
+  const response = await fetch(url, { headers });
+  if (!response.ok) {
+    assert.fail(`${url} returned ${response.status}: ${await response.text()}`);
+  }
+  return response.json() as Promise<T>;
 }
 
 function parseSseMessage(raw: string): SseMessage | null {
@@ -209,4 +232,33 @@ async function writeJson<T = any>(url: string, headers: Record<string, string>, 
 
 function windowlessSetTimeout(handler: () => void, timeout: number): NodeJS.Timeout {
   return setTimeout(handler, timeout);
+}
+
+async function withPlatformAuthEnv(run: () => Promise<void>): Promise<void> {
+  const restore = setEnv({
+    OIDC_ISSUER: "https://auth.example.com/",
+    OIDC_CLIENT_ID: "test-client",
+    OIDC_REDIRECT_URI: "http://127.0.0.1:4317/auth/callback",
+    SESSION_SECRET: "test-session-secret-with-enough-entropy",
+    PLATFORM_SURFACE_ID: "kanban.cards"
+  });
+  try {
+    await run();
+  } finally {
+    restore();
+  }
+}
+
+function setEnv(values: Record<string, string>): () => void {
+  const previous = new Map<string, string | undefined>();
+  for (const [key, value] of Object.entries(values)) {
+    previous.set(key, process.env[key]);
+    process.env[key] = value;
+  }
+  return () => {
+    for (const [key, value] of previous.entries()) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  };
 }
