@@ -34,6 +34,7 @@ import {
   type PlatformSession,
   startLogin
 } from "./platform-auth";
+import { formatSeedRoadmapReport, seedRoadmap } from "../scripts/seed-roadmap";
 import type {
   AgentCapability,
   AgentInstruction,
@@ -275,6 +276,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
 
   app.disable("x-powered-by");
   app.use(express.json({ limit: "1mb" }));
+  app.use(express.urlencoded({ extended: false, limit: "32kb" }));
 
   app.get("/api/health", (_req, res) => {
     const ok = missingRequiredConfig.length === 0;
@@ -335,6 +337,18 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
   app.get("/styles.css", sendStaticFile(staticDir, "public/styles.css", "text/css; charset=utf-8"));
   app.get("/robots.txt", sendStaticFile(staticDir, "public/robots.txt", "text/plain; charset=utf-8"));
 
+  app.get("/admin/roadmap-seed", requireAdminAuth(), asyncHandler(async (_req, res) => {
+    res.type("html").send(renderRoadmapSeedPage());
+  }));
+
+  app.post("/admin/roadmap-seed", requireAdminAuth(), asyncHandler(async (req, res) => {
+    const report = await runRoadmapSeed(req, auth, {
+      dryRun: parseBooleanInput(req.body?.dryRun),
+      projectId: optionalText(req.body?.projectId)
+    });
+    res.type("html").send(renderRoadmapSeedPage(report));
+  }));
+
   app.get("/api/state", asyncHandler(async (req, res) => {
     if (isAgentAuth(req)) throw httpError(403, "Agent tokens cannot read full workspace state.");
     res.json(await store.read());
@@ -354,6 +368,21 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
   app.get("/api/projects", requireAdminAuth(), asyncHandler(async (_req, res) => {
     const state = await store.read();
     res.json({ team: state.team, projects: state.projects, activeProjectId: state.activeProjectId });
+  }));
+
+  app.post("/api/roadmap/seed", requireAdminAuth(), asyncHandler(async (req, res) => {
+    const report = await runRoadmapSeed(req, auth, {
+      dryRun: parseBooleanInput(req.body?.dryRun),
+      projectId: optionalText(req.body?.projectId)
+    });
+    if (!report.dryRun) {
+      await publishWorkspaceEvent(req, report.boardId || null, "update", { type: "board", id: report.boardId || null }, "roadmap_seeded", {
+        projectId: report.projectId,
+        boardAction: report.boardAction,
+        cardActions: report.cardActions.map((card) => ({ title: card.title, laneTitle: card.laneTitle, action: card.action }))
+      });
+    }
+    res.json(report);
   }));
 
   app.post("/api/projects", requireAdminAuth(), asyncHandler(async (req, res) => {
@@ -1198,6 +1227,94 @@ async function readActiveProjectId(store: StateStore): Promise<string> {
   } catch (_error) {
     return DEFAULT_PROJECT_ID;
   }
+}
+
+async function runRoadmapSeed(
+  req: Request,
+  auth: AuthConfig,
+  input: { dryRun?: boolean; projectId?: string | null } = {}
+) {
+  if (!auth.apiToken) {
+    throw httpError(500, "KANBAN_CARDS_API_TOKEN is not configured for server-side roadmap seeding.");
+  }
+
+  return seedRoadmap({
+    apiBaseUrl: `${requestOrigin(req)}/api`,
+    apiToken: auth.apiToken,
+    projectId: input.projectId || undefined,
+    dryRun: Boolean(input.dryRun)
+  });
+}
+
+function requestOrigin(req: Request): string {
+  const protocol = (req.get("x-forwarded-proto") || req.protocol || "http").split(",")[0]?.trim() || "http";
+  const host = (req.get("x-forwarded-host") || req.get("host") || `${DEFAULT_HOST}:${DEFAULT_PORT}`).split(",")[0]?.trim();
+  return `${protocol}://${host}`;
+}
+
+function parseBooleanInput(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(parseBooleanInput);
+  const text = String(value || "").trim().toLowerCase();
+  return text === "1" || text === "true" || text === "yes" || text === "on";
+}
+
+function optionalText(value: unknown): string | null {
+  if (Array.isArray(value)) return optionalText(value[0]);
+  return nullableString(value);
+}
+
+function renderRoadmapSeedPage(report?: Awaited<ReturnType<typeof seedRoadmap>>): string {
+  const reportText = report ? formatSeedRoadmapReport(report) : "";
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <title>Roadmap seed - kanban.cards</title>
+  <style>
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; background: #f4f6f8; color: #18202a; }
+    main { max-width: 760px; margin: 56px auto; padding: 0 24px; }
+    section { background: #fff; border: 1px solid #d8e0ea; border-radius: 8px; padding: 24px; box-shadow: 0 18px 40px rgba(31, 45, 61, 0.08); }
+    h1 { margin: 0 0 8px; font-size: 28px; }
+    p { color: #526173; line-height: 1.5; }
+    label { display: grid; gap: 6px; margin: 20px 0; font-weight: 700; }
+    input { border: 1px solid #cfd8e3; border-radius: 6px; font: inherit; padding: 10px 12px; }
+    .actions { display: flex; gap: 12px; flex-wrap: wrap; }
+    button { border: 1px solid #2e5d96; border-radius: 6px; background: #2e5d96; color: #fff; cursor: pointer; font: inherit; font-weight: 700; padding: 10px 14px; }
+    button.secondary { background: #fff; color: #2e5d96; }
+    pre { white-space: pre-wrap; background: #101820; color: #e8eef6; border-radius: 6px; margin-top: 24px; padding: 16px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <section>
+      <h1>Seed product roadmap</h1>
+      <p>This protected operation creates or updates the kanban.cards Product Roadmap board using the server runtime configuration. It does not expose the admin bearer token to the browser.</p>
+      <form method="post" action="/admin/roadmap-seed">
+        <label>
+          Project ID
+          <input name="projectId" placeholder="Active project, then kanban.cards:default">
+        </label>
+        <div class="actions">
+          <button class="secondary" type="submit" name="dryRun" value="1">Dry run</button>
+          <button type="submit" name="dryRun" value="0">Seed roadmap</button>
+        </div>
+      </form>
+      ${report ? `<pre>${escapeHtml(reportText)}</pre>` : ""}
+    </section>
+  </main>
+</body>
+</html>`;
+}
+
+function escapeHtml(value: unknown): string {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function isBrowserNavigation(req: Request): boolean {
