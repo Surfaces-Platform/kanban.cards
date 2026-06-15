@@ -76,6 +76,42 @@ export interface Project {
   updatedAt: string;
 }
 
+export type TeamRole = "owner" | "admin" | "member";
+export type TeamInviteStatus = "pending" | "accepted" | "revoked";
+
+export interface TeamMember {
+  id: string;
+  teamId: string;
+  userId: string;
+  email: string;
+  name: string;
+  role: TeamRole;
+  projectIds: string[];
+  createdAt: string;
+  updatedAt: string;
+  lastSeenAt: string;
+}
+
+export interface TeamInvite {
+  id: string;
+  teamId: string;
+  email: string;
+  role: TeamRole;
+  projectIds: string[];
+  tokenHash: string;
+  invitedBy: string;
+  acceptedBy: Nullable<string>;
+  status: TeamInviteStatus;
+  expiresAt: string;
+  createdAt: string;
+  updatedAt: string;
+  acceptedAt: Nullable<string>;
+  revokedAt: Nullable<string>;
+}
+
+export type PublicTeamMember = TeamMember;
+export type PublicTeamInvite = Omit<TeamInvite, "tokenHash">;
+
 export interface Board {
   id: string;
   projectId: string;
@@ -105,6 +141,8 @@ export interface WorkspaceState {
   team: Team;
   projects: Project[];
   activeProjectId: string;
+  members: TeamMember[];
+  invites: TeamInvite[];
   boards: Board[];
   activeBoardId: string;
   templates: BoardTemplate[];

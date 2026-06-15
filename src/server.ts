@@ -12,13 +12,20 @@ import {
   createProject,
   createComment,
   createStateStore,
+  createTeamInvite,
+  createTeamMember,
   createWorkItem,
   findBoard,
   findComment,
   findProject,
+  findTeamInvite,
+  findTeamMember,
+  findTeamMemberByIdentity,
   findWorkItem,
   normalizeWorkspace,
   touchBoard,
+  touchTeamInvite,
+  touchTeamMember,
   touchProject,
   touchWorkItem
 } from "./state-store";
@@ -46,7 +53,12 @@ import type {
   EventStore,
   PostgresOptions,
   Project,
+  PublicTeamInvite,
+  PublicTeamMember,
   StateStore,
+  TeamInvite,
+  TeamMember,
+  TeamRole,
   WorkspaceEvent,
   WorkspaceEventActorProvenance,
   WorkspaceEventDelegationProvenance,
@@ -67,6 +79,10 @@ type SessionAdminAuthContext = {
   surfaceAccess: string[];
   teamId: string;
   projectId: string;
+  memberId: string | null;
+  role: TeamRole | null;
+  isTeamMember: boolean;
+  projectIds: string[];
 };
 type AdminAuthContext =
   | {
@@ -79,6 +95,10 @@ type AdminAuthContext =
       surfaceAccess: string[];
       teamId: string;
       projectId: string;
+      memberId: string;
+      role: "owner";
+      isTeamMember: true;
+      projectIds: ["*"];
     }
   | SessionAdminAuthContext;
 type AgentAuthContext = {
@@ -325,8 +345,41 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       res.status(401).json({ error: "No active session." });
       return;
     }
-    const activeProjectId = await readActiveProjectId(store);
-    res.json(publicSession(result.session, activeProjectId));
+    res.json(await publicSession(result.session, store));
+  }));
+
+  app.get("/invites/accept", asyncHandler(async (req, res) => {
+    const token = queryString(req.query.token);
+    if (!token) {
+      res.status(400).type("html").send(renderInviteMessagePage("Invite link invalid", "This invite link is missing its token."));
+      return;
+    }
+    if (!auth.platformAuthConfigured) {
+      res.status(500).type("html").send(renderInviteMessagePage("Sign-in unavailable", "Auth0 session auth is not configured."));
+      return;
+    }
+    const sessionResult = await getSession(toWebRequest(req));
+    if (!sessionResult.ok) {
+      res.redirect(302, `/auth/login?returnTo=${encodeURIComponent(req.originalUrl || req.url || "/")}`);
+      return;
+    }
+
+    const state = await store.read();
+    const invite = findInviteByToken(state, token);
+    if (!invite) {
+      res.status(404).type("html").send(renderInviteMessagePage("Invite link unavailable", "This invite was accepted, revoked, expired, or does not exist."));
+      return;
+    }
+    res.type("html").send(renderInviteAcceptPage(invite, sessionResult.session, token));
+  }));
+
+  app.post("/invites/accept", asyncHandler(async (req, res) => {
+    await acceptInviteFromRequest(req);
+    res.redirect(303, "/");
+  }));
+
+  app.post("/api/invites/accept", asyncHandler(async (req, res) => {
+    res.json(await acceptInviteFromRequest(req));
   }));
 
   app.use(requireAccessAuth(auth, tokenStore, store, missingRequiredConfig));
@@ -337,27 +390,34 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
   app.get("/styles.css", sendStaticFile(staticDir, "public/styles.css", "text/css; charset=utf-8"));
   app.get("/robots.txt", sendStaticFile(staticDir, "public/robots.txt", "text/plain; charset=utf-8"));
 
-  app.get("/admin/roadmap-seed", requireAdminAuth(), asyncHandler(async (_req, res) => {
+  app.get("/admin/roadmap-seed", requireProjectManagerAuth(), asyncHandler(async (_req, res) => {
     res.type("html").send(renderRoadmapSeedPage());
   }));
 
-  app.post("/admin/roadmap-seed", requireAdminAuth(), asyncHandler(async (req, res) => {
+  app.post("/admin/roadmap-seed", requireProjectManagerAuth(), asyncHandler(async (req, res) => {
+    const projectId = optionalText(req.body?.projectId) || currentAuthProjectId(req);
+    if (projectId) assertProjectManager(req, projectId);
     const report = await runRoadmapSeed(req, auth, {
       dryRun: parseBooleanInput(req.body?.dryRun),
-      projectId: optionalText(req.body?.projectId)
+      projectId
     });
     res.type("html").send(renderRoadmapSeedPage(report));
   }));
 
   app.get("/api/state", asyncHandler(async (req, res) => {
     if (isAgentAuth(req)) throw httpError(403, "Agent tokens cannot read full workspace state.");
-    res.json(await store.read());
+    res.json(publicWorkspaceState(await store.read(), req.kanbanAuth));
   }));
 
-  app.put("/api/state", requireAdminAuth(), asyncHandler(async (req, res) => {
-    const saved = await store.write(req.body);
+  app.put("/api/state", requireWriteAuth(), asyncHandler(async (req, res) => {
+    if (isAgentAuth(req)) throw httpError(403, "Agent tokens cannot write full workspace state.");
+    const { state: saved } = await store.update((current) => {
+      const next = normalizeWorkspace(req.body);
+      assertWorkspaceWriteAllowed(req, current, next);
+      applyWorkspaceStateWrite(req, current, next);
+    });
     await publishWorkspaceEvent(req, null, "update", { type: "workspace" }, "workspace_saved");
-    res.json(saved);
+    res.json(publicWorkspaceState(saved, req.kanbanAuth));
   }));
 
   app.get("/api/events", asyncHandler(async (req, res) => {
@@ -365,15 +425,103 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     await streamWorkspaceEvents(req, res);
   }));
 
-  app.get("/api/projects", requireAdminAuth(), asyncHandler(async (_req, res) => {
+  app.get("/api/team", requireTeamManagerAuth(), asyncHandler(async (req, res) => {
     const state = await store.read();
-    res.json({ team: state.team, projects: state.projects, activeProjectId: state.activeProjectId });
+    res.json(publicTeamState(state, req.kanbanAuth));
   }));
 
-  app.post("/api/roadmap/seed", requireAdminAuth(), asyncHandler(async (req, res) => {
+  app.post("/api/team/invites", requireTeamManagerAuth(), asyncHandler(async (req, res) => {
+    const email = normalizeEmailInput(req.body?.email);
+    if (!email) throw httpError(400, "Invite email is required.");
+    const role = normalizeTeamRole(req.body?.role);
+    if (!role) throw httpError(400, "Invite role must be owner, admin, or member.");
+    assertCanInviteRole(req, role);
+    const rawToken = createInviteToken();
+    const { result } = await store.update((state) => {
+      const projectIds = normalizeAccessProjectIds(req.body?.projectIds, state, req.kanbanAuth);
+      const invite = createTeamInvite({
+        teamId: state.team.id,
+        email,
+        role,
+        projectIds,
+        tokenHash: hashInviteToken(rawToken),
+        invitedBy: actorId(req.kanbanAuth) || "unknown"
+      });
+      state.invites.push(invite);
+      return invite;
+    });
+    await publishWorkspaceEvent(req, null, "create", { type: "team_invite", id: result.id }, "team_invite_created");
+    res.status(201).json({
+      invite: publicTeamInvite(result),
+      acceptUrl: absoluteUrl(req, `/invites/accept?token=${encodeURIComponent(rawToken)}`)
+    });
+  }));
+
+  app.delete("/api/team/invites/:inviteId", requireTeamManagerAuth(), asyncHandler(async (req, res) => {
+    const inviteId = routeParam(req, "inviteId");
+    const { result } = await store.update((state) => {
+      const invite = findTeamInvite(state, inviteId);
+      if (!invite) throw httpError(404, "Invite not found.");
+      assertCanManageRole(req, invite.role);
+      if (invite.status === "pending") {
+        invite.status = "revoked";
+        invite.revokedAt = new Date().toISOString();
+        touchTeamInvite(invite);
+      }
+      return invite;
+    });
+    await publishWorkspaceEvent(req, null, "revoke", { type: "team_invite", id: result.id }, "team_invite_revoked");
+    res.json(publicTeamInvite(result));
+  }));
+
+  app.patch("/api/team/members/:memberId", requireTeamManagerAuth(), asyncHandler(async (req, res) => {
+    const memberId = routeParam(req, "memberId");
+    const { result } = await store.update((state) => {
+      const member = findTeamMember(state, memberId);
+      if (!member) throw httpError(404, "Member not found.");
+      assertCanManageMember(req, state, member);
+      const nextRole = Object.prototype.hasOwnProperty.call(req.body || {}, "role") ? normalizeTeamRole(req.body?.role) : member.role;
+      if (!nextRole) throw httpError(400, "Member role must be owner, admin, or member.");
+      assertCanManageRole(req, nextRole);
+      assertOwnerFloor(state, member, nextRole);
+      member.role = nextRole;
+      if (Object.prototype.hasOwnProperty.call(req.body || {}, "projectIds")) {
+        member.projectIds = normalizeAccessProjectIds(req.body?.projectIds, state, req.kanbanAuth);
+      }
+      touchTeamMember(member);
+      return member;
+    });
+    await publishWorkspaceEvent(req, null, "update", { type: "team_member", id: result.id }, "team_member_updated");
+    res.json(publicTeamMember(result));
+  }));
+
+  app.delete("/api/team/members/:memberId", requireTeamManagerAuth(), asyncHandler(async (req, res) => {
+    const memberId = routeParam(req, "memberId");
+    const { result } = await store.update((state) => {
+      const member = findTeamMember(state, memberId);
+      if (!member) throw httpError(404, "Member not found.");
+      assertCanManageMember(req, state, member);
+      assertOwnerFloor(state, member, null);
+      state.members = state.members.filter((candidate) => candidate.id !== member.id);
+      return member;
+    });
+    await publishWorkspaceEvent(req, null, "delete", { type: "team_member", id: result.id }, "team_member_removed");
+    res.json(publicTeamMember(result));
+  }));
+
+  app.get("/api/projects", requireWorkspaceAuth(), asyncHandler(async (req, res) => {
+    const state = await store.read();
+    const projects = filterProjectsByAccess(state.projects, req.kanbanAuth);
+    const activeProjectId = projects.some((project) => project.id === state.activeProjectId) ? state.activeProjectId : projects[0]?.id || DEFAULT_PROJECT_ID;
+    res.json({ team: state.team, projects, activeProjectId });
+  }));
+
+  app.post("/api/roadmap/seed", requireProjectManagerAuth(), asyncHandler(async (req, res) => {
+    const projectId = optionalText(req.body?.projectId) || currentAuthProjectId(req);
+    if (projectId) assertProjectManager(req, projectId);
     const report = await runRoadmapSeed(req, auth, {
       dryRun: parseBooleanInput(req.body?.dryRun),
-      projectId: optionalText(req.body?.projectId)
+      projectId
     });
     if (!report.dryRun) {
       await publishWorkspaceEvent(req, report.boardId || null, "update", { type: "board", id: report.boardId || null }, "roadmap_seeded", {
@@ -385,7 +533,8 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     res.json(report);
   }));
 
-  app.post("/api/projects", requireAdminAuth(), asyncHandler(async (req, res) => {
+  app.post("/api/projects", requireProjectManagerAuth(), asyncHandler(async (req, res) => {
+    assertCanCreateProject(req);
     const { result } = await store.update((state) => {
       const teamId = effectiveTeamId(req, state);
       ensureStateTeam(state, teamId);
@@ -402,11 +551,14 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     res.status(201).json(result);
   }));
 
-  app.patch("/api/projects/:projectId", requireAdminAuth(), asyncHandler(async (req, res) => {
+  app.patch("/api/projects/:projectId", requireWorkspaceAuth(), asyncHandler(async (req, res) => {
     const projectId = routeParam(req, "projectId");
     const { state, result } = await store.update((workspace) => {
       const project = findProject(workspace, projectId);
       if (!project) throw httpError(404, "Project not found.");
+      requireProjectAccess(req, project.id);
+      const projectManagementFields = typeof req.body?.name === "string" || typeof req.body?.description === "string";
+      if (projectManagementFields) assertProjectManager(req, project.id);
       if (typeof req.body?.name === "string") project.name = normalizeProjectName(req.body.name);
       if (typeof req.body?.description === "string") project.description = req.body.description.trim();
       if (req.body?.active === true) {
@@ -435,6 +587,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       return;
     }
     const projectId = requestedProjectId(req, state);
+    requireProjectAccess(req, projectId);
     const boards = state.boards.filter((board) => board.projectId === projectId);
     const activeBoardId = boards.some((board) => board.id === state.activeBoardId) ? state.activeBoardId : boards[0]?.id || null;
     res.json({ boards, activeBoardId, activeProjectId: projectId });
@@ -450,11 +603,12 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     res.json(board);
   }));
 
-  app.get("/api/boards/:boardId/events", requireAdminAuth(), asyncHandler(async (req, res) => {
+  app.get("/api/boards/:boardId/events", requireWorkspaceAuth(), asyncHandler(async (req, res) => {
     const boardId = routeParam(req, "boardId");
     const state = await store.read();
     const board = findBoard(state, boardId);
     if (!board) throw httpError(404, "Board not found.");
+    requireBoardProjectAccess(req, board);
     const events = await eventStore.listRecent({
       boardId,
       cardId: queryString(req.query.cardId),
@@ -504,11 +658,12 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     });
   }));
 
-  app.post("/api/boards/:boardId/agent-tokens", requireAdminAuth(), asyncHandler(async (req, res) => {
+  app.post("/api/boards/:boardId/agent-tokens", requireProjectManagerAuth(), asyncHandler(async (req, res) => {
     const boardId = routeParam(req, "boardId");
     const state = await store.read();
     const board = findBoard(state, boardId);
     if (!board) throw httpError(404, "Board not found.");
+    assertProjectManager(req, board.projectId);
     const agentId = nullableString(req.body?.agentId);
     if (!agentId) throw httpError(400, "agentId is required.");
     const agent = findAgentSpec(board, agentId);
@@ -535,20 +690,22 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     });
   }));
 
-  app.get("/api/boards/:boardId/agent-tokens", requireAdminAuth(), asyncHandler(async (req, res) => {
+  app.get("/api/boards/:boardId/agent-tokens", requireProjectManagerAuth(), asyncHandler(async (req, res) => {
     const boardId = routeParam(req, "boardId");
     const state = await store.read();
     const board = findBoard(state, boardId);
     if (!board) throw httpError(404, "Board not found.");
+    assertProjectManager(req, board.projectId);
     res.json({ tokens: await tokenStore.list(board.id) });
   }));
 
-  app.delete("/api/boards/:boardId/agent-tokens/:tokenId", requireAdminAuth(), asyncHandler(async (req, res) => {
+  app.delete("/api/boards/:boardId/agent-tokens/:tokenId", requireProjectManagerAuth(), asyncHandler(async (req, res) => {
     const boardId = routeParam(req, "boardId");
     const tokenId = routeParam(req, "tokenId");
     const state = await store.read();
     const board = findBoard(state, boardId);
     if (!board) throw httpError(404, "Board not found.");
+    assertProjectManager(req, board.projectId);
     const tokenRecord = await tokenStore.revoke(board.id, tokenId);
     if (!tokenRecord) throw httpError(404, "Token not found.");
     await publishWorkspaceEvent(req, board.id, "revoke", { type: "agent_session", id: tokenRecord.sessionId }, "agent_token_revoked", {
@@ -559,10 +716,11 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     res.json(tokenRecord);
   }));
 
-  app.post("/api/boards", requireAdminAuth(), asyncHandler(async (req, res) => {
+  app.post("/api/boards", requireProjectManagerAuth(), asyncHandler(async (req, res) => {
     const { result } = await store.update((state) => {
       const projectId = normalizeProjectId(req.body?.projectId) || state.activeProjectId || DEFAULT_PROJECT_ID;
       if (!findProject(state, projectId)) throw httpError(404, "Project not found.");
+      assertProjectManager(req, projectId);
       const board = createBoard({ ...(req.body || {}), projectId });
       state.boards.push(board);
       state.activeBoardId = board.id;
@@ -572,14 +730,16 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     res.status(201).json(result);
   }));
 
-  app.patch("/api/boards/:boardId", requireAdminAuth(), asyncHandler(async (req, res) => {
+  app.patch("/api/boards/:boardId", requireProjectManagerAuth(), asyncHandler(async (req, res) => {
     const boardId = routeParam(req, "boardId");
     const { result } = await store.update((state) => {
       const board = findBoard(state, boardId);
       if (!board) throw httpError(404, "Board not found.");
+      assertProjectManager(req, board.projectId);
       if (typeof req.body.name === "string") board.name = req.body.name;
       if (typeof req.body.projectId === "string" && req.body.projectId !== board.projectId) {
         if (!findProject(state, req.body.projectId)) throw httpError(404, "Project not found.");
+        assertProjectManager(req, req.body.projectId);
         board.projectId = req.body.projectId;
       }
       if (typeof req.body.flowPrompt === "string") board.flowPrompt = req.body.flowPrompt;
@@ -707,6 +867,59 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
   app.use(errorHandler);
 
   return app;
+
+  async function acceptInviteFromRequest(req: Request): Promise<{ member: PublicTeamMember; invite: PublicTeamInvite }> {
+    if (!auth.platformAuthConfigured) throw httpError(500, "Auth0 session auth is not configured.");
+    const sessionResult = await getSession(toWebRequest(req));
+    if (!sessionResult.ok) throw httpError(401, "Sign in before accepting this invite.");
+    const rawToken = String(req.body?.token || req.query.token || "").trim();
+    if (!rawToken) throw httpError(400, "Invite token is required.");
+    const sessionEmail = normalizeEmailInput(sessionResult.session.email);
+
+    const { result } = await store.update((state) => {
+      const invite = findInviteByToken(state, rawToken);
+      if (!invite) throw httpError(404, "Invite not found or no longer available.");
+      if (normalizeEmailInput(invite.email) !== sessionEmail) {
+        throw httpError(403, "This invite was issued to a different email address.");
+      }
+      let member = findTeamMemberByIdentity(state, {
+        userId: sessionResult.session.userId,
+        email: sessionResult.session.email
+      });
+      if (!member) {
+        member = createTeamMember({
+          teamId: state.team.id,
+          userId: sessionResult.session.userId,
+          email: sessionResult.session.email,
+          name: sessionResult.session.name,
+          role: invite.role,
+          projectIds: invite.projectIds
+        });
+        state.members.push(member);
+      } else {
+        member.userId = sessionResult.session.userId;
+        member.email = normalizeEmailInput(sessionResult.session.email);
+        member.name = sessionResult.session.name || member.name;
+        member.role = invite.role;
+        member.projectIds = invite.projectIds;
+        member.lastSeenAt = new Date().toISOString();
+        touchTeamMember(member);
+      }
+
+      invite.status = "accepted";
+      invite.acceptedBy = member.id;
+      invite.acceptedAt = new Date().toISOString();
+      touchTeamInvite(invite);
+      return { member, invite };
+    });
+
+    req.kanbanAuth = await sessionAuthContext(sessionResult.session, store);
+    await publishWorkspaceEvent(req, null, "accept", { type: "team_invite", id: result.invite.id }, "team_invite_accepted");
+    return {
+      member: publicTeamMember(result.member),
+      invite: publicTeamInvite(result.invite)
+    };
+  }
 
   async function publishWorkspaceEvent(
     req: Request | null,
@@ -908,6 +1121,10 @@ function effectiveTeamId(req: Request, state: WorkspaceState): string {
   return state.team?.id || DEFAULT_TEAM_ID;
 }
 
+function currentAuthProjectId(req: Request): string | null {
+  return isAdminAuth(req) ? req.kanbanAuth.projectId || null : null;
+}
+
 function ensureStateTeam(state: WorkspaceState, teamId: string): void {
   if (!teamId || state.team.id === teamId) return;
   state.team.id = teamId;
@@ -1027,15 +1244,197 @@ function filterAgentCommentPatch(patch: UnknownRecord, comment: WorkItemComment,
   return filtered;
 }
 
+function publicWorkspaceState(state: WorkspaceState, auth: KanbanAuthContext | undefined): UnknownRecord {
+  const projects = filterProjectsByAccess(state.projects, auth);
+  const projectIds = new Set(projects.map((project) => project.id));
+  const boards = state.boards.filter((board) => projectIds.has(board.projectId));
+  const activeProjectId = projectIds.has(state.activeProjectId) ? state.activeProjectId : projects[0]?.id || DEFAULT_PROJECT_ID;
+  const activeBoardId = boards.some((board) => board.id === state.activeBoardId)
+    ? state.activeBoardId
+    : boards.find((board) => board.projectId === activeProjectId)?.id || boards[0]?.id || "";
+  return {
+    team: state.team,
+    projects,
+    activeProjectId,
+    boards,
+    activeBoardId,
+    templates: state.templates
+  };
+}
+
+function publicTeamState(state: WorkspaceState, auth: KanbanAuthContext | undefined): {
+  team: WorkspaceState["team"];
+  projects: Project[];
+  members: PublicTeamMember[];
+  invites: PublicTeamInvite[];
+  currentMember: PublicTeamMember | null;
+} {
+  const currentMember = isAdminAuthContext(auth) && auth.memberId ? findTeamMember(state, auth.memberId) : null;
+  return {
+    team: state.team,
+    projects: filterProjectsByAccess(state.projects, auth),
+    members: state.members.map(publicTeamMember),
+    invites: state.invites.map(publicTeamInvite),
+    currentMember: currentMember ? publicTeamMember(currentMember) : null
+  };
+}
+
+function publicTeamMember(member: TeamMember): PublicTeamMember {
+  return {
+    ...member,
+    projectIds: [...member.projectIds]
+  };
+}
+
+function publicTeamInvite(invite: TeamInvite): PublicTeamInvite {
+  const { tokenHash: _tokenHash, ...safeInvite } = invite;
+  return {
+    ...safeInvite,
+    projectIds: [...safeInvite.projectIds]
+  };
+}
+
+function assertWorkspaceWriteAllowed(req: Request, current: WorkspaceState, next: WorkspaceState): void {
+  if (!isAdminAuth(req) || !req.kanbanAuth.isTeamMember) throw httpError(403, "Team membership required.");
+  if (req.kanbanAuth.role === "owner") return;
+  if (req.kanbanAuth.role === "admin") {
+    assertManagerWorkspaceWriteAllowed(req, current, next);
+    return;
+  }
+  assertMemberWorkspaceWriteAllowed(req, current, next);
+}
+
+function applyWorkspaceStateWrite(req: Request, current: WorkspaceState, next: WorkspaceState): void {
+  const preservedMembers = current.members;
+  const preservedInvites = current.invites;
+  if (!isAdminAuth(req)) throw httpError(403, "Team membership required.");
+  if (req.kanbanAuth.role === "owner") {
+    current.team = next.team;
+    current.projects = next.projects;
+    current.activeProjectId = next.activeProjectId;
+    current.boards = next.boards;
+    current.activeBoardId = next.activeBoardId;
+    current.templates = next.templates;
+  } else if (req.kanbanAuth.role === "admin") {
+    applyScopedBoardStateWrite(current, next, req.kanbanAuth, true);
+  } else {
+    applyScopedBoardStateWrite(current, next, req.kanbanAuth, false);
+  }
+  current.members = preservedMembers;
+  current.invites = preservedInvites;
+}
+
+function assertManagerWorkspaceWriteAllowed(req: Request, current: WorkspaceState, next: WorkspaceState): void {
+  if (!isAdminAuth(req)) throw httpError(403, "Team membership required.");
+  if (stableJson(workspaceWithoutBoards(current)) !== stableJson(workspaceWithoutBoards(next))) {
+    throw httpError(403, "Project and team changes require owner APIs.");
+  }
+  assertScopedBoardWrite(req.kanbanAuth, current, next, true);
+}
+
+function assertMemberWorkspaceWriteAllowed(req: Request, current: WorkspaceState, next: WorkspaceState): void {
+  if (!isAdminAuth(req)) throw httpError(403, "Team membership required.");
+  if (stableJson(workspaceWithoutBoards(current)) !== stableJson(workspaceWithoutBoards(next))) {
+    throw httpError(403, "Members can only update cards in assigned projects.");
+  }
+  assertScopedBoardWrite(req.kanbanAuth, current, next, false);
+}
+
+function assertScopedBoardWrite(auth: AdminAuthContext, current: WorkspaceState, next: WorkspaceState, allowBoardStructure: boolean): void {
+  const currentBoards = new Map(current.boards.map((board) => [board.id, board]));
+  const nextBoards = new Map(next.boards.map((board) => [board.id, board]));
+  for (const board of current.boards) {
+    if (hasProjectAccess(auth, board.projectId)) continue;
+    if (stableJson(board) !== stableJson(nextBoards.get(board.id))) {
+      throw httpError(403, "Cannot change boards outside your project scope.");
+    }
+  }
+  for (const board of next.boards) {
+    if (!hasProjectAccess(auth, board.projectId)) {
+      const currentBoard = currentBoards.get(board.id);
+      if (!currentBoard || stableJson(currentBoard) !== stableJson(board)) {
+        throw httpError(403, "Cannot change boards outside your project scope.");
+      }
+      continue;
+    }
+    if (!allowBoardStructure) {
+      const currentBoard = currentBoards.get(board.id);
+      if (!currentBoard) throw httpError(403, "Members cannot create boards.");
+      if (stableJson(memberProtectedBoardShape(currentBoard)) !== stableJson(memberProtectedBoardShape(board))) {
+        throw httpError(403, "Members can only update card data.");
+      }
+    }
+  }
+}
+
+function applyScopedBoardStateWrite(current: WorkspaceState, next: WorkspaceState, auth: AdminAuthContext, allowBoardStructure: boolean): void {
+  const incomingById = new Map(next.boards.map((board) => [board.id, board]));
+  if (allowBoardStructure) {
+    current.boards = [
+      ...next.boards.filter((board) => hasProjectAccess(auth, board.projectId)),
+      ...current.boards.filter((board) => !hasProjectAccess(auth, board.projectId))
+    ];
+  } else {
+    for (const board of current.boards) {
+      if (!hasProjectAccess(auth, board.projectId)) continue;
+      const incoming = incomingById.get(board.id);
+      if (!incoming) continue;
+      board.workItems = incoming.workItems;
+      board.selectedId = incoming.selectedId;
+      board.updatedAt = incoming.updatedAt;
+    }
+  }
+  if (next.boards.some((board) => board.id === next.activeBoardId && hasProjectAccess(auth, board.projectId))) {
+    current.activeBoardId = next.activeBoardId;
+  }
+}
+
+function workspaceWithoutBoards(state: WorkspaceState): UnknownRecord {
+  return {
+    team: state.team,
+    projects: state.projects,
+    activeProjectId: state.activeProjectId,
+    templates: state.templates
+  };
+}
+
+function memberProtectedBoardShape(board: Board): UnknownRecord {
+  return {
+    id: board.id,
+    projectId: board.projectId,
+    name: board.name,
+    lanes: board.lanes,
+    agentSpecs: board.agentSpecs,
+    flowPrompt: board.flowPrompt,
+    configDraft: board.configDraft,
+    isEditingFlow: board.isEditingFlow,
+    createdAt: board.createdAt
+  };
+}
+
+function stableJson(value: unknown): string {
+  return JSON.stringify(value);
+}
+
 function requireBoardAccess(req: Request, boardId: string): void {
   if (isAgentAuth(req) && req.kanbanAuth.boardId !== boardId) {
     throw httpError(403, "Agent token is scoped to a different board.");
   }
 }
 
+function requireProjectAccess(req: Request, projectId: string): void {
+  if (!isAdminAuth(req)) return;
+  if (!hasProjectAccess(req.kanbanAuth, projectId)) {
+    throw httpError(403, "Project access required.");
+  }
+}
+
 function requireBoardProjectAccess(req: Request, board: Board): void {
   if (isAgentAuth(req) && req.kanbanAuth.projectId && req.kanbanAuth.projectId !== board.projectId) {
     throw httpError(403, "Agent session is scoped to a different project.");
+  }
+  if (isAdminAuth(req) && !hasProjectAccess(req.kanbanAuth, board.projectId)) {
+    throw httpError(403, "Project access required.");
   }
 }
 
@@ -1045,6 +1444,129 @@ function isAdminAuth(req: Request): req is Request & { kanbanAuth: AdminAuthCont
 
 function isAgentAuth(req: Request): req is Request & { kanbanAuth: AgentAuthContext } {
   return req.kanbanAuth?.kind === "agent";
+}
+
+function hasWorkspaceAccess(auth: KanbanAuthContext | undefined): boolean {
+  if (!auth || auth.kind === "anonymous") return false;
+  if (auth.kind === "agent") return true;
+  return auth.isTeamMember;
+}
+
+function requireWorkspaceAuth(): RequestHandler {
+  return (req: Request, _res: Response, next: NextFunction) => {
+    if (isAdminAuth(req) && req.kanbanAuth.isTeamMember) {
+      next();
+      return;
+    }
+    if (isAgentAuth(req)) throw httpError(403, "User authentication required.");
+    throw httpError(401, "User authentication required.");
+  };
+}
+
+function requireTeamManagerAuth(): RequestHandler {
+  return (req: Request, _res: Response, next: NextFunction) => {
+    if (isTeamManagerAuth(req)) {
+      next();
+      return;
+    }
+    if (isAdminAuth(req)) throw httpError(403, "Owner or admin role required.");
+    if (isAgentAuth(req)) throw httpError(403, "Owner or admin role required.");
+    throw httpError(401, "Owner or admin role required.");
+  };
+}
+
+function requireProjectManagerAuth(): RequestHandler {
+  return (req: Request, _res: Response, next: NextFunction) => {
+    if (isTeamManagerAuth(req)) {
+      next();
+      return;
+    }
+    if (isAdminAuth(req)) throw httpError(403, "Owner or admin role required.");
+    if (isAgentAuth(req)) throw httpError(403, "Owner or admin role required.");
+    throw httpError(401, "Owner or admin role required.");
+  };
+}
+
+function isTeamManagerAuth(req: Request): req is Request & { kanbanAuth: AdminAuthContext } {
+  return isAdminAuth(req) && req.kanbanAuth.isTeamMember && (req.kanbanAuth.role === "owner" || req.kanbanAuth.role === "admin");
+}
+
+function assertProjectManager(req: Request, projectId: string): void {
+  if (!isTeamManagerAuth(req)) throw httpError(403, "Owner or admin role required.");
+  if (!hasProjectAccess(req.kanbanAuth, projectId)) throw httpError(403, "Project access required.");
+}
+
+function assertCanCreateProject(req: Request): void {
+  if (!isTeamManagerAuth(req)) throw httpError(403, "Owner or admin role required.");
+  if (req.kanbanAuth.role === "owner" || hasAllProjectAccess(req.kanbanAuth)) return;
+  throw httpError(403, "Project creation requires owner or all-project admin access.");
+}
+
+function assertCanInviteRole(req: Request, role: TeamRole): void {
+  assertCanManageRole(req, role);
+}
+
+function assertCanManageRole(req: Request, role: TeamRole): void {
+  if (!isTeamManagerAuth(req)) throw httpError(403, "Owner or admin role required.");
+  if (role === "owner" && req.kanbanAuth.role !== "owner") {
+    throw httpError(403, "Only owners can manage owners.");
+  }
+}
+
+function assertCanManageMember(req: Request, _state: WorkspaceState, member: TeamMember): void {
+  if (!isTeamManagerAuth(req)) throw httpError(403, "Owner or admin role required.");
+  if (member.role === "owner" && req.kanbanAuth.role !== "owner") {
+    throw httpError(403, "Only owners can manage owners.");
+  }
+}
+
+function assertOwnerFloor(state: WorkspaceState, member: TeamMember, nextRole: TeamRole | null): void {
+  if (member.role !== "owner" || nextRole === "owner") return;
+  const ownerCount = state.members.filter((candidate) => candidate.role === "owner").length;
+  if (ownerCount <= 1) throw httpError(400, "At least one owner is required.");
+}
+
+function hasProjectAccess(auth: KanbanAuthContext | undefined, projectId: string): boolean {
+  if (!auth || auth.kind !== "admin" || !auth.isTeamMember) return false;
+  if (auth.role === "owner") return true;
+  if (hasAllProjectAccess(auth)) return true;
+  return auth.projectIds.includes(projectId);
+}
+
+function hasAllProjectAccess(auth: AdminAuthContext): boolean {
+  return auth.projectIds.includes("*");
+}
+
+function filterProjectsByAccess(projects: Project[], auth: KanbanAuthContext | undefined): Project[] {
+  if (!auth || auth.kind === "anonymous") return projects;
+  if (!auth || auth.kind !== "admin") return [];
+  if (!auth.isTeamMember) return [];
+  if (auth.role === "owner" || hasAllProjectAccess(auth)) return projects;
+  return projects.filter((project) => auth.projectIds.includes(project.id));
+}
+
+function normalizeAccessProjectIds(value: unknown, state: WorkspaceState, auth: KanbanAuthContext | undefined): string[] {
+  if (!isAdminAuthContext(auth) || !auth.isTeamMember) throw httpError(403, "Team membership required.");
+  const requested = Array.isArray(value) ? value.map((projectId) => String(projectId || "").trim()).filter(Boolean) : [];
+  if (!requested.length) {
+    if (auth.role === "owner" || hasAllProjectAccess(auth)) return ["*"];
+    return auth.projectIds.length ? [...auth.projectIds] : [state.activeProjectId || DEFAULT_PROJECT_ID];
+  }
+  if (requested.includes("*")) {
+    if (auth.role === "owner" || hasAllProjectAccess(auth)) return ["*"];
+    throw httpError(403, "Cannot grant all-project access.");
+  }
+  const projectIds = new Set(state.projects.map((project) => project.id));
+  const normalized = Array.from(new Set(requested.filter((projectId) => projectIds.has(projectId))));
+  if (!normalized.length) throw httpError(400, "At least one valid project is required.");
+  for (const projectId of normalized) {
+    if (!hasProjectAccess(auth, projectId)) throw httpError(403, "Cannot grant access outside your project scope.");
+  }
+  return normalized;
+}
+
+function isAdminAuthContext(auth: KanbanAuthContext | undefined): auth is AdminAuthContext {
+  return auth?.kind === "admin";
 }
 
 function createAuthConfig(options: CreateAppOptions = {}): AuthConfig {
@@ -1089,8 +1611,17 @@ function requireAccessAuth(
 
     req.kanbanAuth = await authenticateRequest(req, auth, tokenStore, store);
 
-    if (!auth.accessAuthRequired || isAdminAuth(req) || isAgentAuth(req)) {
+    if (!auth.accessAuthRequired || hasWorkspaceAccess(req.kanbanAuth)) {
       next();
+      return;
+    }
+
+    if (isAdminAuth(req) && req.kanbanAuth.method === "session" && !req.kanbanAuth.isTeamMember) {
+      if (isBrowserNavigation(req)) {
+        res.status(403).type("html").send(renderNoTeamAccessPage(req.kanbanAuth));
+        return;
+      }
+      res.status(403).json({ error: "Team membership required." });
       return;
     }
 
@@ -1136,7 +1667,7 @@ async function authenticateRequest(
 
   if (auth.platformAuthConfigured) {
     const sessionResult = await getSession(toWebRequest(req));
-    if (sessionResult.ok) return sessionAuthContext(sessionResult.session, await readActiveProjectId(store));
+    if (sessionResult.ok) return sessionAuthContext(sessionResult.session, store);
   }
 
   if (!auth.accessAuthRequired && auth.localWriteOpen) return breakGlassAdminContext("local-open");
@@ -1153,7 +1684,11 @@ function breakGlassAdminContext(method: "bearer" | "local-open"): AdminAuthConte
     roles: ["admin"],
     surfaceAccess: [PRODUCT_NAME],
     teamId: DEFAULT_TEAM_ID,
-    projectId: DEFAULT_PROJECT_ID
+    projectId: DEFAULT_PROJECT_ID,
+    memberId: method === "bearer" ? "break-glass-admin" : "local-open-admin",
+    role: "owner",
+    isTeamMember: true,
+    projectIds: ["*"]
   };
 }
 
@@ -1197,7 +1732,38 @@ function safeEqual(left: unknown, right: unknown): boolean {
   return leftBuffer.length === rightBuffer.length && crypto.timingSafeEqual(leftBuffer, rightBuffer);
 }
 
-function sessionAuthContext(session: PlatformSession, projectId: string = DEFAULT_PROJECT_ID): SessionAdminAuthContext {
+async function sessionAuthContext(session: PlatformSession, store: StateStore): Promise<SessionAdminAuthContext> {
+  const { result } = await store.update((state) => {
+    if (!state.members.length) ensureStateTeam(state, session.workspaceId);
+    let member = findTeamMemberByIdentity(state, {
+      userId: session.userId,
+      email: session.email
+    });
+    if (!member && !state.members.length) {
+      member = createTeamMember({
+        teamId: state.team.id,
+        userId: session.userId,
+        email: session.email,
+        name: session.name,
+        role: "owner",
+        projectIds: ["*"]
+      });
+      state.members.push(member);
+    } else if (member) {
+      member.userId = session.userId;
+      member.email = normalizeEmailInput(session.email);
+      member.name = session.name || member.name;
+      member.lastSeenAt = new Date().toISOString();
+      touchTeamMember(member);
+    }
+
+    return {
+      teamId: state.team.id || session.workspaceId,
+      projectId: activeProjectIdForMember(state, member),
+      member: member ? { ...member, projectIds: [...member.projectIds] } : null
+    };
+  });
+
   return {
     kind: "admin",
     method: "session",
@@ -1207,16 +1773,32 @@ function sessionAuthContext(session: PlatformSession, projectId: string = DEFAUL
     workspaceId: session.workspaceId,
     roles: session.roles,
     surfaceAccess: session.surfaceAccess,
-    teamId: session.workspaceId,
-    projectId
+    teamId: result.teamId,
+    projectId: result.projectId,
+    memberId: result.member?.id || null,
+    role: result.member?.role || null,
+    isTeamMember: Boolean(result.member),
+    projectIds: result.member?.projectIds || []
   };
 }
 
-function publicSession(session: PlatformSession, projectId: string = DEFAULT_PROJECT_ID): PlatformSession & { teamId: string; projectId: string } {
+async function publicSession(session: PlatformSession, store: StateStore): Promise<PlatformSession & {
+  teamId: string;
+  projectId: string;
+  memberId: string | null;
+  role: TeamRole | null;
+  isTeamMember: boolean;
+  projectIds: string[];
+}> {
+  const context = await sessionAuthContext(session, store);
   return {
     ...session,
-    teamId: session.workspaceId,
-    projectId
+    teamId: context.teamId,
+    projectId: context.projectId,
+    memberId: context.memberId,
+    role: context.role,
+    isTeamMember: context.isTeamMember,
+    projectIds: context.projectIds
   };
 }
 
@@ -1227,6 +1809,126 @@ async function readActiveProjectId(store: StateStore): Promise<string> {
   } catch (_error) {
     return DEFAULT_PROJECT_ID;
   }
+}
+
+function activeProjectIdForMember(state: WorkspaceState, member: TeamMember | null): string {
+  if (!member) return state.activeProjectId || DEFAULT_PROJECT_ID;
+  if (member.projectIds.includes("*")) return state.activeProjectId || DEFAULT_PROJECT_ID;
+  if (member.projectIds.includes(state.activeProjectId)) return state.activeProjectId;
+  return member.projectIds.find((projectId) => state.projects.some((project) => project.id === projectId)) || DEFAULT_PROJECT_ID;
+}
+
+function findInviteByToken(state: WorkspaceState, rawToken: string): TeamInvite | null {
+  const tokenHash = hashInviteToken(rawToken);
+  const now = Date.now();
+  return state.invites.find((invite) => {
+    if (invite.status !== "pending") return false;
+    if (invite.tokenHash !== tokenHash) return false;
+    const expiresAt = new Date(invite.expiresAt).getTime();
+    return Number.isFinite(expiresAt) && expiresAt > now;
+  }) || null;
+}
+
+function createInviteToken(): string {
+  return `kcinv_${crypto.randomBytes(32).toString("base64url")}`;
+}
+
+function hashInviteToken(rawToken: string): string {
+  return crypto.createHash("sha256").update(String(rawToken)).digest("hex");
+}
+
+function normalizeEmailInput(value: unknown): string {
+  return String(value || "").trim().toLowerCase();
+}
+
+function normalizeTeamRole(value: unknown): TeamRole | null {
+  const role = String(value || "").trim();
+  if (role === "owner" || role === "admin" || role === "member") return role;
+  return null;
+}
+
+function absoluteUrl(req: Request, pathAndQuery: string): string {
+  const protocol = req.get("x-forwarded-proto") || req.protocol || "http";
+  const host = req.get("x-forwarded-host") || req.get("host") || "127.0.0.1";
+  return `${protocol}://${host}${pathAndQuery}`;
+}
+
+function renderInviteAcceptPage(invite: TeamInvite, session: PlatformSession, token: string): string {
+  const emailMatches = normalizeEmailInput(invite.email) === normalizeEmailInput(session.email);
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Accept invite - kanban.cards</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body class="app-body">
+  <main class="invite-page">
+    <section class="modal-card invite-card">
+      <p class="eyebrow">kanban.cards invite</p>
+      <h1>Join ${escapeHtml(invite.email)}</h1>
+      <dl class="settings-meta-grid">
+        ${renderHtmlMetadataItem("Signed in as", session.email || session.userId)}
+        ${renderHtmlMetadataItem("Invite email", invite.email)}
+        ${renderHtmlMetadataItem("Role", invite.role)}
+        ${renderHtmlMetadataItem("Project access", invite.projectIds.includes("*") ? "All projects" : invite.projectIds.join(", "))}
+        ${renderHtmlMetadataItem("Expires", invite.expiresAt)}
+      </dl>
+      ${emailMatches ? `
+        <form method="post" action="/invites/accept">
+          <input type="hidden" name="token" value="${escapeAttribute(token)}">
+          <div class="modal-actions">
+            <button class="primary-button" type="submit">Accept invite</button>
+            <a class="secondary-button" href="/">Cancel</a>
+          </div>
+        </form>
+      ` : `
+        <p class="flow-message warning">This invite is for ${escapeHtml(invite.email)}. Sign in with that email to accept it.</p>
+        <div class="modal-actions">
+          <a class="primary-button" href="/auth/logout?global=1">Switch account</a>
+        </div>
+      `}
+    </section>
+  </main>
+</body>
+</html>`;
+}
+
+function renderInviteMessagePage(title: string, message: string): string {
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${escapeHtml(title)} - kanban.cards</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body class="app-body">
+  <main class="invite-page">
+    <section class="modal-card invite-card">
+      <p class="eyebrow">kanban.cards invite</p>
+      <h1>${escapeHtml(title)}</h1>
+      <p class="modal-copy">${escapeHtml(message)}</p>
+      <div class="modal-actions">
+        <a class="secondary-button" href="/">Back to kanban.cards</a>
+      </div>
+    </section>
+  </main>
+</body>
+</html>`;
+}
+
+function renderNoTeamAccessPage(auth: SessionAdminAuthContext): string {
+  return renderInviteMessagePage("Team access required", `${auth.email || auth.userId} is signed in, but is not a member of this kanban.cards team yet. Use an invite link or ask an owner/admin for access.`);
+}
+
+function renderHtmlMetadataItem(label: string, value: unknown): string {
+  return `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value || "n/a")}</dd></div>`;
+}
+
+function escapeAttribute(value: unknown): string {
+  return escapeHtml(value).replace(/"/g, "&quot;");
 }
 
 async function runRoadmapSeed(

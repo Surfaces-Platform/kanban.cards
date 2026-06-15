@@ -1,4 +1,4 @@
-import type { AgentSpec, Board, BoardDraft, BoardTemplate, Lane, Project, PublicTokenRecord, Team, WorkItem, WorkItemComment, WorkspaceState } from "../types";
+import type { AgentSpec, Board, BoardDraft, BoardTemplate, Lane, Project, PublicTeamInvite, PublicTeamMember, PublicTokenRecord, Team, TeamRole, WorkItem, WorkItemComment, WorkspaceState } from "../types";
 
 declare global {
   interface Window {
@@ -63,6 +63,18 @@ interface AuthSession {
   surfaceAccess: string[];
   teamId: string;
   projectId: string;
+  memberId: string | null;
+  role: TeamRole | null;
+  isTeamMember: boolean;
+  projectIds: string[];
+}
+
+interface TeamSettingsPayload {
+  team: Team;
+  projects: Project[];
+  members: PublicTeamMember[];
+  invites: PublicTeamInvite[];
+  currentMember: PublicTeamMember | null;
 }
 
 const API_BASE_URL = window.KANBAN_CARDS_API_BASE_URL || window.INSTRUCT_API_BASE_URL || "/api";
@@ -121,6 +133,12 @@ let projectDialogError = "";
 let boardSettingsDialogOpen = false;
 let boardSettingsSaving = false;
 let boardSettingsError = "";
+let teamSettingsDialogOpen = false;
+let teamSettingsLoading = false;
+let teamSettingsSaving = false;
+let teamSettingsError = "";
+let teamSettingsData: TeamSettingsPayload | null = null;
+let teamInviteAcceptUrl = "";
 let projectActionInFlight = false;
 let inspectorActivityBoardId: string | null = null;
 let inspectorActivityCardId: string | null = null;
@@ -203,6 +221,8 @@ function freshWorkspaceState(): WorkspaceState {
     team,
     projects: [project],
     activeProjectId: project.id,
+    members: [],
+    invites: [],
     boards: [board],
     activeBoardId: board.id,
     templates: []
@@ -272,7 +292,7 @@ function normalizeWorkspace(rawState: any): WorkspaceState {
     ? rawState.templates.map(normalizeTemplate).filter(isNonNull)
     : [];
 
-  return { team, projects, activeProjectId, boards, activeBoardId, templates };
+  return { team, projects, activeProjectId, members: [], invites: [], boards, activeBoardId, templates };
 }
 
 function createTeam(input: Partial<Team> = {}): Team {
@@ -799,6 +819,11 @@ function render(): void {
   const board = getActiveBoardOrNull();
 
   renderTopbar(board);
+  if (authSessionLoaded && authSession && !authSession.isTeamMember) {
+    renderNoTeamAccess();
+    renderModals(null);
+    return;
+  }
   renderMetrics(board);
   renderBoard(board);
   renderInspector(board);
@@ -806,9 +831,35 @@ function render(): void {
   if (pendingRemoteRefresh && !hasLocalEditingState()) window.setTimeout(() => void applyPendingRemoteRefresh(), 0);
 }
 
+function renderNoTeamAccess(): void {
+  if (boardTitle) boardTitle.textContent = "Team access required";
+  document.querySelector("#metric-active")!.textContent = "0";
+  document.querySelector("#metric-blocked")!.textContent = "0";
+  document.querySelector("#metric-approvals")!.textContent = "0";
+  document.querySelector("#metric-delivered")!.textContent = "0";
+  boardCanvas.classList.remove("is-kanban");
+  boardCanvas.classList.add("is-setup");
+  boardCanvas.innerHTML = `
+    <section class="flow-panel" aria-labelledby="team-access-title">
+      <div class="flow-panel-heading">
+        <p class="eyebrow">Access</p>
+        <h2 id="team-access-title">Team invite required</h2>
+      </div>
+      <p class="modal-copy">${escapeHtml(authSession?.email || authSession?.userId || "This account")} is signed in but is not a member of this kanban.cards team.</p>
+    </section>
+  `;
+  inspectorPanel.innerHTML = `
+    <div class="inspector-label">
+      <span>Inspector</span>
+      <strong>No access</strong>
+    </div>
+  `;
+}
+
 function renderTopbar(board: Board | null): void {
   const activeProject = getActiveProject();
   const projectBoards = getActiveProjectBoards();
+  const canManageStructure = !authSession || authSession.role === "owner" || authSession.role === "admin";
 
   if (projectSelect) {
     projectSelect.innerHTML = state.projects.map((project) => `
@@ -818,8 +869,14 @@ function renderTopbar(board: Board | null): void {
     projectSelect.disabled = projectActionInFlight;
   }
 
-  if (projectSettingsButton) projectSettingsButton.disabled = projectActionInFlight || projectDialogSaving;
-  if (newProjectButton) newProjectButton.disabled = projectActionInFlight || projectDialogSaving;
+  if (projectSettingsButton) {
+    projectSettingsButton.hidden = !canManageStructure;
+    projectSettingsButton.disabled = projectActionInFlight || projectDialogSaving;
+  }
+  if (newProjectButton) {
+    newProjectButton.hidden = !canManageStructure;
+    newProjectButton.disabled = projectActionInFlight || projectDialogSaving;
+  }
 
   if (boardSelect) {
     boardSelect.innerHTML = projectBoards.length ? projectBoards.map((candidate) => `
@@ -829,12 +886,15 @@ function renderTopbar(board: Board | null): void {
     boardSelect.disabled = !projectBoards.length;
   }
 
-  if (newBoardButton) newBoardButton.disabled = !activeProject;
+  if (newBoardButton) {
+    newBoardButton.hidden = !canManageStructure;
+    newBoardButton.disabled = !activeProject;
+  }
 
   if (boardTitle) boardTitle.textContent = board ? board.name : `No boards in ${activeProject.name}`;
 
-  if (boardSettingsButton) boardSettingsButton.hidden = !board;
-  if (editFlowButton) editFlowButton.hidden = !Boolean(board?.lanes.length && !board.isEditingFlow && !board.configDraft);
+  if (boardSettingsButton) boardSettingsButton.hidden = !board || !canManageStructure;
+  if (editFlowButton) editFlowButton.hidden = !Boolean(canManageStructure && board?.lanes.length && !board.isEditingFlow && !board.configDraft);
   renderAccountControl();
 }
 
@@ -848,17 +908,21 @@ function renderAccountControl(): void {
   const label = authSession.name || authSession.email || authSession.userId || "Signed in";
   const roles = authSession.roles?.length ? authSession.roles.join(", ") : "No roles";
   const access = authSession.surfaceAccess?.length ? authSession.surfaceAccess.join(", ") : "No surface access";
+  const appRole = authSession.isTeamMember ? authSession.role || "member" : "no team access";
+  const canManageTeam = authSession.role === "owner" || authSession.role === "admin";
   accountControl.innerHTML = `
     <div class="account-context" aria-label="Session context">
       <span class="account-chip" title="${escapeAttribute(authSession.email || authSession.userId)}">${escapeHtml(label)}</span>
       <div class="account-meta">
         <span title="${escapeAttribute(authSession.workspaceId)}">Workspace ${escapeHtml(authSession.workspaceId || "unknown")}</span>
         <span title="${escapeAttribute(authSession.teamId)}">Team ${escapeHtml(authSession.teamId || "unknown")}</span>
-        <span title="${escapeAttribute(authSession.projectId)}">Session project ${escapeHtml(authSession.projectId || "unknown")}</span>
+        <span title="${escapeAttribute(authSession.projectId)}">Project ${escapeHtml(authSession.projectId || "unknown")}</span>
+        <span title="${escapeAttribute(appRole)}">App role ${escapeHtml(appRole)}</span>
         <span title="${escapeAttribute(roles)}">Roles ${escapeHtml(roles)}</span>
         <span title="${escapeAttribute(access)}">Access ${escapeHtml(access)}</span>
       </div>
     </div>
+    ${canManageTeam ? '<button class="secondary-button account-team-settings" type="button" data-action="open-team-settings">Team settings</button>' : ""}
     <a class="secondary-button account-logout" href="/auth/logout?global=1">Logout</a>
   `;
 }
@@ -1695,7 +1759,9 @@ function formatCommentKind(kind: unknown): string {
 
 function renderModals(board: Board | null): void {
   if (!modalRoot) return;
-  if (projectDialogOpen) {
+  if (teamSettingsDialogOpen) {
+    modalRoot.innerHTML = renderTeamSettingsDialog();
+  } else if (projectDialogOpen) {
     modalRoot.innerHTML = renderProjectDialog();
   } else if (boardSettingsDialogOpen && board) {
     modalRoot.innerHTML = renderBoardSettingsDialog(board);
@@ -1708,6 +1774,121 @@ function renderModals(board: Board | null): void {
   } else {
     modalRoot.innerHTML = "";
   }
+}
+
+function renderTeamSettingsDialog(): string {
+  const payload = teamSettingsData;
+  const members = payload?.members || [];
+  const invites = (payload?.invites || []).filter((invite) => invite.status === "pending");
+  const roleOptions = renderTeamRoleOptions("member");
+  const projectOptions = renderProjectAccessOptions(["*"]);
+  const memberRows = members.length ? members.map(renderTeamMemberRow).join("") : '<li class="empty-note">No members yet</li>';
+  const inviteRows = invites.length ? invites.map(renderTeamInviteRow).join("") : '<li class="empty-note">No pending invites</li>';
+  return `
+    <div class="modal-backdrop" data-action="close-modal">
+      <section class="modal-card team-settings-modal" role="dialog" aria-modal="true" aria-labelledby="team-settings-title">
+        <div class="modal-header">
+          <div>
+            <p class="eyebrow">Team settings</p>
+            <h2 id="team-settings-title">${escapeHtml(payload?.team.name || state.team.name || "kanban.cards")}</h2>
+          </div>
+          <button class="icon-action" type="button" data-action="cancel-team-settings" aria-label="Close team settings">x</button>
+        </div>
+        ${teamSettingsError ? `<p class="flow-message warning">${escapeHtml(teamSettingsError)}</p>` : ""}
+        ${teamSettingsLoading ? '<p class="empty-note">Loading team settings...</p>' : `
+          <form class="modal-form team-invite-form" data-team-invite-form>
+            <div class="field-grid">
+              ${renderTextField({ label: "Invite email", autocomplete: "email", attributes: { "data-team-invite-email": true } })}
+              ${renderSelectField({ label: "Role", optionsHtml: roleOptions, attributes: { "data-team-invite-role": true } })}
+            </div>
+            ${renderProjectAccessField(projectOptions, "data-team-invite-projects")}
+            <div class="modal-actions">
+              <button class="primary-button" type="submit" data-action="create-team-invite" ${teamSettingsSaving ? "disabled" : ""}>Create invite link</button>
+            </div>
+          </form>
+          ${teamInviteAcceptUrl ? `
+            <div class="copy-link-block">
+              <span class="meta-label">Invite link</span>
+              ${renderTextInput({ value: teamInviteAcceptUrl, attributes: { readonly: true, "data-team-invite-link": true }, ariaLabel: "Invite link" })}
+              <button class="secondary-button small" type="button" data-action="copy-team-invite-link">Copy link</button>
+            </div>
+          ` : ""}
+          <div class="team-settings-grid">
+            <section>
+              <div class="section-heading"><h3>Members</h3></div>
+              <ul class="team-list">${memberRows}</ul>
+            </section>
+            <section>
+              <div class="section-heading"><h3>Pending invites</h3></div>
+              <ul class="team-list">${inviteRows}</ul>
+            </section>
+          </div>
+        `}
+      </section>
+    </div>
+  `;
+}
+
+function renderTeamMemberRow(member: PublicTeamMember): string {
+  const editable = canManageMemberInUi(member);
+  return `
+    <li class="team-row" data-team-member-id="${escapeAttribute(member.id)}">
+      <div class="team-row-main">
+        <strong>${escapeHtml(member.name || member.email)}</strong>
+        <span>${escapeHtml(member.email)}</span>
+        <span>${escapeHtml(member.userId)}</span>
+      </div>
+      <div class="team-row-controls">
+        ${renderSelectField({ label: "Role", optionsHtml: renderTeamRoleOptions(member.role), attributes: { "data-team-member-role": true, disabled: !editable } })}
+        ${renderProjectAccessField(renderProjectAccessOptions(member.projectIds), "data-team-member-projects", !editable)}
+        <button class="secondary-button small" type="button" data-action="save-team-member" ${editable && !teamSettingsSaving ? "" : "disabled"}>Save</button>
+        <button class="secondary-button small danger-button" type="button" data-action="remove-team-member" ${editable && !teamSettingsSaving ? "" : "disabled"}>Remove</button>
+      </div>
+    </li>
+  `;
+}
+
+function renderTeamInviteRow(invite: PublicTeamInvite): string {
+  const editable = canManageRoleInUi(invite.role);
+  return `
+    <li class="team-row" data-team-invite-id="${escapeAttribute(invite.id)}">
+      <div class="team-row-main">
+        <strong>${escapeHtml(invite.email)}</strong>
+        <span>${escapeHtml(invite.role)}</span>
+        <span>${escapeHtml(invite.projectIds.includes("*") ? "All projects" : invite.projectIds.join(", "))}</span>
+        <time datetime="${escapeAttribute(invite.expiresAt)}">${escapeHtml(formatDateTime(invite.expiresAt))}</time>
+      </div>
+      <button class="secondary-button small danger-button" type="button" data-action="revoke-team-invite" ${editable && !teamSettingsSaving ? "" : "disabled"}>Revoke</button>
+    </li>
+  `;
+}
+
+function renderTeamRoleOptions(selectedRole: TeamRole): string {
+  const roles: TeamRole[] = authSession?.role === "owner" ? ["owner", "admin", "member"] : ["admin", "member"];
+  if (!roles.includes(selectedRole)) roles.unshift(selectedRole);
+  return roles.map((role) => `<option value="${role}" ${role === selectedRole ? "selected" : ""}>${role}</option>`).join("");
+}
+
+function renderProjectAccessOptions(projectIds: string[]): string {
+  const allSelected = projectIds.includes("*");
+  const options = [`<option value="*" ${allSelected ? "selected" : ""}>All projects</option>`];
+  for (const project of state.projects) {
+    options.push(`<option value="${escapeAttribute(project.id)}" ${!allSelected && projectIds.includes(project.id) ? "selected" : ""}>${escapeHtml(project.name)}</option>`);
+  }
+  return options.join("");
+}
+
+function renderProjectAccessField(optionsHtml: string, attributeName: string, disabled = false): string {
+  return renderSelectField({
+    label: "Project access",
+    optionsHtml,
+    attributes: {
+      [attributeName]: true,
+      multiple: true,
+      size: Math.min(5, Math.max(2, state.projects.length + 1)),
+      disabled
+    }
+  });
 }
 
 function renderProjectDialog(): string {
@@ -1948,11 +2129,180 @@ function resetBoardScopedUi(): void {
   resetInspectorActivity();
 }
 
+async function openTeamSettingsDialog(): Promise<void> {
+  if (!authSession || (authSession.role !== "owner" && authSession.role !== "admin")) return;
+  teamSettingsDialogOpen = true;
+  teamSettingsLoading = true;
+  teamSettingsSaving = false;
+  teamSettingsError = "";
+  teamInviteAcceptUrl = "";
+  projectDialogOpen = false;
+  boardSettingsDialogOpen = false;
+  resetWorkItemDialogState();
+  deleteBoardDialogOpen = false;
+  resetAgentConnectDialog();
+  render();
+  await reloadTeamSettings();
+}
+
+function closeTeamSettingsDialog(): void {
+  teamSettingsDialogOpen = false;
+  teamSettingsLoading = false;
+  teamSettingsSaving = false;
+  teamSettingsError = "";
+  render();
+}
+
+async function reloadTeamSettings(): Promise<void> {
+  if (!teamSettingsDialogOpen) return;
+  teamSettingsLoading = true;
+  render();
+  try {
+    teamSettingsData = await fetchApiJson<TeamSettingsPayload>(`${API_BASE_URL}/team`);
+    teamSettingsError = "";
+  } catch (error) {
+    teamSettingsError = error instanceof Error ? error.message : "Could not load team settings.";
+  } finally {
+    teamSettingsLoading = false;
+    render();
+  }
+}
+
+async function createTeamInviteFromDialog(action: HTMLElement): Promise<void> {
+  if (teamSettingsSaving) return;
+  const form = action.closest("[data-team-invite-form]");
+  const email = (form?.querySelector("[data-team-invite-email]") as FormControlElement | null)?.value.trim() || "";
+  const role = ((form?.querySelector("[data-team-invite-role]") as FormControlElement | null)?.value || "member") as TeamRole;
+  const projectIds = readProjectAccessSelection(form?.querySelector("[data-team-invite-projects]") as HTMLSelectElement | null);
+  if (!email) {
+    teamSettingsError = "Invite email is required.";
+    render();
+    return;
+  }
+
+  teamSettingsSaving = true;
+  teamSettingsError = "";
+  render();
+  try {
+    const payload = await fetchApiJson<{ invite: PublicTeamInvite; acceptUrl: string }>(`${API_BASE_URL}/team/invites`, {
+      method: "POST",
+      body: JSON.stringify({ email, role, projectIds })
+    });
+    teamInviteAcceptUrl = payload.acceptUrl;
+    await reloadTeamSettings();
+    showToast("Invite link created.");
+  } catch (error) {
+    teamSettingsError = error instanceof Error ? error.message : "Could not create invite.";
+  } finally {
+    teamSettingsSaving = false;
+    render();
+  }
+}
+
+async function saveTeamMemberFromDialog(action: HTMLElement): Promise<void> {
+  if (teamSettingsSaving) return;
+  const row = action.closest("[data-team-member-id]") as HTMLElement | null;
+  const memberId = row?.dataset.teamMemberId;
+  if (!memberId) return;
+  const role = ((row.querySelector("[data-team-member-role]") as FormControlElement | null)?.value || "member") as TeamRole;
+  const projectIds = readProjectAccessSelection(row.querySelector("[data-team-member-projects]") as HTMLSelectElement | null);
+  teamSettingsSaving = true;
+  teamSettingsError = "";
+  render();
+  try {
+    await fetchApiJson<PublicTeamMember>(`${API_BASE_URL}/team/members/${encodeURIComponent(memberId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ role, projectIds })
+    });
+    await reloadTeamSettings();
+    await loadAuthSession();
+    showToast("Member updated.");
+  } catch (error) {
+    teamSettingsError = error instanceof Error ? error.message : "Could not update member.";
+  } finally {
+    teamSettingsSaving = false;
+    render();
+  }
+}
+
+async function removeTeamMemberFromDialog(action: HTMLElement): Promise<void> {
+  if (teamSettingsSaving) return;
+  const row = action.closest("[data-team-member-id]") as HTMLElement | null;
+  const memberId = row?.dataset.teamMemberId;
+  if (!memberId) return;
+  teamSettingsSaving = true;
+  teamSettingsError = "";
+  render();
+  try {
+    await fetchApiJson<PublicTeamMember>(`${API_BASE_URL}/team/members/${encodeURIComponent(memberId)}`, {
+      method: "DELETE"
+    });
+    await reloadTeamSettings();
+    showToast("Member removed.");
+  } catch (error) {
+    teamSettingsError = error instanceof Error ? error.message : "Could not remove member.";
+  } finally {
+    teamSettingsSaving = false;
+    render();
+  }
+}
+
+async function revokeTeamInviteFromDialog(action: HTMLElement): Promise<void> {
+  if (teamSettingsSaving) return;
+  const row = action.closest("[data-team-invite-id]") as HTMLElement | null;
+  const inviteId = row?.dataset.teamInviteId;
+  if (!inviteId) return;
+  teamSettingsSaving = true;
+  teamSettingsError = "";
+  render();
+  try {
+    await fetchApiJson<PublicTeamInvite>(`${API_BASE_URL}/team/invites/${encodeURIComponent(inviteId)}`, {
+      method: "DELETE"
+    });
+    await reloadTeamSettings();
+    showToast("Invite revoked.");
+  } catch (error) {
+    teamSettingsError = error instanceof Error ? error.message : "Could not revoke invite.";
+  } finally {
+    teamSettingsSaving = false;
+    render();
+  }
+}
+
+async function copyTeamInviteLink(): Promise<void> {
+  const input = modalRoot?.querySelector("[data-team-invite-link]") as HTMLInputElement | null;
+  if (!input?.value) return;
+  try {
+    await navigator.clipboard?.writeText(input.value);
+    showToast("Invite link copied.");
+  } catch (_error) {
+    input.select();
+    showToast("Invite link selected.");
+  }
+}
+
+function readProjectAccessSelection(select: HTMLSelectElement | null): string[] {
+  if (!select) return ["*"];
+  const values = Array.from(select.selectedOptions).map((option) => option.value).filter(Boolean);
+  if (!values.length || values.includes("*")) return ["*"];
+  return values;
+}
+
+function canManageRoleInUi(role: TeamRole): boolean {
+  if (authSession?.role === "owner") return true;
+  return role !== "owner" && authSession?.role === "admin";
+}
+
+function canManageMemberInUi(member: PublicTeamMember): boolean {
+  return canManageRoleInUi(member.role);
+}
+
 function openProjectCreateDialog(): void {
   projectDialogOpen = true;
   projectDialogMode = "create";
   projectDialogSaving = false;
   projectDialogError = "";
+  teamSettingsDialogOpen = false;
   boardSettingsDialogOpen = false;
   resetWorkItemDialogState();
   deleteBoardDialogOpen = false;
@@ -1966,6 +2316,7 @@ function openProjectSettingsDialog(): void {
   projectDialogMode = "settings";
   projectDialogSaving = false;
   projectDialogError = "";
+  teamSettingsDialogOpen = false;
   boardSettingsDialogOpen = false;
   resetWorkItemDialogState();
   deleteBoardDialogOpen = false;
@@ -2052,6 +2403,7 @@ function openBoardSettingsDialog(): void {
   boardSettingsDialogOpen = true;
   boardSettingsSaving = false;
   boardSettingsError = "";
+  teamSettingsDialogOpen = false;
   projectDialogOpen = false;
   resetWorkItemDialogState();
   deleteBoardDialogOpen = false;
@@ -3174,6 +3526,16 @@ if (newBoardButton) {
   newBoardButton.addEventListener("click", () => void createNewBoard());
 }
 
+if (accountControl) {
+  accountControl.addEventListener("click", (event: MouseEvent) => {
+    const action = (event.target as HTMLElement).closest("[data-action]") as HTMLElement | null;
+    if (action?.dataset.action === "open-team-settings") {
+      event.preventDefault();
+      void openTeamSettingsDialog();
+    }
+  });
+}
+
 if (boardSelect) {
   boardSelect.addEventListener("change", (event) => {
     switchBoard((event.target as HTMLSelectElement).value);
@@ -3189,6 +3551,9 @@ if (modalRoot) {
       resetWorkItemDialogState();
       deleteBoardDialogOpen = false;
       resetAgentConnectDialog();
+      teamSettingsDialogOpen = false;
+      teamSettingsSaving = false;
+      teamSettingsError = "";
       projectDialogOpen = false;
       projectDialogSaving = false;
       projectDialogError = "";
@@ -3196,6 +3561,24 @@ if (modalRoot) {
       boardSettingsSaving = false;
       boardSettingsError = "";
       render();
+    }
+    if (action.dataset.action === "cancel-team-settings") closeTeamSettingsDialog();
+    if (action.dataset.action === "copy-team-invite-link") void copyTeamInviteLink();
+    if (action.dataset.action === "create-team-invite") {
+      event.preventDefault();
+      void createTeamInviteFromDialog(action);
+    }
+    if (action.dataset.action === "save-team-member") {
+      event.preventDefault();
+      void saveTeamMemberFromDialog(action);
+    }
+    if (action.dataset.action === "remove-team-member") {
+      event.preventDefault();
+      void removeTeamMemberFromDialog(action);
+    }
+    if (action.dataset.action === "revoke-team-invite") {
+      event.preventDefault();
+      void revokeTeamInviteFromDialog(action);
     }
     if (action.dataset.action === "cancel-project-dialog") closeProjectDialog();
     if (action.dataset.action === "create-project" || action.dataset.action === "save-project-settings") {
@@ -3221,8 +3604,13 @@ if (modalRoot) {
 
   modalRoot.addEventListener("submit", (event: SubmitEvent) => {
     const form = event.target as HTMLElement;
-    if (!form.matches("[data-work-item-form], [data-project-form], [data-board-settings-form]")) return;
+    if (!form.matches("[data-work-item-form], [data-project-form], [data-board-settings-form], [data-team-invite-form]")) return;
     event.preventDefault();
+    if (form.matches("[data-team-invite-form]")) {
+      const action = form.querySelector('[data-action="create-team-invite"]') as HTMLElement | null;
+      if (action) void createTeamInviteFromDialog(action);
+      return;
+    }
     if (form.matches("[data-project-form]")) {
       const action = form.querySelector('[data-action="create-project"], [data-action="save-project-settings"]') as HTMLElement | null;
       if (action) void saveProjectFromDialog(action);
@@ -3249,10 +3637,13 @@ if (modalRoot) {
 
   modalRoot.addEventListener("keydown", (event: KeyboardEvent) => {
     if (event.key !== "Escape") return;
-    if (!workItemDialogOpen && !deleteBoardDialogOpen && !agentConnectDialogOpen && !projectDialogOpen && !boardSettingsDialogOpen) return;
+    if (!workItemDialogOpen && !deleteBoardDialogOpen && !agentConnectDialogOpen && !teamSettingsDialogOpen && !projectDialogOpen && !boardSettingsDialogOpen) return;
     resetWorkItemDialogState();
     deleteBoardDialogOpen = false;
     resetAgentConnectDialog();
+    teamSettingsDialogOpen = false;
+    teamSettingsSaving = false;
+    teamSettingsError = "";
     projectDialogOpen = false;
     projectDialogSaving = false;
     projectDialogError = "";
