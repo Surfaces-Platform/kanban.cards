@@ -99,7 +99,7 @@ test("session users can use project APIs with Auth0 workspace as team seed", asy
 
       const session = await getJson(`${baseUrl}/auth/session`, cookieHeaders(sessionCookie));
       assert.equal(session.teamId, "ws_project");
-      assert.equal(session.projectId, DEFAULT_PROJECT_ID);
+      assert.equal(session.projectId, project.id);
     } finally {
       await closeServer(server);
       await fs.rm(tempDir, { recursive: true, force: true });

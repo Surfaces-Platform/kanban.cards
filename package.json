@@ -7,6 +7,7 @@
     "start": "npm run build && node dist/src/server.js",
     "dev": "tsx src/server.ts",
     "db:init": "tsx scripts/init-db.ts",
+    "roadmap:seed": "tsx scripts/seed-roadmap.ts",
     "clean": "rm -rf dist public/app.js public/styles.css public/robots.txt .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs",
     "build": "npm run clean && npm run build:server && npm run build:client && npm run build:cli && npm run build:static",
     "build:server": "tsc -p tsconfig.node.json",

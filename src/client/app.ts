@@ -14,6 +14,7 @@ type FormControlElement = HTMLInputElement | HTMLSelectElement | HTMLTextAreaEle
 type TemplateLike = Omit<BoardTemplate, "createdAt"> & { createdAt?: string; builtIn: boolean };
 type CreatedAgentTokenPayload = PublicTokenRecord & { token?: string };
 type AttentionTone = "neutral" | "ok" | "warn" | "danger";
+type ProjectDialogMode = "create" | "settings";
 
 interface AttentionState {
   label: string;
@@ -39,6 +40,17 @@ interface LiveWorkspaceEvent {
   type: "workspace_changed";
   boardId: string | null;
   payload: AnyRecord;
+  createdAt: string;
+}
+
+interface InspectorActivityEvent {
+  id: string;
+  type: string;
+  boardId: string | null;
+  cardId: string | null;
+  payload: AnyRecord;
+  actor: AnyRecord | null;
+  delegation: AnyRecord | null;
   createdAt: string;
 }
 
@@ -102,6 +114,20 @@ let agentConnectTokens: PublicTokenRecord[] = [];
 let agentConnectToken: CreatedAgentTokenPayload | null = null;
 let agentConnectLoading = false;
 let agentConnectError = "";
+let projectDialogOpen = false;
+let projectDialogMode: ProjectDialogMode = "settings";
+let projectDialogSaving = false;
+let projectDialogError = "";
+let boardSettingsDialogOpen = false;
+let boardSettingsSaving = false;
+let boardSettingsError = "";
+let projectActionInFlight = false;
+let inspectorActivityBoardId: string | null = null;
+let inspectorActivityCardId: string | null = null;
+let inspectorActivityEvents: InspectorActivityEvent[] = [];
+let inspectorActivityLoading = false;
+let inspectorActivityUnavailable = false;
+let inspectorActivityError = "";
 let apiOnline = false;
 let saveQueue: Promise<unknown> = Promise.resolve();
 let lastPersistedState = "";
@@ -116,6 +142,10 @@ let authSessionLoaded = false;
 const boardCanvas = document.querySelector("#board-canvas") as HTMLElement;
 const inspectorPanel = document.querySelector("#inspector-panel") as HTMLElement;
 const editFlowButton = document.querySelector("#edit-flow") as HTMLButtonElement | null;
+const boardSettingsButton = document.querySelector("#board-settings") as HTMLButtonElement | null;
+const projectSelect = document.querySelector("#project-select") as HTMLSelectElement | null;
+const projectSettingsButton = document.querySelector("#project-settings") as HTMLButtonElement | null;
+const newProjectButton = document.querySelector("#new-project") as HTMLButtonElement | null;
 const boardSelect = document.querySelector("#board-select") as HTMLSelectElement | null;
 const newBoardButton = document.querySelector("#new-board") as HTMLButtonElement | null;
 const boardTitle = document.querySelector("#board-title") as HTMLElement | null;
@@ -135,7 +165,8 @@ function makeId(prefix: string): string {
 async function loadState(): Promise<WorkspaceState> {
   try {
     const response = await fetch(`${API_BASE_URL}/state`, {
-      headers: apiHeaders(false)
+      headers: apiHeaders(false),
+      credentials: "same-origin"
     });
     if (!response.ok) throw new Error(`State request failed with ${response.status}`);
     const nextState = normalizeWorkspace(await response.json());
@@ -233,9 +264,9 @@ function normalizeWorkspace(rawState: any): WorkspaceState {
 
   const activeProjectId = projectIds.has(String(rawState?.activeProjectId)) ? String(rawState.activeProjectId) : fallbackProjectId;
   const activeProjectBoards = boards.filter((board) => board.projectId === activeProjectId);
-  const activeBoardId = boards.some((board) => board.id === rawState?.activeBoardId)
+  const activeBoardId = activeProjectBoards.some((board) => board.id === rawState?.activeBoardId)
     ? rawState.activeBoardId
-    : (activeProjectBoards[0] || boards[0]).id;
+    : activeProjectBoards[0]?.id || "";
 
   const templates: BoardTemplate[] = Array.isArray(rawState?.templates)
     ? rawState.templates.map(normalizeTemplate).filter(isNonNull)
@@ -440,6 +471,7 @@ function persistState(nextState: WorkspaceState): void {
       const response = await fetch(`${API_BASE_URL}/state`, {
         method: "PUT",
         headers: apiHeaders(true),
+        credentials: "same-origin",
         body: serialized
       });
       if (!response.ok) throw new Error(`State save failed with ${response.status}`);
@@ -455,9 +487,40 @@ function persistState(nextState: WorkspaceState): void {
 
 function apiHeaders(includeContentType: boolean): HeadersInit {
   const headers: Record<string, string> = {};
+  headers.Accept = "application/json";
   if (includeContentType) headers["Content-Type"] = "application/json";
   if (API_TOKEN) headers.Authorization = `Bearer ${API_TOKEN}`;
   return headers;
+}
+
+async function fetchApiJson<T>(url: string, init: RequestInit = {}): Promise<T> {
+  const response = await fetch(url, {
+    credentials: "same-origin",
+    ...init,
+    headers: {
+      ...apiHeaders(Boolean(init.body)),
+      ...(init.headers || {})
+    }
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const message = typeof payload?.error === "string" ? payload.error : `Request failed with ${response.status}`;
+    throw new Error(message);
+  }
+  return payload as T;
+}
+
+async function reloadWorkspaceStateFromApi(): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/state`, {
+    headers: apiHeaders(false),
+    credentials: "same-origin"
+  });
+  if (!response.ok) throw new Error(`State request failed with ${response.status}`);
+  const nextState = normalizeWorkspace(await response.json());
+  state = nextState;
+  lastPersistedState = JSON.stringify(nextState);
+  apiOnline = true;
+  apiWarningShown = false;
 }
 
 function liveEventsUrl(): string {
@@ -547,7 +610,8 @@ function startPolling(): void {
 async function refreshStateFromApi(): Promise<void> {
   try {
     const response = await fetch(`${API_BASE_URL}/state`, {
-      headers: apiHeaders(false)
+      headers: apiHeaders(false),
+      credentials: "same-origin"
     });
     if (!response.ok) throw new Error(`State request failed with ${response.status}`);
     const nextState = normalizeWorkspace(await response.json());
@@ -564,8 +628,18 @@ async function refreshStateFromApi(): Promise<void> {
 }
 
 function hasLocalEditingState(): boolean {
-  const board = getActiveBoard();
-  return Boolean(board.isEditingFlow || board.configDraft || templateFormOpen || editingTemplateId || workItemDialogOpen || deleteBoardDialogOpen || agentConnectDialogOpen);
+  const board = getActiveBoardOrNull();
+  return Boolean(
+    board?.isEditingFlow ||
+    board?.configDraft ||
+    templateFormOpen ||
+    editingTemplateId ||
+    workItemDialogOpen ||
+    deleteBoardDialogOpen ||
+    agentConnectDialogOpen ||
+    projectDialogOpen ||
+    boardSettingsDialogOpen
+  );
 }
 
 function showApiWarning(message: string): void {
@@ -574,17 +648,44 @@ function showApiWarning(message: string): void {
   showToast(message);
 }
 
-function getActiveBoard(): Board {
-  let board = state.boards.find((candidate) => candidate.id === state.activeBoardId);
-  if (board) return board;
+function getActiveProject(): Project {
+  let project = state.projects.find((candidate) => candidate.id === state.activeProjectId);
+  if (project) return project;
 
-  if (!state.boards.length) {
-    board = createBoard("Untitled board");
-    state.boards.push(board);
+  if (!state.projects.length) {
+    project = createProject({ id: DEFAULT_PROJECT_ID, teamId: state.team?.id || DEFAULT_TEAM_ID, name: DEFAULT_PROJECT_NAME });
+    state.projects.push(project);
   }
 
-  state.activeBoardId = state.boards[0].id;
-  return state.boards[0];
+  state.activeProjectId = state.projects[0].id;
+  return state.projects[0];
+}
+
+function getActiveProjectBoards(): Board[] {
+  const project = getActiveProject();
+  return state.boards.filter((board) => board.projectId === project.id);
+}
+
+function ensureActiveBoardWithinProject(): void {
+  const projectBoards = getActiveProjectBoards();
+  if (projectBoards.some((board) => board.id === state.activeBoardId)) return;
+  state.activeBoardId = projectBoards[0]?.id || "";
+}
+
+function getActiveBoardOrNull(): Board | null {
+  ensureActiveBoardWithinProject();
+  return state.boards.find((candidate) => candidate.id === state.activeBoardId && candidate.projectId === state.activeProjectId) || null;
+}
+
+function getActiveBoard(): Board {
+  let board = getActiveBoardOrNull();
+  if (board) return board;
+
+  board = createBoard("Untitled board", { projectId: state.activeProjectId || DEFAULT_PROJECT_ID });
+  state.boards.push(board);
+
+  state.activeBoardId = board.id;
+  return board;
 }
 
 function touchBoard(board: Board): void {
@@ -600,7 +701,8 @@ function getTemplate(templateId: string): TemplateLike | null {
 }
 
 function getSelectedWorkItem(): WorkItem | null {
-  const board = getActiveBoard();
+  const board = getActiveBoardOrNull();
+  if (!board) return null;
   if (!board.selectedId) return null;
   return board.workItems.find((item) => item.id === board.selectedId) || null;
 }
@@ -693,27 +795,46 @@ function deriveAttentionState(input: {
 
 function render(): void {
   state = normalizeWorkspace(state);
-  const board = getActiveBoard();
+  ensureActiveBoardWithinProject();
+  const board = getActiveBoardOrNull();
 
   renderTopbar(board);
   renderMetrics(board);
   renderBoard(board);
-  renderInspector();
+  renderInspector(board);
   renderModals(board);
   if (pendingRemoteRefresh && !hasLocalEditingState()) window.setTimeout(() => void applyPendingRemoteRefresh(), 0);
 }
 
-function renderTopbar(board: Board): void {
-  if (boardSelect) {
-    boardSelect.innerHTML = state.boards.map((candidate) => `
-      <option value="${escapeAttribute(candidate.id)}">${escapeHtml(candidate.name)}</option>
+function renderTopbar(board: Board | null): void {
+  const activeProject = getActiveProject();
+  const projectBoards = getActiveProjectBoards();
+
+  if (projectSelect) {
+    projectSelect.innerHTML = state.projects.map((project) => `
+      <option value="${escapeAttribute(project.id)}">${escapeHtml(project.name)}</option>
     `).join("");
-    boardSelect.value = board.id;
+    projectSelect.value = activeProject.id;
+    projectSelect.disabled = projectActionInFlight;
   }
 
-  if (boardTitle) boardTitle.textContent = board.name;
+  if (projectSettingsButton) projectSettingsButton.disabled = projectActionInFlight || projectDialogSaving;
+  if (newProjectButton) newProjectButton.disabled = projectActionInFlight || projectDialogSaving;
 
-  if (editFlowButton) editFlowButton.hidden = !Boolean(board.lanes.length && !board.isEditingFlow && !board.configDraft);
+  if (boardSelect) {
+    boardSelect.innerHTML = projectBoards.length ? projectBoards.map((candidate) => `
+      <option value="${escapeAttribute(candidate.id)}">${escapeHtml(candidate.name)}</option>
+    `).join("") : '<option value="">No boards</option>';
+    boardSelect.value = board?.id || "";
+    boardSelect.disabled = !projectBoards.length;
+  }
+
+  if (newBoardButton) newBoardButton.disabled = !activeProject;
+
+  if (boardTitle) boardTitle.textContent = board ? board.name : `No boards in ${activeProject.name}`;
+
+  if (boardSettingsButton) boardSettingsButton.hidden = !board;
+  if (editFlowButton) editFlowButton.hidden = !Boolean(board?.lanes.length && !board.isEditingFlow && !board.configDraft);
   renderAccountControl();
 }
 
@@ -725,17 +846,28 @@ function renderAccountControl(): void {
   }
 
   const label = authSession.name || authSession.email || authSession.userId || "Signed in";
+  const roles = authSession.roles?.length ? authSession.roles.join(", ") : "No roles";
+  const access = authSession.surfaceAccess?.length ? authSession.surfaceAccess.join(", ") : "No surface access";
   accountControl.innerHTML = `
-    <span class="account-chip" title="${escapeAttribute(authSession.workspaceId)}">${escapeHtml(label)}</span>
+    <div class="account-context" aria-label="Session context">
+      <span class="account-chip" title="${escapeAttribute(authSession.email || authSession.userId)}">${escapeHtml(label)}</span>
+      <div class="account-meta">
+        <span title="${escapeAttribute(authSession.workspaceId)}">Workspace ${escapeHtml(authSession.workspaceId || "unknown")}</span>
+        <span title="${escapeAttribute(authSession.teamId)}">Team ${escapeHtml(authSession.teamId || "unknown")}</span>
+        <span title="${escapeAttribute(authSession.projectId)}">Session project ${escapeHtml(authSession.projectId || "unknown")}</span>
+        <span title="${escapeAttribute(roles)}">Roles ${escapeHtml(roles)}</span>
+        <span title="${escapeAttribute(access)}">Access ${escapeHtml(access)}</span>
+      </div>
+    </div>
     <a class="secondary-button account-logout" href="/auth/logout?global=1">Logout</a>
   `;
 }
 
-function renderMetrics(board: Board): void {
-  const active = board.workItems.filter((item) => !isDelivered(item)).length;
-  const blocked = board.workItems.filter((item) => getOpenBlockers(item).length > 0).length;
-  const approvals = board.workItems.reduce((total, item) => total + getApprovalCount(item), 0);
-  const delivered = board.workItems.filter(isDelivered).length;
+function renderMetrics(board: Board | null): void {
+  const active = board ? board.workItems.filter((item) => !isDelivered(item)).length : 0;
+  const blocked = board ? board.workItems.filter((item) => getOpenBlockers(item).length > 0).length : 0;
+  const approvals = board ? board.workItems.reduce((total, item) => total + getApprovalCount(item), 0) : 0;
+  const delivered = board ? board.workItems.filter(isDelivered).length : 0;
 
   document.querySelector("#metric-active")!.textContent = String(active);
   document.querySelector("#metric-blocked")!.textContent = String(blocked);
@@ -743,7 +875,14 @@ function renderMetrics(board: Board): void {
   document.querySelector("#metric-delivered")!.textContent = String(delivered);
 }
 
-function renderBoard(board: Board): void {
+function renderBoard(board: Board | null): void {
+  if (!board) {
+    boardCanvas.classList.remove("is-kanban");
+    boardCanvas.classList.add("is-setup");
+    boardCanvas.innerHTML = renderEmptyProjectSetup();
+    return;
+  }
+
   const isConfiguring = Boolean(board.isEditingFlow || board.configDraft);
   boardCanvas.classList.toggle("is-kanban", Boolean(board.lanes.length && !isConfiguring));
   boardCanvas.classList.toggle("is-setup", Boolean(!board.lanes.length || isConfiguring));
@@ -896,6 +1035,21 @@ function renderCheckboxGroup({ legend, options = [], summary = "", className = "
       </div>
       ${summary ? `<p class="agent-lane-summary">${escapeHtml(summary)}</p>` : ""}
     </fieldset>
+  `;
+}
+
+function renderEmptyProjectSetup(): string {
+  const project = getActiveProject();
+  return `
+    <section class="empty-board empty-project" aria-labelledby="empty-project-title">
+      <p class="eyebrow">Project setup</p>
+      <h2 id="empty-project-title">${escapeHtml(project.name)} has no boards</h2>
+      <p>Create a board in this project to start tracking cards, or switch to another project in the topbar.</p>
+      <div class="empty-project-actions">
+        <button class="primary-button" type="button" data-action="create-board">New board</button>
+        <button class="secondary-button" type="button" data-action="open-project-settings">Project settings</button>
+      </div>
+    </section>
   `;
 }
 
@@ -1194,11 +1348,11 @@ function attentionChipClass(attention: AttentionState): string {
   return ["chip", "attention-chip", attention.tone].filter(Boolean).join(" ");
 }
 
-function renderInspector(): void {
-  const selected = getSelectedWorkItem();
-  const board = getActiveBoard();
+function renderInspector(board: Board | null = getActiveBoardOrNull()): void {
+  const selected = board ? getSelectedWorkItem() : null;
 
   if (!selected) {
+    resetInspectorActivity();
     inspectorPanel.innerHTML = `
       <div class="inspector-label">
         <span>Inspector</span>
@@ -1212,6 +1366,9 @@ function renderInspector(): void {
     `;
     return;
   }
+  if (!board) return;
+
+  ensureInspectorActivity(board, selected);
 
   inspectorPanel.innerHTML = `
     <div class="inspector-label">
@@ -1231,8 +1388,59 @@ function renderInspector(): void {
         </div>
         ${renderCommentThread(selected)}
       </div>
+      ${renderInspectorActivityPanel()}
     </section>
   `;
+}
+
+function ensureInspectorActivity(board: Board, item: WorkItem): void {
+  if (inspectorActivityBoardId === board.id && inspectorActivityCardId === item.id) return;
+  inspectorActivityBoardId = board.id;
+  inspectorActivityCardId = item.id;
+  inspectorActivityEvents = [];
+  inspectorActivityLoading = true;
+  inspectorActivityUnavailable = false;
+  inspectorActivityError = "";
+  void loadInspectorActivity(board.id, item.id);
+}
+
+function resetInspectorActivity(): void {
+  inspectorActivityBoardId = null;
+  inspectorActivityCardId = null;
+  inspectorActivityEvents = [];
+  inspectorActivityLoading = false;
+  inspectorActivityUnavailable = false;
+  inspectorActivityError = "";
+}
+
+async function loadInspectorActivity(boardId: string, cardId: string): Promise<void> {
+  const params = new URLSearchParams({ cardId, limit: "20" });
+  try {
+    const response = await fetch(`${API_BASE_URL}/boards/${encodeURIComponent(boardId)}/events?${params.toString()}`, {
+      headers: apiHeaders(false),
+      credentials: "same-origin"
+    });
+    if (response.status === 404 || response.status === 405) {
+      inspectorActivityUnavailable = true;
+      inspectorActivityEvents = [];
+      return;
+    }
+    if (!response.ok) throw new Error(`Event request failed with ${response.status}`);
+    const payload = await response.json();
+    const rawEvents = Array.isArray(payload?.events) ? payload.events : Array.isArray(payload) ? payload : [];
+    inspectorActivityEvents = rawEvents.map(normalizeInspectorActivityEvent).filter(isNonNull);
+    inspectorActivityUnavailable = false;
+    inspectorActivityError = "";
+  } catch (_error) {
+    inspectorActivityEvents = [];
+    inspectorActivityUnavailable = true;
+    inspectorActivityError = "Provenance is not available for this board.";
+  } finally {
+    if (inspectorActivityBoardId === boardId && inspectorActivityCardId === cardId) {
+      inspectorActivityLoading = false;
+      renderInspector(getActiveBoardOrNull());
+    }
+  }
 }
 
 function renderCurrentStatePanel(item: WorkItem, board: Board): string {
@@ -1294,6 +1502,128 @@ function renderGateSummary(current: WorkItemCurrentState): string {
       ` : '<p>No gate checks configured.</p>'}
     </div>
   `;
+}
+
+function normalizeInspectorActivityEvent(rawEvent: any): InspectorActivityEvent | null {
+  if (!rawEvent || typeof rawEvent !== "object") return null;
+  const payload = rawEvent.payload && typeof rawEvent.payload === "object" ? rawEvent.payload as AnyRecord : {};
+  const actor = normalizeActivityObject(rawEvent.actor || payload.actor);
+  const delegation = normalizeActivityObject(rawEvent.delegation || payload.delegation || payload.agentSession);
+  const id = String(rawEvent.id || payload.id || makeId("activity"));
+  return {
+    id,
+    type: String(rawEvent.type || payload.type || payload.event || payload.action || "event"),
+    boardId: optionalText(rawEvent.boardId || rawEvent.board_id || payload.boardId),
+    cardId: optionalText(rawEvent.cardId || rawEvent.card_id || rawEvent.workItemId || payload.cardId || payload.workItemId),
+    payload,
+    actor,
+    delegation,
+    createdAt: String(rawEvent.createdAt || rawEvent.created_at || payload.createdAt || payload.timestamp || "")
+  };
+}
+
+function normalizeActivityObject(value: unknown): AnyRecord | null {
+  return value && typeof value === "object" ? value as AnyRecord : null;
+}
+
+function renderInspectorActivityPanel(): string {
+  const body = (() => {
+    if (inspectorActivityLoading) return '<p class="empty-note">Loading provenance...</p>';
+    if (inspectorActivityUnavailable) return `<p class="empty-note">${escapeHtml(inspectorActivityError || "Detailed provenance is not available on this server.")}</p>`;
+    if (!inspectorActivityEvents.length) return '<p class="empty-note">No provenance events yet</p>';
+    return inspectorActivityEvents.map(renderInspectorActivityEvent).join("");
+  })();
+
+  return `
+    <section class="activity-provenance" aria-labelledby="activity-provenance-title">
+      <div class="section-heading">
+        <h3 id="activity-provenance-title">Provenance</h3>
+      </div>
+      <div class="activity-event-list">
+        ${body}
+      </div>
+    </section>
+  `;
+}
+
+function renderInspectorActivityEvent(event: InspectorActivityEvent): string {
+  const actor = formatActivityActor(event);
+  const sessionId = activityValue(event.delegation, "sessionId") || activityValue(event.payload, "sessionId");
+  const projectId = activityValue(event.payload, "projectId") ||
+    activityValue(event.actor, "projectId") ||
+    activityValue(event.delegation, "projectId");
+  const capabilities = formatActivityCapabilities(event.delegation?.capabilities || event.payload.capabilities);
+  const reason = activityValue(event.delegation, "reason") || activityValue(event.payload, "reason");
+  const delegatedBy = activityValue(event.delegation, "delegatedBy") || activityValue(event.payload, "delegatedBy");
+
+  return `
+    <article class="activity-event">
+      <div class="activity-event-header">
+        <strong>${escapeHtml(formatActivityTitle(event))}</strong>
+        ${event.createdAt ? `<time datetime="${escapeAttribute(event.createdAt)}">${escapeHtml(formatDateTime(event.createdAt) || formatRelativeTime(event.createdAt))}</time>` : ""}
+      </div>
+      <dl class="metadata-grid compact">
+        ${renderMetadataItem("Actor", actor)}
+        ${renderMetadataItem("Session", sessionId || "n/a")}
+        ${renderMetadataItem("Project", projectId || "n/a")}
+        ${renderMetadataItem("Delegated by", delegatedBy || "n/a")}
+        ${renderMetadataItem("Capabilities", capabilities || "n/a")}
+        ${renderMetadataItem("Reason", reason || "n/a")}
+      </dl>
+    </article>
+  `;
+}
+
+function renderMetadataItem(label: string, value: unknown): string {
+  const text = formatMetadataValue(value);
+  return `
+    <div>
+      <dt>${escapeHtml(label)}</dt>
+      <dd>${escapeHtml(text)}</dd>
+    </div>
+  `;
+}
+
+function formatActivityTitle(event: InspectorActivityEvent): string {
+  const action = activityValue(event.payload, "action") || event.type;
+  const subjectType = activityValue(event.payload, "resource.type") ||
+    activityValue(event.payload, "subject.type") ||
+    activityValue(event.payload, "target.type") ||
+    "event";
+  return `${formatCommentKind(action)} / ${formatCommentKind(subjectType)}`;
+}
+
+function formatActivityActor(event: InspectorActivityEvent): string {
+  const actor = event.actor;
+  if (!actor) return "unknown";
+  return activityValue(actor, "email") ||
+    activityValue(actor, "name") ||
+    activityValue(actor, "userId") ||
+    activityValue(actor, "agentId") ||
+    activityValue(actor, "type") ||
+    "unknown";
+}
+
+function formatActivityCapabilities(value: unknown): string {
+  return Array.isArray(value) ? value.map((item) => String(item)).filter(Boolean).join(", ") : String(value || "");
+}
+
+function activityValue(record: AnyRecord | null, path: string): string {
+  if (!record) return "";
+  const value = path.split(".").reduce<unknown>((current, key) => {
+    if (!current || typeof current !== "object") return undefined;
+    return (current as AnyRecord)[key];
+  }, record);
+  return formatMetadataValue(value);
+}
+
+function formatMetadataValue(value: unknown): string {
+  if (value == null) return "";
+  if (Array.isArray(value)) return value.map((item) => String(item)).filter(Boolean).join(", ");
+  if (typeof value === "object") return Object.entries(value as AnyRecord)
+    .map(([key, item]) => `${key}: ${String(item)}`)
+    .join(", ");
+  return String(value);
 }
 
 function renderCommentThread(item: WorkItem): string {
@@ -1363,17 +1693,91 @@ function formatCommentKind(kind: unknown): string {
   return String(kind || "note").replace(/_/g, " ");
 }
 
-function renderModals(board: Board): void {
+function renderModals(board: Board | null): void {
   if (!modalRoot) return;
-  if (workItemDialogOpen) {
+  if (projectDialogOpen) {
+    modalRoot.innerHTML = renderProjectDialog();
+  } else if (boardSettingsDialogOpen && board) {
+    modalRoot.innerHTML = renderBoardSettingsDialog(board);
+  } else if (workItemDialogOpen && board) {
     modalRoot.innerHTML = renderCreateWorkItemDialog(board);
-  } else if (agentConnectDialogOpen) {
+  } else if (agentConnectDialogOpen && board) {
     modalRoot.innerHTML = renderConnectAgentDialog(board);
-  } else if (deleteBoardDialogOpen) {
+  } else if (deleteBoardDialogOpen && board) {
     modalRoot.innerHTML = renderDeleteBoardDialog(board);
   } else {
     modalRoot.innerHTML = "";
   }
+}
+
+function renderProjectDialog(): string {
+  const project = getActiveProject();
+  const isCreate = projectDialogMode === "create";
+  const title = isCreate ? "New project" : "Project settings";
+  const nameValue = isCreate ? "" : project.name;
+  const descriptionValue = isCreate ? "" : project.description || "";
+  return `
+    <div class="modal-backdrop" data-action="close-modal">
+      <section class="modal-card project-settings-modal" role="dialog" aria-modal="true" aria-labelledby="project-dialog-title">
+        <div class="modal-header">
+          <div>
+            <p class="eyebrow">Project</p>
+            <h2 id="project-dialog-title">${escapeHtml(title)}</h2>
+          </div>
+          <button class="icon-action" type="button" data-action="cancel-project-dialog" aria-label="Close project dialog">x</button>
+        </div>
+        ${projectDialogError ? `<p class="flow-message warning">${escapeHtml(projectDialogError)}</p>` : ""}
+        <form class="modal-form" data-project-form>
+          ${renderTextField({ label: "Project name", value: nameValue, required: true, autocomplete: "off", attributes: { "data-project-field": "name" } })}
+          ${renderTextAreaField({ label: "Description", value: descriptionValue, rows: 3, attributes: { "data-project-field": "description" } })}
+          ${isCreate ? "" : `
+            <dl class="settings-meta-grid">
+              ${renderMetadataItem("Project ID", project.id)}
+              ${renderMetadataItem("Team ID", project.teamId)}
+              ${renderMetadataItem("Updated", formatDateTime(project.updatedAt) || "n/a")}
+            </dl>
+          `}
+          <div class="modal-actions">
+            <button class="secondary-button" type="button" data-action="cancel-project-dialog">Cancel</button>
+            <button class="primary-button" type="submit" data-action="${isCreate ? "create-project" : "save-project-settings"}" ${projectDialogSaving ? "disabled" : ""}>${isCreate ? "Create project" : "Save project"}</button>
+          </div>
+        </form>
+      </section>
+    </div>
+  `;
+}
+
+function renderBoardSettingsDialog(board: Board): string {
+  const projectOptions = state.projects.map((project) => `
+    <option value="${escapeAttribute(project.id)}" ${project.id === board.projectId ? "selected" : ""}>${escapeHtml(project.name)}</option>
+  `).join("");
+
+  return `
+    <div class="modal-backdrop" data-action="close-modal">
+      <section class="modal-card board-settings-modal" role="dialog" aria-modal="true" aria-labelledby="board-settings-title">
+        <div class="modal-header">
+          <div>
+            <p class="eyebrow">Board settings</p>
+            <h2 id="board-settings-title">${escapeHtml(board.name)}</h2>
+          </div>
+          <button class="icon-action" type="button" data-action="cancel-board-settings" aria-label="Close board settings">x</button>
+        </div>
+        ${boardSettingsError ? `<p class="flow-message warning">${escapeHtml(boardSettingsError)}</p>` : ""}
+        <form class="modal-form" data-board-settings-form>
+          ${renderSelectField({ label: "Owning project", optionsHtml: projectOptions, attributes: { "data-board-settings-field": "projectId" } })}
+          <dl class="settings-meta-grid">
+            ${renderMetadataItem("Board ID", board.id)}
+            ${renderMetadataItem("Project ID", board.projectId)}
+            ${renderMetadataItem("Updated", formatDateTime(board.updatedAt) || "n/a")}
+          </dl>
+          <div class="modal-actions">
+            <button class="secondary-button" type="button" data-action="cancel-board-settings">Cancel</button>
+            <button class="primary-button" type="submit" data-action="save-board-settings" ${boardSettingsSaving ? "disabled" : ""}>Save board</button>
+          </div>
+        </form>
+      </section>
+    </div>
+  `;
 }
 
 function renderConnectAgentDialog(board: Board): string {
@@ -1399,10 +1803,13 @@ function renderConnectAgentDialog(board: Board): string {
   const tokenRows = agentConnectTokens.length
     ? agentConnectTokens.map((tokenRecord) => `
       <li class="token-row">
-        <div>
-          <strong>${escapeHtml(tokenRecord.label || "Local agent")}</strong>
-          <span>ending ${escapeHtml(tokenRecord.last4)}</span>
-          <time datetime="${escapeAttribute(tokenRecord.createdAt || "")}">${escapeHtml(formatDateTime(tokenRecord.createdAt))}</time>
+        <div class="token-row-main">
+          <div class="token-row-heading">
+            <strong>${escapeHtml(tokenRecord.label || "Local agent")}</strong>
+            <span>ending ${escapeHtml(tokenRecord.last4)}</span>
+            <time datetime="${escapeAttribute(tokenRecord.createdAt || "")}">${escapeHtml(formatDateTime(tokenRecord.createdAt))}</time>
+          </div>
+          ${renderAgentTokenMetadata(tokenRecord)}
         </div>
         <button class="secondary-button small danger-button" type="button" data-action="revoke-agent-token" data-token-id="${escapeAttribute(tokenRecord.id)}">Revoke</button>
       </li>
@@ -1432,6 +1839,12 @@ function renderConnectAgentDialog(board: Board): string {
             <span class="meta-label">Setup command</span>
             ${renderTextArea({ value: command, rows: 4, attributes: { readonly: true, "data-agent-setup-command": true }, ariaLabel: "Agent setup command" })}
           </div>
+          <div class="new-token-metadata">
+            <div class="section-heading">
+              <h3>New token session</h3>
+            </div>
+            ${renderAgentTokenMetadata(agentConnectToken)}
+          </div>
         ` : ""}
         <div class="token-list-block">
           <div class="section-heading">
@@ -1443,6 +1856,21 @@ function renderConnectAgentDialog(board: Board): string {
         </div>
       </section>
     </div>
+  `;
+}
+
+function renderAgentTokenMetadata(tokenRecord: PublicTokenRecord | CreatedAgentTokenPayload | null): string {
+  if (!tokenRecord) return "";
+  return `
+    <dl class="metadata-grid token-metadata">
+      ${renderMetadataItem("Session", tokenRecord.sessionId || "n/a")}
+      ${renderMetadataItem("Project", tokenRecord.projectId || "n/a")}
+      ${renderMetadataItem("Delegated by", tokenRecord.delegatedBy || "n/a")}
+      ${renderMetadataItem("Capabilities", formatMetadataValue(tokenRecord.capabilities) || "n/a")}
+      ${renderMetadataItem("Expires", tokenRecord.expiresAt ? formatDateTime(tokenRecord.expiresAt) : "Never")}
+      ${renderMetadataItem("Reason", tokenRecord.reason || "n/a")}
+      ${renderMetadataItem("Last used", tokenRecord.lastUsedAt ? formatDateTime(tokenRecord.lastUsedAt) : "Never")}
+    </dl>
   `;
 }
 
@@ -1507,10 +1935,7 @@ function renderDeleteBoardDialog(board: Board): string {
   `;
 }
 
-function createNewBoard(): void {
-  const board = createBoard(uniqueBoardName("Untitled board"), { projectId: state.activeProjectId || DEFAULT_PROJECT_ID });
-  state.boards.push(board);
-  state.activeBoardId = board.id;
+function resetBoardScopedUi(): void {
   flowMessage = "";
   flowMessageTone = "neutral";
   templateFormOpen = false;
@@ -1518,22 +1943,199 @@ function createNewBoard(): void {
   resetWorkItemDialogState();
   flowActionsMenuOpen = false;
   deleteBoardDialogOpen = false;
+  boardSettingsDialogOpen = false;
   resetAgentConnectDialog();
+  resetInspectorActivity();
+}
+
+function openProjectCreateDialog(): void {
+  projectDialogOpen = true;
+  projectDialogMode = "create";
+  projectDialogSaving = false;
+  projectDialogError = "";
+  boardSettingsDialogOpen = false;
+  resetWorkItemDialogState();
+  deleteBoardDialogOpen = false;
+  resetAgentConnectDialog();
+  render();
+  (modalRoot?.querySelector('[data-project-field="name"]') as HTMLElement | null)?.focus();
+}
+
+function openProjectSettingsDialog(): void {
+  projectDialogOpen = true;
+  projectDialogMode = "settings";
+  projectDialogSaving = false;
+  projectDialogError = "";
+  boardSettingsDialogOpen = false;
+  resetWorkItemDialogState();
+  deleteBoardDialogOpen = false;
+  resetAgentConnectDialog();
+  render();
+  (modalRoot?.querySelector('[data-project-field="name"]') as HTMLElement | null)?.focus();
+}
+
+function closeProjectDialog(): void {
+  projectDialogOpen = false;
+  projectDialogSaving = false;
+  projectDialogError = "";
+  render();
+}
+
+async function activateProject(projectId: string): Promise<void> {
+  const project = state.projects.find((candidate) => candidate.id === projectId);
+  if (!project || project.id === state.activeProjectId || projectActionInFlight) return;
+
+  projectActionInFlight = true;
+  try {
+    await fetchApiJson<Project>(`${API_BASE_URL}/projects/${encodeURIComponent(project.id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ active: true })
+    });
+    state.activeProjectId = project.id;
+    ensureActiveBoardWithinProject();
+    resetBoardScopedUi();
+    await reloadWorkspaceStateFromApi();
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : "Could not switch project.");
+  } finally {
+    projectActionInFlight = false;
+    render();
+  }
+}
+
+async function saveProjectFromDialog(action: HTMLElement): Promise<void> {
+  if (projectDialogSaving) return;
+  const form = action.closest("[data-project-form]");
+  const name = (form?.querySelector('[data-project-field="name"]') as FormControlElement | null)?.value.trim() || "";
+  const description = (form?.querySelector('[data-project-field="description"]') as FormControlElement | null)?.value.trim() || "";
+  if (!name) {
+    projectDialogError = "Project name is required.";
+    render();
+    return;
+  }
+
+  projectDialogSaving = true;
+  projectDialogError = "";
+  render();
+
+  try {
+    if (projectDialogMode === "create") {
+      await fetchApiJson<Project>(`${API_BASE_URL}/projects`, {
+        method: "POST",
+        body: JSON.stringify({ name, description, active: true })
+      });
+      projectDialogOpen = false;
+      resetBoardScopedUi();
+      await reloadWorkspaceStateFromApi();
+      showToast("Project created.");
+    } else {
+      const project = getActiveProject();
+      await fetchApiJson<Project>(`${API_BASE_URL}/projects/${encodeURIComponent(project.id)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ name, description })
+      });
+      projectDialogOpen = false;
+      await reloadWorkspaceStateFromApi();
+      showToast("Project saved.");
+    }
+  } catch (error) {
+    projectDialogError = error instanceof Error ? error.message : "Could not save project.";
+  } finally {
+    projectDialogSaving = false;
+    render();
+  }
+}
+
+function openBoardSettingsDialog(): void {
+  const board = getActiveBoardOrNull();
+  if (!board) return;
+  boardSettingsDialogOpen = true;
+  boardSettingsSaving = false;
+  boardSettingsError = "";
+  projectDialogOpen = false;
+  resetWorkItemDialogState();
+  deleteBoardDialogOpen = false;
+  resetAgentConnectDialog();
+  render();
+}
+
+function closeBoardSettingsDialog(): void {
+  boardSettingsDialogOpen = false;
+  boardSettingsSaving = false;
+  boardSettingsError = "";
+  render();
+}
+
+async function saveBoardSettingsFromDialog(action: HTMLElement): Promise<void> {
+  const board = getActiveBoardOrNull();
+  if (!board || boardSettingsSaving) return;
+  const form = action.closest("[data-board-settings-form]");
+  const projectId = (form?.querySelector('[data-board-settings-field="projectId"]') as FormControlElement | null)?.value || board.projectId;
+  if (!state.projects.some((project) => project.id === projectId)) {
+    boardSettingsError = "Choose an existing project.";
+    render();
+    return;
+  }
+
+  boardSettingsSaving = true;
+  boardSettingsError = "";
+  render();
+
+  try {
+    await fetchApiJson<Board>(`${API_BASE_URL}/boards/${encodeURIComponent(board.id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ projectId, active: true })
+    });
+    if (projectId !== state.activeProjectId) {
+      await fetchApiJson<Project>(`${API_BASE_URL}/projects/${encodeURIComponent(projectId)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ active: true })
+      });
+    }
+    boardSettingsDialogOpen = false;
+    resetBoardScopedUi();
+    await reloadWorkspaceStateFromApi();
+    showToast("Board settings saved.");
+  } catch (error) {
+    boardSettingsError = error instanceof Error ? error.message : "Could not save board settings.";
+  } finally {
+    boardSettingsSaving = false;
+    render();
+  }
+}
+
+async function createNewBoard(): Promise<void> {
+  const projectId = state.activeProjectId || DEFAULT_PROJECT_ID;
+  const name = uniqueBoardName("Untitled board");
+  try {
+    const createdBoard = await fetchApiJson<Board>(`${API_BASE_URL}/boards`, {
+      method: "POST",
+      body: JSON.stringify({ name, projectId })
+    });
+    state.boards.push(normalizeBoard(createdBoard, projectId, new Set(state.projects.map((project) => project.id))) || createdBoard);
+    state.activeBoardId = createdBoard.id;
+    state.activeProjectId = createdBoard.projectId || projectId;
+    resetBoardScopedUi();
+    await reloadWorkspaceStateFromApi();
+    showToast("Board created.");
+    render();
+    return;
+  } catch (_error) {
+    if (apiOnline) showToast("Could not create board through the API. Creating a local draft.");
+  }
+
+  const board = createBoard(uniqueBoardName("Untitled board"), { projectId: state.activeProjectId || DEFAULT_PROJECT_ID });
+  state.boards.push(board);
+  state.activeBoardId = board.id;
+  resetBoardScopedUi();
   saveState();
   render();
 }
 
 function switchBoard(boardId: string): void {
-  if (!state.boards.some((board) => board.id === boardId)) return;
+  if (!state.boards.some((board) => board.id === boardId && board.projectId === state.activeProjectId)) return;
   state.activeBoardId = boardId;
-  flowMessage = "";
-  flowMessageTone = "neutral";
-  templateFormOpen = false;
-  editingTemplateId = null;
-  resetWorkItemDialogState();
-  flowActionsMenuOpen = false;
-  deleteBoardDialogOpen = false;
-  resetAgentConnectDialog();
+  resetBoardScopedUi();
   saveState();
   render();
 }
@@ -1679,7 +2281,7 @@ async function createAgentTokenFromForm(action: HTMLElement): Promise<void> {
     });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload?.error || `Token creation failed with ${response.status}`);
-    agentConnectToken = payload;
+    agentConnectToken = normalizeCreatedAgentTokenPayload(payload);
     await refreshAgentTokens(board.id);
     showToast("Agent token created.");
   } catch (error) {
@@ -1687,6 +2289,16 @@ async function createAgentTokenFromForm(action: HTMLElement): Promise<void> {
     agentConnectLoading = false;
     render();
   }
+}
+
+function normalizeCreatedAgentTokenPayload(payload: any): CreatedAgentTokenPayload {
+  if (payload?.tokenRecord && typeof payload.tokenRecord === "object") {
+    return {
+      ...payload.tokenRecord,
+      token: payload.token
+    } as CreatedAgentTokenPayload;
+  }
+  return payload as CreatedAgentTokenPayload;
 }
 
 async function revokeAgentToken(tokenId: string | undefined): Promise<void> {
@@ -1988,19 +2600,16 @@ function deleteCurrentBoardFromDialog(action: HTMLElement): void {
   if (boardIndex === -1) return;
 
   const deletedName = board.name;
+  const deletedProjectId = board.projectId;
   state.boards.splice(boardIndex, 1);
-  if (!state.boards.length) {
-    const replacement = createBoard("Untitled board");
-    state.boards.push(replacement);
-    state.activeBoardId = replacement.id;
-  } else {
-    const nextIndex = Math.min(boardIndex, state.boards.length - 1);
-    state.activeBoardId = state.boards[nextIndex].id;
-  }
+  const projectBoards = state.boards.filter((candidate) => candidate.projectId === deletedProjectId);
+  const nextIndex = Math.min(boardIndex, projectBoards.length - 1);
+  state.activeBoardId = projectBoards[nextIndex]?.id || "";
 
   deleteBoardDialogOpen = false;
   flowActionsMenuOpen = false;
   resetAgentConnectDialog();
+  resetInspectorActivity();
   templateFormOpen = false;
   editingTemplateId = null;
   flowMessage = "";
@@ -2480,6 +3089,8 @@ boardCanvas.addEventListener("click", (event: MouseEvent) => {
     const templateId = action.dataset.templateId;
 
     if (action.dataset.action === "toggle-flow-menu") toggleFlowActionsMenu();
+    if (action.dataset.action === "create-board") void createNewBoard();
+    if (action.dataset.action === "open-project-settings") openProjectSettingsDialog();
     if (action.dataset.action === "open-work-item-dialog") openWorkItemDialog(action.dataset.laneId || null);
     if (action.dataset.action === "open-delete-board") openDeleteBoardDialog();
     if (action.dataset.action === "generate-flow") generateDraftFromPrompt();
@@ -2541,8 +3152,26 @@ if (editFlowButton) {
   editFlowButton.addEventListener("click", editCurrentFlow);
 }
 
+if (boardSettingsButton) {
+  boardSettingsButton.addEventListener("click", openBoardSettingsDialog);
+}
+
+if (projectSelect) {
+  projectSelect.addEventListener("change", (event) => {
+    void activateProject((event.target as HTMLSelectElement).value);
+  });
+}
+
+if (projectSettingsButton) {
+  projectSettingsButton.addEventListener("click", openProjectSettingsDialog);
+}
+
+if (newProjectButton) {
+  newProjectButton.addEventListener("click", openProjectCreateDialog);
+}
+
 if (newBoardButton) {
-  newBoardButton.addEventListener("click", createNewBoard);
+  newBoardButton.addEventListener("click", () => void createNewBoard());
 }
 
 if (boardSelect) {
@@ -2560,7 +3189,23 @@ if (modalRoot) {
       resetWorkItemDialogState();
       deleteBoardDialogOpen = false;
       resetAgentConnectDialog();
+      projectDialogOpen = false;
+      projectDialogSaving = false;
+      projectDialogError = "";
+      boardSettingsDialogOpen = false;
+      boardSettingsSaving = false;
+      boardSettingsError = "";
       render();
+    }
+    if (action.dataset.action === "cancel-project-dialog") closeProjectDialog();
+    if (action.dataset.action === "create-project" || action.dataset.action === "save-project-settings") {
+      event.preventDefault();
+      void saveProjectFromDialog(action);
+    }
+    if (action.dataset.action === "cancel-board-settings") closeBoardSettingsDialog();
+    if (action.dataset.action === "save-board-settings") {
+      event.preventDefault();
+      void saveBoardSettingsFromDialog(action);
     }
     if (action.dataset.action === "cancel-work-item") closeWorkItemDialog();
     if (action.dataset.action === "create-work-item") {
@@ -2576,8 +3221,18 @@ if (modalRoot) {
 
   modalRoot.addEventListener("submit", (event: SubmitEvent) => {
     const form = event.target as HTMLElement;
-    if (!form.matches("[data-work-item-form]")) return;
+    if (!form.matches("[data-work-item-form], [data-project-form], [data-board-settings-form]")) return;
     event.preventDefault();
+    if (form.matches("[data-project-form]")) {
+      const action = form.querySelector('[data-action="create-project"], [data-action="save-project-settings"]') as HTMLElement | null;
+      if (action) void saveProjectFromDialog(action);
+      return;
+    }
+    if (form.matches("[data-board-settings-form]")) {
+      const action = form.querySelector('[data-action="save-board-settings"]') as HTMLElement | null;
+      if (action) void saveBoardSettingsFromDialog(action);
+      return;
+    }
     const action = form.querySelector('[data-action="create-work-item"]') as HTMLElement | null;
     if (action) createWorkItemFromForm(action);
   });
@@ -2594,10 +3249,16 @@ if (modalRoot) {
 
   modalRoot.addEventListener("keydown", (event: KeyboardEvent) => {
     if (event.key !== "Escape") return;
-    if (!workItemDialogOpen && !deleteBoardDialogOpen && !agentConnectDialogOpen) return;
+    if (!workItemDialogOpen && !deleteBoardDialogOpen && !agentConnectDialogOpen && !projectDialogOpen && !boardSettingsDialogOpen) return;
     resetWorkItemDialogState();
     deleteBoardDialogOpen = false;
     resetAgentConnectDialog();
+    projectDialogOpen = false;
+    projectDialogSaving = false;
+    projectDialogError = "";
+    boardSettingsDialogOpen = false;
+    boardSettingsSaving = false;
+    boardSettingsError = "";
     render();
   });
 }

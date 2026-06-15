@@ -68,15 +68,24 @@ test("live events require auth, stream changes, and replay missed events by curs
       const replay = await openSse(`${baseUrl}/api/events?since=${encodeURIComponent(changed.id)}`, bearerHeaders(apiToken));
       try {
         const missed = await replay.messages.next((message) => message.event === "workspace_changed");
-        const missedData = JSON.parse(missed.data);
-        assert.equal(missedData.boardId, board.id);
-        assert.equal(missedData.payload.reason, "comment_created");
-        assert.equal(missedData.payload.action, "comment");
-        assert.equal(missedData.payload.resource.type, "comment");
-        assert.equal(missedData.payload.actor.method, "bearer");
-      } finally {
-        replay.close();
-      }
+      const missedData = JSON.parse(missed.data);
+      assert.equal(missedData.boardId, board.id);
+      assert.equal(missedData.payload.reason, "comment_created");
+      assert.equal(missedData.payload.action, "comment");
+      assert.equal(missedData.payload.resource.type, "comment");
+      assert.equal(missedData.payload.actor.method, "bearer");
+
+      const recent = await getJson(`${baseUrl}/api/boards/${board.id}/events?limit=1`, bearerHeaders(apiToken));
+      assert.equal(recent.events.length, 1);
+      assert.equal(recent.events[0].payload.reason, "comment_created");
+      assert.equal(recent.events[0].payload.actor.type, "service");
+
+      const cardEvents = await getJson(`${baseUrl}/api/boards/${board.id}/events?cardId=${encodeURIComponent(item.id)}&limit=10`, bearerHeaders(apiToken));
+      assert.deepEqual(cardEvents.events.map((event: any) => event.payload.reason), ["comment_created", "card_created"]);
+      assert.ok(cardEvents.events.every((event: any) => event.boardId === board.id));
+    } finally {
+      replay.close();
+    }
     } finally {
       stream.close();
     }
@@ -141,6 +150,14 @@ async function openSse(url: string, headers: Record<string, string>): Promise<{
     messages: new SseMessageReader(response.body.getReader()),
     close: () => controller.abort()
   };
+}
+
+async function getJson<T = any>(url: string, headers: Record<string, string> = {}): Promise<T> {
+  const response = await fetch(url, { headers });
+  if (!response.ok) {
+    assert.fail(`${url} returned ${response.status}: ${await response.text()}`);
+  }
+  return response.json() as Promise<T>;
 }
 
 function parseSseMessage(raw: string): SseMessage | null {

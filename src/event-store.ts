@@ -5,11 +5,12 @@ import { Pool } from "pg";
 import type {
   EventStore,
   EventStoreOptions,
-  JsonObject,
   PostgresClient,
   PostgresOptions,
   WorkspaceEvent,
   WorkspaceEventCreateInput,
+  WorkspaceEventListRecentOptions,
+  WorkspaceEventPayload,
   WorkspaceEventType
 } from "./types";
 
@@ -97,12 +98,20 @@ export function createFileEventStore(dataPath: string = DEFAULT_EVENT_FILE): Eve
       .slice(0, normalizeLimit(limit));
   }
 
+  async function listRecent(options: WorkspaceEventListRecentOptions = {}): Promise<WorkspaceEvent[]> {
+    const events = await readEvents();
+    return events
+      .filter((event) => matchesRecentOptions(event, options))
+      .sort((left, right) => compareEvents(right, left))
+      .slice(0, normalizeLimit(options.limit));
+  }
+
   async function latestId(): Promise<string | null> {
     const events = await readEvents();
     return events.length ? events[events.length - 1].id : null;
   }
 
-  return { kind: "file", path: resolvedPath, ensureReady, append, listSince, latestId };
+  return { kind: "file", path: resolvedPath, ensureReady, append, listSince, listRecent, latestId };
 }
 
 export function createPostgresEventStore(options: EventStoreOptions = {}): EventStore {
@@ -163,13 +172,46 @@ export function createPostgresEventStore(options: EventStoreOptions = {}): Event
     return result.rows.map(normalizeEvent).filter(isNonNull);
   }
 
+  async function listRecent(options: WorkspaceEventListRecentOptions = {}): Promise<WorkspaceEvent[]> {
+    await ensureReady();
+    const where: string[] = [];
+    const args: unknown[] = [];
+    const boardId = nullableString(options.boardId);
+    const cardId = nullableString(options.cardId);
+
+    if (boardId) {
+      args.push(boardId);
+      where.push(`board_id = $${args.length}`);
+    }
+    if (cardId) {
+      args.push(cardId);
+      const parameter = `$${args.length}`;
+      where.push(`(
+        payload->'resource'->>'cardId' = ${parameter}
+        OR (payload->'resource'->>'type' = 'card' AND payload->'resource'->>'id' = ${parameter})
+        OR payload->>'cardId' = ${parameter}
+      )`);
+    }
+
+    args.push(normalizeLimit(options.limit));
+    const result = await pool.query(
+      `SELECT id::text, type, board_id, payload, created_at
+       FROM ${tableName}
+       ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
+       ORDER BY id DESC
+       LIMIT $${args.length}`,
+      args
+    );
+    return result.rows.map(normalizeEvent).filter(isNonNull);
+  }
+
   async function latestId(): Promise<string | null> {
     await ensureReady();
     const result = await pool.query<{ id: string | null }>(`SELECT max(id)::text AS id FROM ${tableName}`);
     return result.rows[0]?.id || null;
   }
 
-  return { kind: "postgres", path: tableName, ensureReady, append, listSince, latestId };
+  return { kind: "postgres", path: tableName, ensureReady, append, listSince, listRecent, latestId };
 }
 
 function normalizeEvent(record: unknown): WorkspaceEvent | null {
@@ -191,8 +233,27 @@ function isWorkspaceEventType(value: string): value is WorkspaceEventType {
   return value === "workspace_changed";
 }
 
-function normalizePayload(value: unknown): JsonObject {
+function normalizePayload(value: unknown): WorkspaceEventPayload {
   return isRecord(value) ? value : {};
+}
+
+function matchesRecentOptions(event: WorkspaceEvent, options: WorkspaceEventListRecentOptions): boolean {
+  const boardId = nullableString(options.boardId);
+  if (boardId && event.boardId !== boardId) return false;
+
+  const cardId = nullableString(options.cardId);
+  if (cardId && eventCardId(event) !== cardId) return false;
+
+  return true;
+}
+
+function eventCardId(event: WorkspaceEvent): string | null {
+  const resource: UnknownRecord = isRecord(event.payload.resource) ? event.payload.resource : {};
+  const directCardId = nullableString(resource.cardId || event.payload.cardId);
+  if (directCardId) return directCardId;
+
+  if (String(resource.type || "") === "card") return nullableString(resource.id);
+  return null;
 }
 
 function nextNumericId(previousId: string | null): bigint {
@@ -213,9 +274,9 @@ function compareEvents(left: WorkspaceEvent, right: WorkspaceEvent): number {
   return 0;
 }
 
-function normalizeLimit(limit: number): number {
+function normalizeLimit(limit: unknown): number {
   if (!Number.isFinite(limit)) return DEFAULT_LIST_LIMIT;
-  return Math.max(1, Math.min(Math.trunc(limit), 1000));
+  return Math.max(1, Math.min(Math.trunc(Number(limit)), 1000));
 }
 
 function nullableString(value: unknown): string | null {

@@ -35,6 +35,7 @@ import {
   startLogin
 } from "./platform-auth";
 import type {
+  AgentCapability,
   AgentInstruction,
   AgentSpec,
   AgentTokenStore,
@@ -46,6 +47,9 @@ import type {
   Project,
   StateStore,
   WorkspaceEvent,
+  WorkspaceEventActorProvenance,
+  WorkspaceEventDelegationProvenance,
+  WorkspaceEventPayload,
   WorkItem,
   WorkItemComment,
   WorkspaceState
@@ -310,10 +314,11 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       res.status(401).json({ error: "No active session." });
       return;
     }
-    res.json(publicSession(result.session));
+    const activeProjectId = await readActiveProjectId(store);
+    res.json(publicSession(result.session, activeProjectId));
   }));
 
-  app.use(requireAccessAuth(auth, tokenStore, missingRequiredConfig));
+  app.use(requireAccessAuth(auth, tokenStore, store, missingRequiredConfig));
 
   app.get("/", serveIndex(staticDir));
   app.get("/index.html", serveIndex(staticDir));
@@ -383,7 +388,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     res.json(result);
   }));
 
-  app.get("/api/boards", asyncHandler(async (req, res) => {
+  app.get("/api/boards", requireAgentCapability("view"), asyncHandler(async (req, res) => {
     const state = await store.read();
     if (isAgentAuth(req)) {
       const board = findBoard(state, req.kanbanAuth.boardId);
@@ -397,7 +402,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     res.json({ boards, activeBoardId, activeProjectId: projectId });
   }));
 
-  app.get("/api/boards/:boardId", asyncHandler(async (req, res) => {
+  app.get("/api/boards/:boardId", requireAgentCapability("view"), asyncHandler(async (req, res) => {
     const boardId = routeParam(req, "boardId");
     requireBoardAccess(req, boardId);
     const state = await store.read();
@@ -407,7 +412,20 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     res.json(board);
   }));
 
-  app.get("/api/agent/instructions", asyncHandler(async (req, res) => {
+  app.get("/api/boards/:boardId/events", requireAdminAuth(), asyncHandler(async (req, res) => {
+    const boardId = routeParam(req, "boardId");
+    const state = await store.read();
+    const board = findBoard(state, boardId);
+    if (!board) throw httpError(404, "Board not found.");
+    const events = await eventStore.listRecent({
+      boardId,
+      cardId: queryString(req.query.cardId),
+      limit: queryLimit(req.query.limit)
+    });
+    res.json({ events });
+  }));
+
+  app.get("/api/agent/instructions", requireAgentCapability("view"), asyncHandler(async (req, res) => {
     const state = await store.read();
     if (isAgentAuth(req)) {
       res.json({ instructions: collectAgentInstructions(state, req.kanbanAuth.agentId, req.kanbanAuth.boardId) });
@@ -416,7 +434,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     res.json({ instructions: collectAgentInstructions(state, req.query.agentId) });
   }));
 
-  app.get("/api/agent/session", asyncHandler(async (req, res) => {
+  app.get("/api/agent/session", requireAgentCapability("view"), asyncHandler(async (req, res) => {
     if (isAdminAuth(req)) {
       res.json({ mode: "admin" });
       return;
@@ -539,7 +557,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     res.json(result);
   }));
 
-  app.post("/api/boards/:boardId/work-items", requireWriteAuth(), asyncHandler(async (req, res) => {
+  app.post("/api/boards/:boardId/work-items", requireWriteAuth(), requireAgentCapability("create"), asyncHandler(async (req, res) => {
     const boardId = routeParam(req, "boardId");
     requireBoardAccess(req, boardId);
     const { result } = await store.update((state) => {
@@ -555,16 +573,17 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       }
       board.workItems.push(item);
       touchBoard(board);
-      return item;
+      return { item, projectId: board.projectId };
     });
-    await publishWorkspaceEvent(req, boardId, "create", { type: "card", id: result.id }, "card_created");
-    res.status(201).json(result);
+    await publishWorkspaceEvent(req, boardId, "create", { type: "card", id: result.item.id }, "card_created", { projectId: result.projectId });
+    res.status(201).json(result.item);
   }));
 
   app.patch("/api/boards/:boardId/work-items/:itemId", requireWriteAuth(), asyncHandler(async (req, res) => {
     const boardId = routeParam(req, "boardId");
     const itemId = routeParam(req, "itemId");
     requireBoardAccess(req, boardId);
+    requireAgentWorkItemPatchCapabilities(req);
     const { result } = await store.update((state) => {
       const board = findBoard(state, boardId);
       if (!board) throw httpError(404, "Board not found.");
@@ -581,13 +600,13 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       }
       touchWorkItem(item);
       touchBoard(board);
-      return item;
+      return { item, projectId: board.projectId };
     });
-    await publishWorkspaceEvent(req, boardId, "update", { type: "card", id: result.id }, "card_updated");
-    res.json(result);
+    await publishWorkspaceEvent(req, boardId, "update", { type: "card", id: result.item.id }, "card_updated", { projectId: result.projectId });
+    res.json(result.item);
   }));
 
-  app.post("/api/boards/:boardId/work-items/:itemId/comments", requireWriteAuth(), asyncHandler(async (req, res) => {
+  app.post("/api/boards/:boardId/work-items/:itemId/comments", requireWriteAuth(), requireAgentCapability("comment"), asyncHandler(async (req, res) => {
     const boardId = routeParam(req, "boardId");
     const itemId = routeParam(req, "itemId");
     requireBoardAccess(req, boardId);
@@ -606,13 +625,13 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       item.comments.push(comment);
       touchWorkItem(item);
       touchBoard(board);
-      return comment;
+      return { comment, projectId: board.projectId };
     });
-    await publishWorkspaceEvent(req, boardId, "comment", { type: "comment", id: result.id, cardId: itemId }, "comment_created");
-    res.status(201).json(result);
+    await publishWorkspaceEvent(req, boardId, "comment", { type: "comment", id: result.comment.id, cardId: itemId }, "comment_created", { projectId: result.projectId });
+    res.status(201).json(result.comment);
   }));
 
-  app.patch("/api/boards/:boardId/work-items/:itemId/comments/:commentId", requireWriteAuth(), asyncHandler(async (req, res) => {
+  app.patch("/api/boards/:boardId/work-items/:itemId/comments/:commentId", requireWriteAuth(), requireAgentCapability("comment"), asyncHandler(async (req, res) => {
     const boardId = routeParam(req, "boardId");
     const itemId = routeParam(req, "itemId");
     const commentId = routeParam(req, "commentId");
@@ -631,10 +650,10 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       applyCommentPatch(comment, isAgentAuth(req) ? filterAgentCommentPatch(req.body || {}, comment, req.kanbanAuth.agentId) : req.body || {});
       touchWorkItem(item);
       touchBoard(board);
-      return comment;
+      return { comment, projectId: board.projectId };
     });
-    await publishWorkspaceEvent(req, boardId, "update", { type: "comment", id: result.id, cardId: itemId }, "comment_updated");
-    res.json(result);
+    await publishWorkspaceEvent(req, boardId, "update", { type: "comment", id: result.comment.id, cardId: itemId }, "comment_updated", { projectId: result.projectId });
+    res.json(result.comment);
   }));
 
   app.use((req: Request, res: Response) => {
@@ -660,19 +679,20 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     extraPayload: Record<string, unknown> = {}
   ): Promise<WorkspaceEvent> {
     const timestamp = new Date().toISOString();
+    const payload: WorkspaceEventPayload = {
+      ...extraPayload,
+      reason,
+      action,
+      resource,
+      actor: describeActor(req?.kanbanAuth),
+      delegation: describeDelegation(req?.kanbanAuth),
+      timestamp,
+      updatedAt: timestamp
+    };
     const event = await eventStore.append({
       type: "workspace_changed",
       boardId,
-      payload: {
-        ...extraPayload,
-        reason,
-        action,
-        resource,
-        actor: describeActor(req?.kanbanAuth),
-        delegation: describeDelegation(req?.kanbanAuth),
-        timestamp,
-        updatedAt: timestamp
-      }
+      payload
     });
     notifyEventSubscribers(eventSubscribers);
     return event;
@@ -804,6 +824,31 @@ function assertAgentWorkItemPatchAllowed(patch: UnknownRecord): void {
   }
 }
 
+function requireAgentCapability(capability: AgentCapability): RequestHandler {
+  return (req: Request, _res: Response, next: NextFunction) => {
+    if (isAgentAuth(req)) assertAgentHasCapability(req, capability);
+    next();
+  };
+}
+
+function requireAgentWorkItemPatchCapabilities(req: Request): void {
+  if (!isAgentAuth(req)) return;
+  const patch = isRecord(req.body) ? req.body : {};
+  const patchKeys = Object.keys(patch);
+  const changesLane = Object.prototype.hasOwnProperty.call(patch, "laneId");
+  const changesCardFields = patchKeys.some((key) => key !== "laneId");
+
+  if (changesLane) assertAgentHasCapability(req, "move");
+  if (changesCardFields || !changesLane) assertAgentHasCapability(req, "update");
+}
+
+function assertAgentHasCapability(req: Request, capability: AgentCapability): void {
+  if (!isAgentAuth(req)) return;
+  if (!req.kanbanAuth.capabilities.includes(capability)) {
+    throw httpError(403, `Agent token is missing the "${capability}" capability.`);
+  }
+}
+
 function requestedProjectId(req: Request, state: WorkspaceState): string {
   const queryProjectId = Array.isArray(req.query.projectId) ? req.query.projectId[0] : req.query.projectId;
   const normalized = normalizeProjectId(queryProjectId);
@@ -833,7 +878,7 @@ function ensureStateTeam(state: WorkspaceState, teamId: string): void {
   }
 }
 
-function describeActor(auth: KanbanAuthContext | undefined): Record<string, unknown> {
+function describeActor(auth: KanbanAuthContext | undefined): WorkspaceEventActorProvenance {
   if (!auth || auth.kind === "anonymous") return { type: "anonymous" };
   if (auth.kind === "agent") {
     return {
@@ -868,7 +913,7 @@ function describeActor(auth: KanbanAuthContext | undefined): Record<string, unkn
   };
 }
 
-function describeDelegation(auth: KanbanAuthContext | undefined): Record<string, unknown> | null {
+function describeDelegation(auth: KanbanAuthContext | undefined): WorkspaceEventDelegationProvenance | null {
   if (!auth || auth.kind !== "agent") return null;
   return {
     sessionId: auth.sessionId,
@@ -992,6 +1037,7 @@ function createAuthConfig(options: CreateAppOptions = {}): AuthConfig {
 function requireAccessAuth(
   auth: AuthConfig,
   tokenStore: AgentTokenStore,
+  store: StateStore,
   missingRequiredConfig: string[] = auth.missingRequiredSecrets
 ): RequestHandler {
   return asyncHandler(async (req, res, next) => {
@@ -1003,7 +1049,7 @@ function requireAccessAuth(
       return;
     }
 
-    req.kanbanAuth = await authenticateRequest(req, auth, tokenStore);
+    req.kanbanAuth = await authenticateRequest(req, auth, tokenStore, store);
 
     if (!auth.accessAuthRequired || isAdminAuth(req) || isAgentAuth(req)) {
       next();
@@ -1019,7 +1065,12 @@ function requireAccessAuth(
   });
 }
 
-async function authenticateRequest(req: Request, auth: AuthConfig, tokenStore: AgentTokenStore): Promise<KanbanAuthContext> {
+async function authenticateRequest(
+  req: Request,
+  auth: AuthConfig,
+  tokenStore: AgentTokenStore,
+  store: StateStore
+): Promise<KanbanAuthContext> {
   const bearerToken = getBearerToken(req);
   if (bearerToken && hasValidAdminBearer(bearerToken, auth)) return breakGlassAdminContext("bearer");
 
@@ -1047,7 +1098,7 @@ async function authenticateRequest(req: Request, auth: AuthConfig, tokenStore: A
 
   if (auth.platformAuthConfigured) {
     const sessionResult = await getSession(toWebRequest(req));
-    if (sessionResult.ok) return sessionAuthContext(sessionResult.session);
+    if (sessionResult.ok) return sessionAuthContext(sessionResult.session, await readActiveProjectId(store));
   }
 
   if (!auth.accessAuthRequired && auth.localWriteOpen) return breakGlassAdminContext("local-open");
@@ -1108,7 +1159,7 @@ function safeEqual(left: unknown, right: unknown): boolean {
   return leftBuffer.length === rightBuffer.length && crypto.timingSafeEqual(leftBuffer, rightBuffer);
 }
 
-function sessionAuthContext(session: PlatformSession): SessionAdminAuthContext {
+function sessionAuthContext(session: PlatformSession, projectId: string = DEFAULT_PROJECT_ID): SessionAdminAuthContext {
   return {
     kind: "admin",
     method: "session",
@@ -1119,16 +1170,25 @@ function sessionAuthContext(session: PlatformSession): SessionAdminAuthContext {
     roles: session.roles,
     surfaceAccess: session.surfaceAccess,
     teamId: session.workspaceId,
-    projectId: DEFAULT_PROJECT_ID
+    projectId
   };
 }
 
-function publicSession(session: PlatformSession): PlatformSession & { teamId: string; projectId: string } {
+function publicSession(session: PlatformSession, projectId: string = DEFAULT_PROJECT_ID): PlatformSession & { teamId: string; projectId: string } {
   return {
     ...session,
     teamId: session.workspaceId,
-    projectId: DEFAULT_PROJECT_ID
+    projectId
   };
+}
+
+async function readActiveProjectId(store: StateStore): Promise<string> {
+  try {
+    const state = await store.read();
+    return state.activeProjectId || DEFAULT_PROJECT_ID;
+  } catch (_error) {
+    return DEFAULT_PROJECT_ID;
+  }
 }
 
 function isBrowserNavigation(req: Request): boolean {
@@ -1210,10 +1270,26 @@ function routeParam(req: Request, name: string): string {
   return value || "";
 }
 
+function queryString(value: unknown): string | null {
+  const raw = Array.isArray(value) ? value[0] : value;
+  return nullableString(raw);
+}
+
+function queryLimit(value: unknown): number | undefined {
+  const raw = Array.isArray(value) ? value[0] : value;
+  if (raw == null || raw === "") return undefined;
+  const limit = Number(raw);
+  return Number.isFinite(limit) ? limit : undefined;
+}
+
 function nullableString(value: unknown): string | null {
   if (value == null) return null;
   const text = String(value).trim();
   return text || null;
+}
+
+function isRecord(value: unknown): value is UnknownRecord {
+  return typeof value === "object" && value !== null;
 }
 
 export function startServer(options: CreateAppOptions = {}) {

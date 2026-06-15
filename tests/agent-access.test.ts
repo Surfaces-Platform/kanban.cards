@@ -81,6 +81,9 @@ test("scoped agent tokens are one-time, hashed, revocable, and board-agent limit
     });
     assert.equal(boardPatchDenied.status, 403);
 
+    const boardEventsDenied = await fetch(`${baseUrl}/api/boards/${board.id}/events`, { headers: agentHeaders });
+    assert.equal(boardEventsDenied.status, 403);
+
     const createdCard = await writeJson(`${baseUrl}/api/boards/${board.id}/work-items`, agentHeaders, {
       title: "Agent-owned card",
       laneId: board.lanes[0].id
@@ -113,6 +116,15 @@ test("scoped agent tokens are one-time, hashed, revocable, and board-agent limit
     });
     assert.equal(comment.author, "agent-a");
 
+    const cardEvents = await getJson(`${baseUrl}/api/boards/${board.id}/events?cardId=${encodeURIComponent(createdCard.id)}&limit=10`, bearerHeaders(adminToken));
+    const agentCommentEvent = cardEvents.events.find((event: any) => event.payload.reason === "comment_created");
+    assert.equal(agentCommentEvent.payload.actor.type, "agent");
+    assert.equal(agentCommentEvent.payload.actor.agentId, "agent-a");
+    assert.equal(agentCommentEvent.payload.delegation.sessionId, createdToken.sessionId);
+    assert.deepEqual(agentCommentEvent.payload.delegation.capabilities, ["view", "create", "update", "comment", "move"]);
+    assert.equal(JSON.stringify(cardEvents).includes(hashAgentToken(createdToken.token)), false);
+    assert.equal(JSON.stringify(cardEvents).includes(createdToken.token), false);
+
     const wrongOwner = await fetch(`${baseUrl}/api/boards/${board.id}/work-items`, {
       method: "POST",
       headers: { ...agentHeaders, "Content-Type": "application/json" },
@@ -135,6 +147,73 @@ test("scoped agent tokens are one-time, hashed, revocable, and board-agent limit
       body: JSON.stringify({ laneId: board.lanes[1].id })
     });
     assert.equal(otherPatch.status, 403);
+
+    const viewOnlyToken = await writeJson(`${baseUrl}/api/boards/${board.id}/agent-tokens`, bearerHeaders(adminToken), {
+      agentId: "agent-a",
+      label: "View only",
+      capabilities: ["view"]
+    });
+    const viewOnlyHeaders = bearerHeaders(viewOnlyToken.token);
+    const visibleBoard = await getJson(`${baseUrl}/api/boards/${board.id}`, viewOnlyHeaders);
+    assert.equal(visibleBoard.id, board.id);
+    const createDenied = await fetch(`${baseUrl}/api/boards/${board.id}/work-items`, {
+      method: "POST",
+      headers: { ...viewOnlyHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: "Denied by missing create",
+        laneId: board.lanes[0].id
+      })
+    });
+    assert.equal(createDenied.status, 403);
+
+    const createOnlyToken = await writeJson(`${baseUrl}/api/boards/${board.id}/agent-tokens`, bearerHeaders(adminToken), {
+      agentId: "agent-a",
+      label: "Create only",
+      capabilities: ["create"]
+    });
+    const viewDenied = await fetch(`${baseUrl}/api/boards/${board.id}`, {
+      headers: bearerHeaders(createOnlyToken.token)
+    });
+    assert.equal(viewDenied.status, 403);
+
+    const noMoveToken = await writeJson(`${baseUrl}/api/boards/${board.id}/agent-tokens`, bearerHeaders(adminToken), {
+      agentId: "agent-a",
+      label: "No move",
+      capabilities: ["view", "create", "update", "comment"]
+    });
+    const moveDenied = await fetch(`${baseUrl}/api/boards/${board.id}/work-items/${createdCard.id}`, {
+      method: "PATCH",
+      headers: { ...bearerHeaders(noMoveToken.token), "Content-Type": "application/json" },
+      body: JSON.stringify({ laneId: board.lanes[0].id })
+    });
+    assert.equal(moveDenied.status, 403);
+
+    const noUpdateToken = await writeJson(`${baseUrl}/api/boards/${board.id}/agent-tokens`, bearerHeaders(adminToken), {
+      agentId: "agent-a",
+      label: "No update",
+      capabilities: ["view", "create", "comment", "move"]
+    });
+    const updateDenied = await fetch(`${baseUrl}/api/boards/${board.id}/work-items/${createdCard.id}`, {
+      method: "PATCH",
+      headers: { ...bearerHeaders(noUpdateToken.token), "Content-Type": "application/json" },
+      body: JSON.stringify({ summary: "Denied by missing update" })
+    });
+    assert.equal(updateDenied.status, 403);
+
+    const noCommentToken = await writeJson(`${baseUrl}/api/boards/${board.id}/agent-tokens`, bearerHeaders(adminToken), {
+      agentId: "agent-a",
+      label: "No comment",
+      capabilities: ["view", "create", "update", "move"]
+    });
+    const commentDenied = await fetch(`${baseUrl}/api/boards/${board.id}/work-items/${createdCard.id}/comments`, {
+      method: "POST",
+      headers: { ...bearerHeaders(noCommentToken.token), "Content-Type": "application/json" },
+      body: JSON.stringify({
+        kind: "progress",
+        text: "Denied by missing comment"
+      })
+    });
+    assert.equal(commentDenied.status, 403);
 
     const revoked = await fetch(`${baseUrl}/api/boards/${board.id}/agent-tokens/${createdToken.id}`, {
       method: "DELETE",

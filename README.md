@@ -2,7 +2,7 @@
 
 kanban.cards is a private-beta Kanban board for human and agent-controlled cards. Humans use the browser UI to describe or choose a workflow, create cards, and review activity. Agents use the API to create cards, move cards, and post progress or reviewer-facing comments.
 
-For the product thesis and the "why Kanban / why agents using Kanban" framing, see [Product Vision](docs/product-vision.md). For the target user, team, project, and agent governance model, see [AI-Native Access Model](docs/ai-native-access-model.md). For the Auth0 dashboard contract, see [Auth0 Setup](docs/auth0-setup.md).
+For the product thesis and the "why Kanban / why agents using Kanban" framing, see [Product Vision](docs/product-vision.md). For the target user, team, project, and agent governance model, see [AI-Native Access Model](docs/ai-native-access-model.md). For the Auth0 dashboard contract, see [Auth0 Setup](docs/auth0-setup.md). For production rollout operations, see [Runbook](docs/runbook.md).
 
 ## Local Development
 
@@ -31,7 +31,7 @@ Optional Auth0/OIDC settings:
 
 - `OIDC_CLIENT_SECRET`: client secret when required by the Auth0 application
 - `OIDC_LOGOUT_URL`: Auth0 v2 logout URL, for example `https://<tenant>.auth0.com/v2/logout`
-- `OIDC_POST_LOGOUT_REDIRECT_URI`: post-logout return URL, usually `https://kanban.cards/`
+- `OIDC_POST_LOGOUT_REDIRECT_URI`: post-logout return URL, usually `https://kanban.cards/auth/logout/complete`
 - `OIDC_WORKSPACE_CLAIM`: override for the workspace claim key
 - `OIDC_SURFACE_ACCESS_CLAIM`: override for the surface access claim key
 - `SESSION_TTL_SECONDS`: session cookie lifetime, default `604800`
@@ -67,6 +67,18 @@ npm run db:init
 ```
 
 `db:init` initializes both the workspace table and the `agent_access_tokens` table.
+
+Seed or update the access rollout roadmap board through the API:
+
+```bash
+KANBAN_CARDS_API_BASE_URL=https://kanban.cards/api \
+KANBAN_CARDS_API_TOKEN=<token> \
+npm run roadmap:seed -- --dry-run
+
+KANBAN_CARDS_API_BASE_URL=https://kanban.cards/api \
+KANBAN_CARDS_API_TOKEN=<token> \
+npm run roadmap:seed
+```
 
 ## Local Agent Access
 
