@@ -5,15 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { createFileEventStore, createPostgresEventStore } from "../src/event-store";
-
-type QueryResult = { rows: any[] };
-type EventRow = {
-  id: string;
-  type: string;
-  board_id: string | null;
-  payload: Record<string, unknown>;
-  created_at: Date;
-};
+import { FakePostgresEventPool } from "./helpers/postgres-fakes";
 
 test("file event store appends and lists events after a cursor", async () => {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-events-file-"));
@@ -39,7 +31,7 @@ test("file event store appends and lists events after a cursor", async () => {
 });
 
 test("Postgres event store initializes and lists events after a cursor", async () => {
-  const pool = new FakeEventPool();
+  const pool = new FakePostgresEventPool();
   const store = createPostgresEventStore({ pool: pool as any });
 
   assert.equal(await store.latestId(), null);
@@ -54,43 +46,11 @@ test("Postgres event store initializes and lists events after a cursor", async (
   assert.equal(afterFirst.length, 1);
   assert.equal(afterFirst[0].id, second.id);
   assert.equal(afterFirst[0].payload.reason, "card_updated");
+
+  const third = await store.append({ type: "workspace_changed", boardId: "board-2", payload: { reason: "other_board_updated" } });
+  const recentBoardEvents = await store.listRecent({ boardId: "board-1", limit: 1 });
+  assert.equal(third.id, "3");
+  assert.equal(recentBoardEvents.length, 1);
+  assert.equal(recentBoardEvents[0].id, second.id);
+  assert.equal(recentBoardEvents[0].payload.reason, "card_updated");
 });
-
-class FakeEventPool {
-  events: EventRow[] = [];
-
-  async query(sql: string, args: any[] = []): Promise<QueryResult> {
-    const normalizedSql = sql.replace(/\s+/g, " ").trim().toUpperCase();
-    if (normalizedSql.startsWith("CREATE TABLE") || normalizedSql.startsWith("CREATE INDEX")) {
-      return { rows: [] };
-    }
-
-    if (normalizedSql.startsWith("INSERT INTO")) {
-      const event = {
-        id: String(this.events.length + 1),
-        type: args[0],
-        board_id: args[1],
-        payload: JSON.parse(args[2] || "{}"),
-        created_at: new Date()
-      };
-      this.events.push(event);
-      return { rows: [event] };
-    }
-
-    if (normalizedSql.startsWith("SELECT ID::TEXT")) {
-      const since = BigInt(String(args[0] || "0"));
-      const limit = Number(args[1] || 200);
-      return {
-        rows: this.events
-          .filter((event) => BigInt(event.id) > since)
-          .slice(0, limit)
-      };
-    }
-
-    if (normalizedSql.startsWith("SELECT MAX(ID)::TEXT")) {
-      return { rows: [{ id: this.events.at(-1)?.id || null }] };
-    }
-
-    throw new Error(`Unexpected SQL: ${sql}`);
-  }
-}

@@ -267,6 +267,101 @@ test("team invite acceptance hashes one-time tokens and grants member-scoped car
   });
 });
 
+test("card and state writes validate member references against board project access", async () => {
+  await withPlatformAuthEnv(async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-member-reference-validation-"));
+    const dataPath = path.join(tempDir, "state.json");
+    const server = await listen(createApp({ dataPath, requireAuth: true, apiToken: "admin-token" }));
+    const baseUrl = `http://127.0.0.1:${serverPort(server)}`;
+    const ownerCookie = await sessionCookie("auth0|member-ref-owner", "owner-ref@example.com", "Owner Ref", "ws_member_refs");
+    const scopedCookie = await sessionCookie("auth0|member-ref-scoped", "scoped-ref@example.com", "Scoped Ref", "ws_member_refs");
+
+    try {
+      await getJson(`${baseUrl}/auth/session`, cookieHeaders(ownerCookie));
+      const project = await writeJson(`${baseUrl}/api/projects`, cookieHeaders(ownerCookie), { name: "Validated member refs", active: true });
+      const otherProject = await writeJson(`${baseUrl}/api/projects`, cookieHeaders(ownerCookie), { name: "Other member refs", active: false });
+      const board = await writeJson(`${baseUrl}/api/boards`, cookieHeaders(ownerCookie), {
+        name: "Member reference board",
+        projectId: project.id,
+        lanes: [
+          {
+            id: "todo",
+            title: "To do",
+            description: "",
+            defaultOwnerAgentId: null,
+            defaultReviewerAgentId: null,
+            gate: { title: "To do gate", checks: ["Ready"] }
+          }
+        ],
+        agentSpecs: []
+      });
+
+      const ownerTeam = await getJson(`${baseUrl}/api/team`, cookieHeaders(ownerCookie));
+      const ownerMember = ownerTeam.currentMember;
+      assert.ok(ownerMember);
+
+      const invitePayload = await writeJson(`${baseUrl}/api/team/invites`, cookieHeaders(ownerCookie), {
+        email: "scoped-ref@example.com",
+        role: "member",
+        projectIds: [otherProject.id]
+      });
+      const inviteToken = new URL(invitePayload.acceptUrl).searchParams.get("token") || "";
+      await writeJson(`${baseUrl}/api/invites/accept`, cookieHeaders(scopedCookie), { token: inviteToken });
+      const teamAfterInvite = await getJson(`${baseUrl}/api/team`, cookieHeaders(ownerCookie));
+      const scopedMember = teamAfterInvite.members.find((member: any) => member.email === "scoped-ref@example.com");
+      assert.ok(scopedMember);
+
+      const invalidCreate = await fetch(`${baseUrl}/api/boards/${board.id}/work-items`, {
+        method: "POST",
+        headers: { ...cookieHeaders(ownerCookie), "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: "Invalid requester",
+          laneId: "todo",
+          requesterMemberId: "missing-member"
+        })
+      });
+      assert.equal(invalidCreate.status, 400);
+
+      const card = await writeJson(`${baseUrl}/api/boards/${board.id}/work-items`, cookieHeaders(ownerCookie), {
+        title: "Valid member references",
+        laneId: "todo",
+        requesterMemberId: ownerMember.id,
+        ownerMemberId: ownerMember.id,
+        reviewerMemberId: null
+      });
+      assert.equal(card.requesterMemberId, ownerMember.id);
+      assert.equal(card.ownerMemberId, ownerMember.id);
+      assert.equal(card.reviewerMemberId, null);
+
+      const invalidPatch = await fetch(`${baseUrl}/api/boards/${board.id}/work-items/${card.id}`, {
+        method: "PATCH",
+        headers: { ...cookieHeaders(ownerCookie), "Content-Type": "application/json" },
+        body: JSON.stringify({ reviewerMemberId: scopedMember.id })
+      });
+      assert.equal(invalidPatch.status, 400);
+
+      const cleared = await writeJson(`${baseUrl}/api/boards/${board.id}/work-items/${card.id}`, cookieHeaders(ownerCookie), {
+        ownerMemberId: ""
+      }, "PATCH");
+      assert.equal(cleared.ownerMemberId, null);
+
+      const state = await getJson(`${baseUrl}/api/state`, cookieHeaders(ownerCookie));
+      const stateBoard = state.boards.find((candidate: any) => candidate.id === board.id);
+      const stateCard = stateBoard.workItems.find((candidate: any) => candidate.id === card.id);
+      stateCard.reviewerMemberId = "missing-member";
+      const invalidStateWrite = await fetch(`${baseUrl}/api/state`, {
+        method: "PUT",
+        headers: { ...cookieHeaders(ownerCookie), "Content-Type": "application/json" },
+        body: JSON.stringify(state)
+      });
+      assert.equal(invalidStateWrite.status, 400);
+    } finally {
+      await closeServer(server);
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
 test("admins can invite admins and members but cannot manage owners", async () => {
   await withPlatformAuthEnv(async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-team-admins-"));

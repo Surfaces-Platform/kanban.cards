@@ -162,6 +162,53 @@ interface FlowApplyResult {
   board: Board;
   warnings: string[];
   movedCards: Array<{ cardId: string; title: string; fromLaneId: string; toLaneId: string }>;
+  removedAgents: RemovedAgentSummary[];
+  clearedAssignments: ClearedAgentAssignmentSummary[];
+  revokedAgentSessions: RevokedAgentSessionSummary[];
+}
+
+type AgentAssignmentField = "ownerAgentId" | "reviewerAgentId";
+type WorkItemMemberField = "requesterMemberId" | "ownerMemberId" | "reviewerMemberId";
+
+interface RemovedAgentSummary {
+  agentId: string;
+  name: string;
+}
+
+interface ClearedAgentAssignmentSummary {
+  cardId: string;
+  title: string;
+  field: AgentAssignmentField;
+  agentId: string;
+}
+
+interface AgentReconciliationResult {
+  removedAgents: RemovedAgentSummary[];
+  removedAgentIds: string[];
+  clearedAssignments: ClearedAgentAssignmentSummary[];
+}
+
+interface BoardAgentReconciliationResult {
+  board: Board;
+  reconciliation: AgentReconciliationResult;
+}
+
+interface BoardAgentReconciliationSnapshot {
+  agentSpecs: AgentSpec[];
+  workItems: Array<Pick<WorkItem, "id" | "title" | "ownerAgentId" | "reviewerAgentId">>;
+}
+
+interface RevokedAgentSessionSummary {
+  id: string;
+  sessionId: string;
+  agentId: string;
+  label: string;
+  last4: string;
+  delegatedBy: string | null;
+  capabilities: string[];
+  expiresAt: string | null;
+  reason: string;
+  revokedAt: string | null;
 }
 
 interface AuthConfig {
@@ -190,6 +237,7 @@ const MIN_FLOW_LANES = 2;
 const MAX_FLOW_LANES = 8;
 const AGENT_SESSION_CAPABILITIES: AgentCapability[] = ["view", "create", "update", "comment", "move"];
 const AGENT_SESSION_CAPABILITY_SET = new Set<string>(AGENT_SESSION_CAPABILITIES);
+const WORK_ITEM_MEMBER_FIELDS: WorkItemMemberField[] = ["requesterMemberId", "ownerMemberId", "reviewerMemberId"];
 const FALLBACK_INDEX_HTML = `<!doctype html>
 <html lang="en">
 <head>
@@ -433,12 +481,40 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
 
   app.put("/api/state", requireWriteAuth(), asyncHandler(async (req, res) => {
     if (isAgentAuth(req)) throw httpError(403, "Agent tokens cannot write full workspace state.");
+    let agentReconciliations: BoardAgentReconciliationResult[] = [];
     const { state: saved } = await store.update((current) => {
       const next = normalizeWorkspace(req.body);
+      const previousAgentSnapshotsByBoardId = snapshotBoardAgentReconciliationState(current);
+      assertWorkspaceMemberReferences(current, next);
       assertWorkspaceWriteAllowed(req, current, next);
       applyWorkspaceStateWrite(req, current, next);
+      agentReconciliations = reconcileWorkspaceStateRemovedAgentReferences(current, previousAgentSnapshotsByBoardId);
     });
-    await publishWorkspaceEvent(req, null, "update", { type: "workspace" }, "workspace_saved");
+    const agentReconciliationEvents = [];
+    for (const agentReconciliation of agentReconciliations) {
+      const revokedAgentSessions = await revokeActiveAgentSessionsForRemovedAgents(
+        req,
+        agentReconciliation.board,
+        agentReconciliation.reconciliation.removedAgents,
+        "agent_removed_from_state"
+      );
+      agentReconciliationEvents.push({
+        boardId: agentReconciliation.board.id,
+        boardName: agentReconciliation.board.name,
+        projectId: agentReconciliation.board.projectId,
+        removedAgents: agentReconciliation.reconciliation.removedAgents,
+        clearedAssignments: agentReconciliation.reconciliation.clearedAssignments,
+        revokedAgentSessions
+      });
+    }
+    await publishWorkspaceEvent(
+      req,
+      null,
+      "update",
+      { type: "workspace" },
+      "workspace_saved",
+      agentReconciliationEvents.length ? { agentReconciliations: agentReconciliationEvents } : {}
+    );
     res.json(publicWorkspaceState(saved, req.kanbanAuth));
   }));
 
@@ -671,15 +747,24 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       assertProjectManager(req, board.projectId);
       return applyFlowDraftToBoard(board, draft, flowPrompt);
     });
+    const revokedAgentSessions = await revokeActiveAgentSessionsForRemovedAgents(
+      req,
+      result.board,
+      result.removedAgents,
+      "agent_removed_from_flow"
+    );
+    const response: FlowApplyResult = { ...result, revokedAgentSessions };
     await publishWorkspaceEvent(req, boardId, "update", { type: "board_flow", id: boardId }, "board_flow_applied", {
-      projectId: result.board.projectId,
+      projectId: response.board.projectId,
       source,
-      warnings: result.warnings,
-      movedCards: result.movedCards,
-      laneCount: result.board.lanes.length,
-      agentCount: result.board.agentSpecs.length
+      warnings: response.warnings,
+      movedCards: response.movedCards,
+      clearedAssignments: response.clearedAssignments,
+      revokedAgentSessions: response.revokedAgentSessions,
+      laneCount: response.board.lanes.length,
+      agentCount: response.board.agentSpecs.length
     });
-    res.json(result);
+    res.json(response);
   }));
 
   app.get("/api/agent/instructions", requireAgentCapability("view"), asyncHandler(async (req, res) => {
@@ -886,6 +971,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       if (!findProject(state, projectId)) throw httpError(404, "Project not found.");
       assertProjectManager(req, projectId);
       const board = createBoard({ ...(req.body || {}), projectId });
+      assertBoardMemberReferences(state, board);
       state.boards.push(board);
       state.activeBoardId = board.id;
       return board;
@@ -900,11 +986,14 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       const board = findBoard(state, boardId);
       if (!board) throw httpError(404, "Board not found.");
       assertProjectManager(req, board.projectId);
+      const previousAgentSpecs = board.agentSpecs.map((agent) => ({ ...agent, laneIds: [...agent.laneIds] }));
+      let projectChanged = false;
       if (typeof req.body.name === "string") board.name = req.body.name;
       if (typeof req.body.projectId === "string" && req.body.projectId !== board.projectId) {
         if (!findProject(state, req.body.projectId)) throw httpError(404, "Project not found.");
         assertProjectManager(req, req.body.projectId);
         board.projectId = req.body.projectId;
+        projectChanged = true;
       }
       if (typeof req.body.flowPrompt === "string") board.flowPrompt = req.body.flowPrompt;
       if (Object.prototype.hasOwnProperty.call(req.body, "configDraft")) board.configDraft = req.body.configDraft;
@@ -912,11 +1001,25 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       if (Array.isArray(req.body.lanes)) board.lanes = req.body.lanes;
       if (Array.isArray(req.body.agentSpecs)) board.agentSpecs = req.body.agentSpecs;
       if (req.body.active === true) state.activeBoardId = board.id;
+      const reconciliation = Array.isArray(req.body.agentSpecs)
+        ? reconcileRemovedAgentReferences(board, previousAgentSpecs)
+        : emptyAgentReconciliation();
+      if (projectChanged) assertBoardMemberReferences(state, board);
       touchBoard(board);
-      return board;
+      return { board, reconciliation };
     });
-    await publishWorkspaceEvent(req, result.id, "update", { type: "board", id: result.id }, "board_updated", { projectId: result.projectId });
-    res.json(result);
+    const revokedAgentSessions = await revokeActiveAgentSessionsForRemovedAgents(
+      req,
+      result.board,
+      result.reconciliation.removedAgents,
+      "agent_removed_from_board"
+    );
+    await publishWorkspaceEvent(req, result.board.id, "update", { type: "board", id: result.board.id }, "board_updated", {
+      projectId: result.board.projectId,
+      clearedAssignments: result.reconciliation.clearedAssignments,
+      revokedAgentSessions
+    });
+    res.json(result.board);
   }));
 
   app.post("/api/boards/:boardId/work-items", requireWriteAuth(), requireAgentCapability("create"), asyncHandler(async (req, res) => {
@@ -928,6 +1031,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       requireBoardProjectAccess(req, board);
       if (!String(req.body.title || "").trim()) throw httpError(400, "Card title is required.");
       const input = isAgentAuth(req) ? withAgentCreateDefaults(req, req.body || {}) : req.body;
+      assertWorkItemMemberReferences(state, board, input || {});
       const item = createWorkItem(input, board);
       if (!item) throw httpError(400, "Card is invalid.");
       if (isAgentAuth(req) && !isItemAssignedToAgent(item, req.kanbanAuth.agentId)) {
@@ -956,6 +1060,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
         throw httpError(403, "Agent tokens can only update cards assigned to that agent.");
       }
       if (isAgentAuth(req)) assertAgentWorkItemPatchAllowed(req.body || {});
+      assertWorkItemMemberReferences(state, board, req.body || {});
       applyWorkItemPatch(board, item, req.body || {});
       if (isAgentAuth(req) && !isItemAssignedToAgent(item, req.kanbanAuth.agentId)) {
         throw httpError(403, "Agent tokens cannot remove themselves from an assigned card.");
@@ -1111,6 +1216,39 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     });
     notifyEventSubscribers(eventSubscribers);
     return event;
+  }
+
+  async function revokeActiveAgentSessionsForRemovedAgents(
+    req: Request,
+    board: Board,
+    removedAgents: RemovedAgentSummary[],
+    revocationReason: string
+  ): Promise<RevokedAgentSessionSummary[]> {
+    if (!removedAgents.length) return [];
+    const removedAgentIds = new Set(removedAgents.map((agent) => agent.agentId));
+    const activeSessions = await tokenStore.list(board.id);
+    const revokedAgentSessions: RevokedAgentSessionSummary[] = [];
+
+    for (const activeSession of activeSessions) {
+      if (!removedAgentIds.has(activeSession.agentId)) continue;
+      const tokenRecord = await tokenStore.revokeSession(board.id, activeSession.sessionId);
+      if (!tokenRecord) continue;
+      const summary = summarizeRevokedAgentSession(tokenRecord);
+      revokedAgentSessions.push(summary);
+      await publishWorkspaceEvent(
+        req,
+        board.id,
+        "revoke",
+        { type: "agent_session", id: tokenRecord.sessionId },
+        "agent_session_revoked",
+        agentSessionEventPayload(board, tokenRecord, {
+          revocationReason,
+          removedAgentId: tokenRecord.agentId
+        })
+      );
+    }
+
+    return revokedAgentSessions;
   }
 
   async function streamWorkspaceEvents(req: Request, res: Response): Promise<void> {
@@ -1357,6 +1495,7 @@ function parseBoardDraftInput(value: unknown): BoardDraft {
 
 function applyFlowDraftToBoard(board: Board, draft: BoardDraft, flowPrompt: string | undefined): FlowApplyResult {
   const oldLanes = board.lanes || [];
+  const previousAgentSpecs = board.agentSpecs.map((agent) => ({ ...agent, laneIds: [...agent.laneIds] }));
   const newLaneById = new Set(draft.lanes.map((lane) => lane.id));
   const titleToNewLane = new Map(draft.lanes.map((lane) => [normalizeLaneTitle(lane.title), lane.id]));
   const fallbackLaneId = draft.lanes[0]?.id || "";
@@ -1380,16 +1519,200 @@ function applyFlowDraftToBoard(board: Board, draft: BoardDraft, flowPrompt: stri
 
   board.lanes = draft.lanes;
   board.agentSpecs = draft.agentSpecs || [];
+  const reconciliation = reconcileRemovedAgentReferences(board, previousAgentSpecs);
+  if (reconciliation.clearedAssignments.length) {
+    warnings.push(`${reconciliation.clearedAssignments.length} agent assignment${reconciliation.clearedAssignments.length === 1 ? "" : "s"} cleared because removed agents were not in the new flow.`);
+  }
   board.selectedId = board.workItems.some((item) => item.id === board.selectedId) ? board.selectedId : null;
   board.configDraft = null;
   board.isEditingFlow = false;
   if (typeof flowPrompt === "string") board.flowPrompt = flowPrompt;
   touchBoard(board);
-  return { board, warnings, movedCards };
+  return {
+    board,
+    warnings,
+    movedCards,
+    removedAgents: reconciliation.removedAgents,
+    clearedAssignments: reconciliation.clearedAssignments,
+    revokedAgentSessions: []
+  };
 }
 
 function normalizeLaneTitle(value: unknown): string {
   return String(value || "").trim().toLowerCase();
+}
+
+function emptyAgentReconciliation(): AgentReconciliationResult {
+  return {
+    removedAgents: [],
+    removedAgentIds: [],
+    clearedAssignments: []
+  };
+}
+
+function snapshotBoardAgentReconciliationState(state: WorkspaceState): Map<string, BoardAgentReconciliationSnapshot> {
+  return new Map(state.boards.map((board) => [
+    board.id,
+    {
+      agentSpecs: board.agentSpecs.map((agent) => ({ ...agent, laneIds: [...agent.laneIds] })),
+      workItems: board.workItems.map((item) => ({
+        id: item.id,
+        title: item.title,
+        ownerAgentId: item.ownerAgentId,
+        reviewerAgentId: item.reviewerAgentId
+      }))
+    }
+  ]));
+}
+
+function reconcileWorkspaceStateRemovedAgentReferences(
+  state: WorkspaceState,
+  previousAgentSnapshotsByBoardId: Map<string, BoardAgentReconciliationSnapshot>
+): BoardAgentReconciliationResult[] {
+  const results: BoardAgentReconciliationResult[] = [];
+
+  for (const board of state.boards) {
+    const previousSnapshot = previousAgentSnapshotsByBoardId.get(board.id);
+    if (!previousSnapshot) continue;
+    const reconciliation = reconcileRemovedAgentReferences(board, previousSnapshot.agentSpecs);
+    if (!reconciliation.removedAgents.length) continue;
+    reconciliation.clearedAssignments = mergeClearedAssignments(
+      reconciliation.clearedAssignments,
+      summarizeRemovedAgentAssignments(previousSnapshot, reconciliation.removedAgentIds)
+    );
+    touchBoard(board);
+    results.push({ board, reconciliation });
+  }
+
+  return results;
+}
+
+function summarizeRemovedAgentAssignments(
+  previousSnapshot: BoardAgentReconciliationSnapshot,
+  removedAgentIds: string[]
+): ClearedAgentAssignmentSummary[] {
+  const removedAgentIdSet = new Set(removedAgentIds);
+  const clearedAssignments: ClearedAgentAssignmentSummary[] = [];
+  for (const item of previousSnapshot.workItems) {
+    if (item.ownerAgentId && removedAgentIdSet.has(item.ownerAgentId)) {
+      clearedAssignments.push({
+        cardId: item.id,
+        title: item.title,
+        field: "ownerAgentId",
+        agentId: item.ownerAgentId
+      });
+    }
+    if (item.reviewerAgentId && removedAgentIdSet.has(item.reviewerAgentId)) {
+      clearedAssignments.push({
+        cardId: item.id,
+        title: item.title,
+        field: "reviewerAgentId",
+        agentId: item.reviewerAgentId
+      });
+    }
+  }
+  return clearedAssignments;
+}
+
+function mergeClearedAssignments(
+  first: ClearedAgentAssignmentSummary[],
+  second: ClearedAgentAssignmentSummary[]
+): ClearedAgentAssignmentSummary[] {
+  const assignments = new Map<string, ClearedAgentAssignmentSummary>();
+  for (const assignment of [...first, ...second]) {
+    assignments.set(`${assignment.cardId}:${assignment.field}:${assignment.agentId}`, assignment);
+  }
+  return [...assignments.values()];
+}
+
+function reconcileRemovedAgentReferences(board: Board, previousAgentSpecs: AgentSpec[]): AgentReconciliationResult {
+  const currentAgentIds = new Set(board.agentSpecs.map((agent) => agent.id));
+  const removedAgents = previousAgentSpecs
+    .filter((agent) => !currentAgentIds.has(agent.id))
+    .map((agent) => ({ agentId: agent.id, name: agent.name }));
+  if (!removedAgents.length) return emptyAgentReconciliation();
+
+  const removedAgentIds = removedAgents.map((agent) => agent.agentId);
+  const removedAgentIdSet = new Set(removedAgentIds);
+  const clearedAssignments: ClearedAgentAssignmentSummary[] = [];
+
+  for (const lane of board.lanes) {
+    if (lane.defaultOwnerAgentId && removedAgentIdSet.has(lane.defaultOwnerAgentId)) lane.defaultOwnerAgentId = null;
+    if (lane.defaultReviewerAgentId && removedAgentIdSet.has(lane.defaultReviewerAgentId)) lane.defaultReviewerAgentId = null;
+  }
+
+  for (const item of board.workItems) {
+    let changed = false;
+    if (item.ownerAgentId && removedAgentIdSet.has(item.ownerAgentId)) {
+      clearedAssignments.push({
+        cardId: item.id,
+        title: item.title,
+        field: "ownerAgentId",
+        agentId: item.ownerAgentId
+      });
+      item.ownerAgentId = null;
+      changed = true;
+    }
+    if (item.reviewerAgentId && removedAgentIdSet.has(item.reviewerAgentId)) {
+      clearedAssignments.push({
+        cardId: item.id,
+        title: item.title,
+        field: "reviewerAgentId",
+        agentId: item.reviewerAgentId
+      });
+      item.reviewerAgentId = null;
+      changed = true;
+    }
+    if (changed) touchWorkItem(item);
+  }
+
+  return { removedAgents, removedAgentIds, clearedAssignments };
+}
+
+function assertWorkspaceMemberReferences(current: WorkspaceState, next: WorkspaceState): void {
+  const boardsById = new Map(current.boards.map((board) => [board.id, board]));
+  for (const board of next.boards) {
+    assertBoardMemberReferences(current, {
+      ...board,
+      projectId: board.projectId || boardsById.get(board.id)?.projectId || DEFAULT_PROJECT_ID
+    });
+  }
+}
+
+function assertBoardMemberReferences(state: WorkspaceState, board: Board): void {
+  for (const item of board.workItems) {
+    assertWorkItemMemberReferences(state, board, item);
+  }
+}
+
+function assertWorkItemMemberReferences(state: WorkspaceState, board: Board, value: Partial<Record<WorkItemMemberField, unknown>>): void {
+  for (const field of WORK_ITEM_MEMBER_FIELDS) {
+    const memberId = nullableString(value[field]);
+    if (!memberId) continue;
+    const member = findTeamMember(state, memberId);
+    if (!member || member.teamId !== state.team.id || !teamMemberHasProjectAccess(member, board.projectId)) {
+      throw httpError(400, `${field} must reference a team member with access to this board.`);
+    }
+  }
+}
+
+function teamMemberHasProjectAccess(member: TeamMember, projectId: string): boolean {
+  return member.projectIds.includes("*") || member.projectIds.includes(projectId);
+}
+
+function summarizeRevokedAgentSession(tokenRecord: PublicTokenRecord): RevokedAgentSessionSummary {
+  return {
+    id: tokenRecord.id,
+    sessionId: tokenRecord.sessionId,
+    agentId: tokenRecord.agentId,
+    label: tokenRecord.label,
+    last4: tokenRecord.last4,
+    delegatedBy: tokenRecord.delegatedBy,
+    capabilities: [...tokenRecord.capabilities],
+    expiresAt: tokenRecord.expiresAt,
+    reason: tokenRecord.reason,
+    revokedAt: tokenRecord.revokedAt
+  };
 }
 
 const FLOW_AI_RESPONSE_SCHEMA = {
