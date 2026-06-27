@@ -77,10 +77,33 @@ test("Postgres agent token store persists hashes and supports verify and revoke"
   assert.equal(verified.agentId, "agent-a");
   assert.ok(verified.lastUsedAt);
 
-  const revoked = await store.revoke("board-1", created.tokenRecord.id);
+  const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+  const updated = await store.update("board-1", created.tokenRecord.sessionId, {
+    label: "View-only laptop",
+    capabilities: ["view"],
+    expiresAt,
+    reason: "Limited visibility."
+  });
+  assert.ok(updated);
+  assert.equal(updated.label, "View-only laptop");
+  assert.deepEqual(updated.capabilities, ["view"]);
+  assert.equal(updated.reason, "Limited visibility.");
+  assert.equal(Object.hasOwn(updated, "tokenHash"), false);
+
+  const sessionRevoked = await store.revokeSession("board-1", created.tokenRecord.sessionId);
+  assert.ok(sessionRevoked);
+  assert.ok(sessionRevoked.revokedAt);
+  assert.equal(await store.verify(created.token), null);
+
+  const compatibilityToken = await store.create({
+    boardId: "board-1",
+    agentId: "agent-a",
+    label: "Compatibility token"
+  });
+  const revoked = await store.revoke("board-1", compatibilityToken.tokenRecord.id);
   assert.ok(revoked);
   assert.ok(revoked.revokedAt);
-  assert.equal(await store.verify(created.token), null);
+  assert.equal(await store.verify(compatibilityToken.token), null);
 });
 
 test("Postgres connection strings use explicit SSL mode to avoid pg runtime warnings", () => {
@@ -201,8 +224,22 @@ class FakeTokenPool {
       return { rows: [publicTokenRow(token)] };
     }
 
+    if (normalizedSql.startsWith("UPDATE") && normalizedSql.includes("SET LABEL = CASE")) {
+      const token = this.tokens.find((candidate: TokenRow) => candidate.board_id === args[0] && candidate.session_id === args[1] && !candidate.revoked_at);
+      if (!token) return { rows: [] };
+      if (args[2]) token.label = args[3];
+      if (args[4]) token.capabilities = JSON.parse(args[5]);
+      if (args[6]) token.expires_at = args[7] ? new Date(args[7]) : null;
+      if (args[8]) token.reason = args[9];
+      return { rows: [publicTokenRow(token)] };
+    }
+
     if (normalizedSql.startsWith("UPDATE") && normalizedSql.includes("SET REVOKED_AT")) {
-      const token = this.tokens.find((candidate: TokenRow) => candidate.board_id === args[0] && candidate.id === args[1]);
+      const usesSessionId = normalizedSql.includes("SESSION_ID = $2");
+      const token = this.tokens.find((candidate: TokenRow) =>
+        candidate.board_id === args[0] &&
+        (usesSessionId ? candidate.session_id === args[1] : candidate.id === args[1])
+      );
       if (!token) return { rows: [] };
       token.revoked_at = token.revoked_at || new Date();
       return { rows: [publicTokenRow(token)] };

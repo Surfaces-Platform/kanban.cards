@@ -39,6 +39,7 @@ const DEFAULT_PROJECT_NAME = "kanban.cards";
 const TEAM_ROLES = new Set<TeamRole>(["owner", "admin", "member"]);
 const TEAM_INVITE_STATUSES = new Set<TeamInviteStatus>(["pending", "accepted", "revoked"]);
 type UnknownRecord = Record<string, any>;
+type AliasMap = Map<string, string>;
 
 export function createStateStore(options: StateStoreOptions | string = {}): StateStore {
   if (typeof options === "string") return createFileStateStore(options);
@@ -398,15 +399,23 @@ function normalizeTeamInvite(rawInvite: unknown, fallbackTeamId: string = DEFAUL
 function normalizeBoard(rawBoard: unknown, fallbackProjectId: string = DEFAULT_PROJECT_ID, projectIds: Set<string> = new Set([DEFAULT_PROJECT_ID])): Board | null {
   if (!isRecord(rawBoard)) return null;
 
-  const lanes = Array.isArray(rawBoard.lanes) ? withUniqueLaneIds(rawBoard.lanes.map(normalizeLane).filter(isNonNull)) : [];
+  const rawLaneRecords = Array.isArray(rawBoard.lanes) ? rawBoard.lanes.filter(isRecord) : [];
+  const normalizedLanePairs = rawLaneRecords
+    .map((rawLane) => ({ raw: rawLane, lane: normalizeLane(rawLane) }))
+    .filter((pair): pair is { raw: UnknownRecord; lane: Lane } => Boolean(pair.lane));
+  const lanes = withUniqueLaneIds(normalizedLanePairs.map((pair) => pair.lane));
+  const laneAliases = buildAliasMap(normalizedLanePairs.map((pair) => pair.raw), lanes, ["id", "title"]);
   const laneIds = new Set(lanes.map((lane) => lane.id));
-  const agentSpecs = Array.isArray(rawBoard.agentSpecs)
-    ? withUniqueAgentIds(rawBoard.agentSpecs.map((agent) => normalizeAgentSpec(agent, laneIds)).filter(isNonNull))
-    : [];
+  const rawAgentRecords = Array.isArray(rawBoard.agentSpecs) ? rawBoard.agentSpecs.filter(isRecord) : [];
+  const normalizedAgentPairs = rawAgentRecords
+    .map((rawAgent) => ({ raw: rawAgent, agent: normalizeAgentSpec(rawAgent, laneIds, laneAliases) }))
+    .filter((pair): pair is { raw: UnknownRecord; agent: AgentSpec } => Boolean(pair.agent));
+  const agentSpecs = withUniqueAgentIds(normalizedAgentPairs.map((pair) => pair.agent));
+  const agentAliases = buildAliasMap(normalizedAgentPairs.map((pair) => pair.raw), agentSpecs, ["id", "name"]);
   const agentIds = new Set(agentSpecs.map((agent) => agent.id));
-  const normalizedLanes = lanes.map((lane) => normalizeLaneAgentDefaults(lane, agentIds));
+  const normalizedLanes = lanes.map((lane) => normalizeLaneAgentDefaults(lane, agentIds, agentAliases));
   const workItems = Array.isArray(rawBoard.workItems)
-    ? rawBoard.workItems.map((item) => normalizeWorkItem(item, normalizedLanes)).filter(isNonNull)
+    ? rawBoard.workItems.map((item) => normalizeWorkItem(item, normalizedLanes, laneAliases, agentIds, agentAliases)).filter(isNonNull)
     : [];
   const selectedId = workItems.some((item) => item.id === rawBoard.selectedId) ? String(rawBoard.selectedId) : null;
   const configDraft = normalizeDraft(rawBoard.configDraft);
@@ -434,13 +443,21 @@ function normalizeBoard(rawBoard: unknown, fallbackProjectId: string = DEFAULT_P
 function normalizeTemplate(rawTemplate: unknown): BoardTemplate | null {
   if (!isRecord(rawTemplate)) return null;
 
-  const lanes = Array.isArray(rawTemplate.lanes) ? withUniqueLaneIds(rawTemplate.lanes.map(normalizeLane).filter(isNonNull)) : [];
+  const rawLaneRecords = Array.isArray(rawTemplate.lanes) ? rawTemplate.lanes.filter(isRecord) : [];
+  const normalizedLanePairs = rawLaneRecords
+    .map((rawLane) => ({ raw: rawLane, lane: normalizeLane(rawLane) }))
+    .filter((pair): pair is { raw: UnknownRecord; lane: Lane } => Boolean(pair.lane));
+  const lanes = withUniqueLaneIds(normalizedLanePairs.map((pair) => pair.lane));
+  const laneAliases = buildAliasMap(normalizedLanePairs.map((pair) => pair.raw), lanes, ["id", "title"]);
   const name = String(rawTemplate.name || "").trim();
   if (!name || !lanes.length) return null;
   const laneIds = new Set(lanes.map((lane) => lane.id));
-  const agentSpecs = Array.isArray(rawTemplate.agentSpecs)
-    ? withUniqueAgentIds(rawTemplate.agentSpecs.map((agent) => normalizeAgentSpec(agent, laneIds)).filter(isNonNull))
-    : [];
+  const rawAgentRecords = Array.isArray(rawTemplate.agentSpecs) ? rawTemplate.agentSpecs.filter(isRecord) : [];
+  const normalizedAgentPairs = rawAgentRecords
+    .map((rawAgent) => ({ raw: rawAgent, agent: normalizeAgentSpec(rawAgent, laneIds, laneAliases) }))
+    .filter((pair): pair is { raw: UnknownRecord; agent: AgentSpec } => Boolean(pair.agent));
+  const agentSpecs = withUniqueAgentIds(normalizedAgentPairs.map((pair) => pair.agent));
+  const agentAliases = buildAliasMap(normalizedAgentPairs.map((pair) => pair.raw), agentSpecs, ["id", "name"]);
   const agentIds = new Set(agentSpecs.map((agent) => agent.id));
 
   return {
@@ -448,7 +465,7 @@ function normalizeTemplate(rawTemplate: unknown): BoardTemplate | null {
     name,
     description: String(rawTemplate.description || "").trim(),
     builtIn: false,
-    lanes: lanes.map((lane) => normalizeLaneAgentDefaults(lane, agentIds)),
+    lanes: lanes.map((lane) => normalizeLaneAgentDefaults(lane, agentIds, agentAliases)),
     agentSpecs,
     createdAt: String(rawTemplate.createdAt || new Date().toISOString())
   };
@@ -505,16 +522,24 @@ function normalizeProjectIds(value: unknown, projectIds: Set<string>): string[] 
   return ["*"];
 }
 
-function normalizeDraft(draft: unknown): BoardDraft | null {
+export function normalizeDraft(draft: unknown): BoardDraft | null {
   if (!isRecord(draft) || !Array.isArray(draft.lanes)) return null;
-  const lanes = withUniqueLaneIds(draft.lanes.map(normalizeLane).filter(isNonNull));
+  const rawLaneRecords = draft.lanes.filter(isRecord);
+  const normalizedLanePairs = rawLaneRecords
+    .map((rawLane) => ({ raw: rawLane, lane: normalizeLane(rawLane) }))
+    .filter((pair): pair is { raw: UnknownRecord; lane: Lane } => Boolean(pair.lane));
+  const lanes = withUniqueLaneIds(normalizedLanePairs.map((pair) => pair.lane));
+  const laneAliases = buildAliasMap(normalizedLanePairs.map((pair) => pair.raw), lanes, ["id", "title"]);
   const laneIds = new Set(lanes.map((lane) => lane.id));
-  const agentSpecs = Array.isArray(draft.agentSpecs)
-    ? withUniqueAgentIds(draft.agentSpecs.map((agent) => normalizeAgentSpec(agent, laneIds)).filter(isNonNull))
-    : [];
+  const rawAgentRecords = Array.isArray(draft.agentSpecs) ? draft.agentSpecs.filter(isRecord) : [];
+  const normalizedAgentPairs = rawAgentRecords
+    .map((rawAgent) => ({ raw: rawAgent, agent: normalizeAgentSpec(rawAgent, laneIds, laneAliases) }))
+    .filter((pair): pair is { raw: UnknownRecord; agent: AgentSpec } => Boolean(pair.agent));
+  const agentSpecs = withUniqueAgentIds(normalizedAgentPairs.map((pair) => pair.agent));
+  const agentAliases = buildAliasMap(normalizedAgentPairs.map((pair) => pair.raw), agentSpecs, ["id", "name"]);
   const agentIds = new Set(agentSpecs.map((agent) => agent.id));
   return {
-    lanes: lanes.map((lane) => normalizeLaneAgentDefaults(lane, agentIds)),
+    lanes: lanes.map((lane) => normalizeLaneAgentDefaults(lane, agentIds, agentAliases)),
     agentSpecs
   };
 }
@@ -530,7 +555,7 @@ function normalizeLane(lane: unknown): Lane | null {
     : defaultGateChecks(title);
 
   return {
-    id: String(lane.id || slugify(title)).trim() || slugify(title),
+    id: slugify(lane.id || title) || slugify(title),
     title,
     description: String(lane.description || "").trim(),
     defaultOwnerAgentId: nullableString(lane.defaultOwnerAgentId),
@@ -542,10 +567,10 @@ function normalizeLane(lane: unknown): Lane | null {
   };
 }
 
-function normalizeAgentSpec(rawAgent: unknown, laneIds: Set<string> = new Set()): AgentSpec | null {
+function normalizeAgentSpec(rawAgent: unknown, laneIds: Set<string> = new Set(), laneAliases: AliasMap = new Map()): AgentSpec | null {
   if (!isRecord(rawAgent)) return null;
   const name = String(rawAgent.name || "").trim();
-  const id = String(rawAgent.id || slugify(name)).trim() || slugify(name);
+  const id = slugify(rawAgent.id || name) || slugify(name);
   if (!id || !name) return null;
 
   return {
@@ -553,18 +578,20 @@ function normalizeAgentSpec(rawAgent: unknown, laneIds: Set<string> = new Set())
     name,
     role: String(rawAgent.role || "").trim(),
     laneIds: Array.isArray(rawAgent.laneIds)
-      ? rawAgent.laneIds.map((laneId: unknown) => String(laneId || "").trim()).filter((laneId: string) => laneIds.has(laneId))
+      ? rawAgent.laneIds.map((laneId: unknown) => resolveAlias(laneId, laneAliases) || slugify(laneId)).filter((laneId: string) => laneIds.has(laneId))
       : [],
     instructions: String(rawAgent.instructions || "").trim(),
     skillNotes: String(rawAgent.skillNotes || "").trim()
   };
 }
 
-function normalizeLaneAgentDefaults(lane: Lane, agentIds: Set<string> = new Set()): Lane {
+function normalizeLaneAgentDefaults(lane: Lane, agentIds: Set<string> = new Set(), agentAliases: AliasMap = new Map()): Lane {
+  const ownerAgentId = normalizeLinkedAgentId(lane.defaultOwnerAgentId, agentIds, agentAliases);
+  const reviewerAgentId = normalizeLinkedAgentId(lane.defaultReviewerAgentId, agentIds, agentAliases);
   return {
     ...lane,
-    defaultOwnerAgentId: agentIds.has(String(lane.defaultOwnerAgentId)) ? lane.defaultOwnerAgentId : null,
-    defaultReviewerAgentId: agentIds.has(String(lane.defaultReviewerAgentId)) ? lane.defaultReviewerAgentId : null
+    defaultOwnerAgentId: ownerAgentId,
+    defaultReviewerAgentId: reviewerAgentId
   };
 }
 
@@ -581,14 +608,22 @@ function withUniqueAgentIds(agentSpecs: AgentSpec[]): AgentSpec[] {
   });
 }
 
-function normalizeWorkItem(rawItem: unknown, lanes: Lane[] = []): WorkItem | null {
+function normalizeWorkItem(
+  rawItem: unknown,
+  lanes: Lane[] = [],
+  laneAliases: AliasMap = new Map(),
+  agentIds: Set<string> = new Set(),
+  agentAliases: AliasMap = new Map()
+): WorkItem | null {
   if (!isRecord(rawItem)) return null;
   const title = String(rawItem.title || "").trim();
   if (!title) return null;
 
   const laneIds = new Set(lanes.map((lane) => lane.id));
   const fallbackLaneId = lanes[0]?.id || "";
-  const laneId = laneIds.has(String(rawItem.laneId)) ? String(rawItem.laneId) : fallbackLaneId;
+  const requestedLaneId = String(rawItem.laneId || "").trim();
+  const resolvedLaneId = resolveAlias(requestedLaneId, laneAliases) || requestedLaneId;
+  const laneId = laneIds.has(resolvedLaneId) ? resolvedLaneId : fallbackLaneId;
   const now = new Date().toISOString();
 
   return {
@@ -596,8 +631,11 @@ function normalizeWorkItem(rawItem: unknown, lanes: Lane[] = []): WorkItem | nul
     title,
     summary: String(rawItem.summary || "").trim(),
     laneId,
-    ownerAgentId: nullableString(rawItem.ownerAgentId),
-    reviewerAgentId: nullableString(rawItem.reviewerAgentId),
+    requesterMemberId: nullableString(rawItem.requesterMemberId),
+    ownerMemberId: nullableString(rawItem.ownerMemberId),
+    reviewerMemberId: nullableString(rawItem.reviewerMemberId),
+    ownerAgentId: normalizeLinkedAgentId(rawItem.ownerAgentId, agentIds, agentAliases),
+    reviewerAgentId: normalizeLinkedAgentId(rawItem.reviewerAgentId, agentIds, agentAliases),
     blockers: Array.isArray(rawItem.blockers) ? rawItem.blockers : [],
     approvals: Array.isArray(rawItem.approvals) ? rawItem.approvals : [],
     completed: Boolean(rawItem.completed),
@@ -618,6 +656,40 @@ export function createWorkItem(input: UnknownRecord, board: Board): WorkItem | n
     },
     board.lanes
   );
+}
+
+function buildAliasMap<T extends { id: string }>(rawRecords: UnknownRecord[], normalizedRecords: T[], fields: string[]): AliasMap {
+  const aliases: AliasMap = new Map();
+  rawRecords.forEach((rawRecord, index) => {
+    const normalizedId = normalizedRecords[index]?.id;
+    if (!normalizedId) return;
+    addAlias(aliases, normalizedId, normalizedId);
+    for (const field of fields) {
+      addAlias(aliases, rawRecord[field], normalizedId);
+    }
+  });
+  return aliases;
+}
+
+function addAlias(aliases: AliasMap, value: unknown, normalizedId: string): void {
+  const raw = String(value || "").trim();
+  if (!raw) return;
+  if (!aliases.has(raw)) aliases.set(raw, normalizedId);
+  const slug = slugify(raw);
+  if (slug && !aliases.has(slug)) aliases.set(slug, normalizedId);
+}
+
+function resolveAlias(value: unknown, aliases: AliasMap): string | null {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  return aliases.get(raw) || aliases.get(slugify(raw)) || null;
+}
+
+function normalizeLinkedAgentId(value: unknown, agentIds: Set<string>, agentAliases: AliasMap): string | null {
+  const raw = nullableString(value);
+  if (!raw) return null;
+  const resolved = resolveAlias(raw, agentAliases) || raw;
+  return !agentIds.size || agentIds.has(resolved) ? resolved : null;
 }
 
 function normalizeComment(rawComment: unknown): WorkItemComment | null {
@@ -650,7 +722,7 @@ export function createComment(input: UnknownRecord): WorkItemComment | null {
 function withUniqueLaneIds(lanes: Lane[]): Lane[] {
   const used = new Map<string, number>();
   return lanes.map((lane) => {
-    const baseId = slugify(lane.title) || "lane";
+    const baseId = slugify(lane.id) || slugify(lane.title) || "lane";
     const nextCount = (used.get(baseId) || 0) + 1;
     used.set(baseId, nextCount);
     const id = nextCount === 1 ? baseId : `${baseId}-${nextCount}`;

@@ -1,4 +1,4 @@
-import type { AgentSpec, Board, BoardDraft, BoardTemplate, Lane, Project, PublicTeamInvite, PublicTeamMember, PublicTokenRecord, Team, TeamRole, WorkItem, WorkItemComment, WorkspaceState } from "../types";
+import type { AgentCapability, AgentSpec, Board, BoardDraft, BoardTemplate, Lane, Project, PublicTeamInvite, PublicTeamMember, PublicTokenRecord, Team, TeamRole, WorkItem, WorkItemComment, WorkspaceState } from "../types";
 
 declare global {
   interface Window {
@@ -10,6 +10,7 @@ declare global {
 }
 
 type AnyRecord = Record<string, any>;
+type AliasMap = Map<string, string>;
 type FormControlElement = HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
 type TemplateLike = Omit<BoardTemplate, "createdAt"> & { createdAt?: string; builtIn: boolean };
 type CreatedAgentTokenPayload = PublicTokenRecord & { token?: string };
@@ -54,6 +55,23 @@ interface InspectorActivityEvent {
   createdAt: string;
 }
 
+type ActorKind = "human" | "agent" | "service" | "session" | "unknown";
+
+interface ActorRef {
+  kind: ActorKind;
+  id: string;
+  label: string;
+  detail: string;
+  initials: string;
+  badge: string;
+  title: string;
+  sessionId?: string;
+  delegatedBy?: string | null;
+  projectId?: string | null;
+  capabilities?: string[];
+  status?: string;
+}
+
 interface AuthSession {
   userId: string;
   email: string;
@@ -77,6 +95,31 @@ interface TeamSettingsPayload {
   currentMember: PublicTeamMember | null;
 }
 
+interface FlowAiDraftPayload {
+  summary: string;
+  warnings: string[];
+  draft: BoardDraft;
+  model?: string;
+  provider?: string;
+}
+
+interface FlowApplyPayload {
+  board: Board;
+  warnings: string[];
+  movedCards: Array<{ cardId: string; title: string; fromLaneId: string; toLaneId: string }>;
+}
+
+type ToastTone = "neutral" | "success" | "warning" | "ok" | "warn";
+
+interface ToastOptions {
+  message: string;
+  title?: string;
+  tone?: ToastTone;
+  persistent?: boolean;
+  durationMs?: number;
+  key?: string;
+}
+
 const API_BASE_URL = window.KANBAN_CARDS_API_BASE_URL || window.INSTRUCT_API_BASE_URL || "/api";
 const API_TOKEN = window.KANBAN_CARDS_API_TOKEN || window.INSTRUCT_API_TOKEN || "";
 const POLL_INTERVAL_MS = 5000;
@@ -87,6 +130,15 @@ const DEFAULT_TEAM_ID = "kanban.cards:team";
 const DEFAULT_PROJECT_ID = "kanban.cards:default";
 const DEFAULT_TEAM_NAME = "kanban.cards";
 const DEFAULT_PROJECT_NAME = "kanban.cards";
+const FLOW_AI_TOAST_KEY = "flow-ai";
+const AGENT_SESSION_CAPABILITIES: AgentCapability[] = ["view", "create", "update", "comment", "move"];
+const AGENT_SESSION_CAPABILITY_LABELS: Record<AgentCapability, string> = {
+  view: "View",
+  create: "Create cards",
+  update: "Update cards",
+  comment: "Comment",
+  move: "Move cards"
+};
 
 const BUILT_IN_TEMPLATES: TemplateLike[] = [
   {
@@ -114,6 +166,12 @@ const BUILT_IN_TEMPLATES: TemplateLike[] = [
 let state: WorkspaceState = freshWorkspaceState();
 let flowMessage = "";
 let flowMessageTone: "neutral" | "warning" | "success" = "neutral";
+let flowAiLoading = false;
+let flowAiError = "";
+let flowAiSummary = "";
+let flowAiWarnings: string[] = [];
+let flowApplyInFlight = false;
+let flowAdvancedOpen = false;
 let templateFormOpen = false;
 let editingTemplateId: string | null = null;
 let workItemDialogOpen = false;
@@ -146,6 +204,7 @@ let inspectorActivityEvents: InspectorActivityEvent[] = [];
 let inspectorActivityLoading = false;
 let inspectorActivityUnavailable = false;
 let inspectorActivityError = "";
+let inspectorDrawerOpen = false;
 let apiOnline = false;
 let saveQueue: Promise<unknown> = Promise.resolve();
 let lastPersistedState = "";
@@ -291,8 +350,11 @@ function normalizeWorkspace(rawState: any): WorkspaceState {
   const templates: BoardTemplate[] = Array.isArray(rawState?.templates)
     ? rawState.templates.map(normalizeTemplate).filter(isNonNull)
     : [];
+  const members: PublicTeamMember[] = Array.isArray(rawState?.members)
+    ? rawState.members.map((member: any) => normalizeTeamMember(member, team.id)).filter(isNonNull)
+    : [];
 
-  return { team, projects, activeProjectId, members: [], invites: [], boards, activeBoardId, templates };
+  return { team, projects, activeProjectId, members, invites: [], boards, activeBoardId, templates };
 }
 
 function createTeam(input: Partial<Team> = {}): Team {
@@ -332,6 +394,39 @@ function normalizeProject(rawProject: any, fallbackTeamId: string): Project | nu
   return createProject({ ...rawProject, id, name, teamId: rawProject.teamId || fallbackTeamId });
 }
 
+function normalizeTeamMember(rawMember: any, fallbackTeamId: string): PublicTeamMember | null {
+  if (!rawMember || typeof rawMember !== "object") return null;
+  const id = String(rawMember.id || "").trim();
+  const userId = String(rawMember.userId || "").trim();
+  const email = String(rawMember.email || "").trim();
+  if (!id || !userId || !email) return null;
+  const role = isTeamRole(rawMember.role) ? rawMember.role : "member";
+  const now = new Date().toISOString();
+  return {
+    id,
+    teamId: String(rawMember.teamId || fallbackTeamId).trim() || fallbackTeamId,
+    userId,
+    email,
+    name: String(rawMember.name || email).trim() || email,
+    role,
+    projectIds: normalizeProjectIds(rawMember.projectIds),
+    createdAt: String(rawMember.createdAt || now),
+    updatedAt: String(rawMember.updatedAt || now),
+    lastSeenAt: String(rawMember.lastSeenAt || now)
+  };
+}
+
+function isTeamRole(value: unknown): value is TeamRole {
+  return value === "owner" || value === "admin" || value === "member";
+}
+
+function normalizeProjectIds(value: unknown): string[] {
+  const ids = Array.isArray(value)
+    ? value.map((projectId) => String(projectId || "").trim()).filter(Boolean)
+    : [];
+  return ids.length ? ids : ["*"];
+}
+
 function withUniqueProjectIds(projects: Project[], fallbackTeamId: string): Project[] {
   const used = new Map<string, number>();
   return projects.map((project) => {
@@ -349,17 +444,25 @@ function withUniqueProjectIds(projects: Project[], fallbackTeamId: string): Proj
 function normalizeBoard(rawBoard: any, fallbackProjectId: string = DEFAULT_PROJECT_ID, projectIds: Set<string> = new Set([DEFAULT_PROJECT_ID])): Board | null {
   if (!rawBoard || typeof rawBoard !== "object") return null;
 
-  const lanes = Array.isArray(rawBoard.lanes)
-    ? withUniqueLaneIds(rawBoard.lanes.map(normalizeLane).filter(isNonNull))
-    : [];
+  const rawLaneRecords: AnyRecord[] = Array.isArray(rawBoard.lanes) ? rawBoard.lanes.filter(isRecord) : [];
+  const normalizedLanePairs = rawLaneRecords
+    .map((rawLane) => ({ raw: rawLane, lane: normalizeLane(rawLane) }))
+    .filter((pair): pair is { raw: AnyRecord; lane: Lane } => Boolean(pair.lane));
+  const lanes = withUniqueLaneIds(normalizedLanePairs.map((pair) => pair.lane));
+  const laneAliases = buildAliasMap(normalizedLanePairs.map((pair) => pair.raw), lanes, ["id", "title"]);
   const laneIds = new Set(lanes.map((lane) => lane.id));
-  const agentSpecs = Array.isArray(rawBoard.agentSpecs)
-    ? withUniqueAgentIds(rawBoard.agentSpecs.map((agent: any) => normalizeAgentSpec(agent, laneIds)).filter(isNonNull))
-    : [];
+  const rawAgentRecords: AnyRecord[] = Array.isArray(rawBoard.agentSpecs) ? rawBoard.agentSpecs.filter(isRecord) : [];
+  const normalizedAgentPairs = rawAgentRecords
+    .map((rawAgent) => ({ raw: rawAgent, agent: normalizeAgentSpec(rawAgent, laneIds, laneAliases) }))
+    .filter((pair): pair is { raw: AnyRecord; agent: AgentSpec } => Boolean(pair.agent));
+  const agentSpecs = withUniqueAgentIds(normalizedAgentPairs.map((pair) => pair.agent));
+  const agentAliases = buildAliasMap(normalizedAgentPairs.map((pair) => pair.raw), agentSpecs, ["id", "name"]);
   const agentIds = new Set(agentSpecs.map((agent) => agent.id));
-  const normalizedLanes = lanes.map((lane) => normalizeLaneAgentDefaults(lane, agentIds));
+  const normalizedLanes = lanes.map((lane) => normalizeLaneAgentDefaults(lane, agentIds, agentAliases));
 
-  const workItems: WorkItem[] = Array.isArray(rawBoard.workItems) ? rawBoard.workItems : [];
+  const workItems: WorkItem[] = Array.isArray(rawBoard.workItems)
+    ? rawBoard.workItems.map((item: any) => normalizeWorkItem(item, normalizedLanes, laneAliases, agentIds, agentAliases)).filter(isNonNull)
+    : [];
   const selectedId = workItems.some((item: WorkItem) => item.id === rawBoard.selectedId)
     ? rawBoard.selectedId
     : null;
@@ -387,15 +490,21 @@ function normalizeBoard(rawBoard: any, fallbackProjectId: string = DEFAULT_PROJE
 function normalizeTemplate(rawTemplate: any): BoardTemplate | null {
   if (!rawTemplate || typeof rawTemplate !== "object") return null;
 
-  const lanes = Array.isArray(rawTemplate.lanes)
-    ? withUniqueLaneIds(rawTemplate.lanes.map(normalizeLane).filter(isNonNull))
-    : [];
+  const rawLaneRecords: AnyRecord[] = Array.isArray(rawTemplate.lanes) ? rawTemplate.lanes.filter(isRecord) : [];
+  const normalizedLanePairs = rawLaneRecords
+    .map((rawLane) => ({ raw: rawLane, lane: normalizeLane(rawLane) }))
+    .filter((pair): pair is { raw: AnyRecord; lane: Lane } => Boolean(pair.lane));
+  const lanes = withUniqueLaneIds(normalizedLanePairs.map((pair) => pair.lane));
+  const laneAliases = buildAliasMap(normalizedLanePairs.map((pair) => pair.raw), lanes, ["id", "title"]);
   const name = String(rawTemplate.name || "").trim();
   if (!name || !lanes.length) return null;
   const laneIds = new Set(lanes.map((lane) => lane.id));
-  const agentSpecs = Array.isArray(rawTemplate.agentSpecs)
-    ? withUniqueAgentIds(rawTemplate.agentSpecs.map((agent: any) => normalizeAgentSpec(agent, laneIds)).filter(isNonNull))
-    : [];
+  const rawAgentRecords: AnyRecord[] = Array.isArray(rawTemplate.agentSpecs) ? rawTemplate.agentSpecs.filter(isRecord) : [];
+  const normalizedAgentPairs = rawAgentRecords
+    .map((rawAgent) => ({ raw: rawAgent, agent: normalizeAgentSpec(rawAgent, laneIds, laneAliases) }))
+    .filter((pair): pair is { raw: AnyRecord; agent: AgentSpec } => Boolean(pair.agent));
+  const agentSpecs = withUniqueAgentIds(normalizedAgentPairs.map((pair) => pair.agent));
+  const agentAliases = buildAliasMap(normalizedAgentPairs.map((pair) => pair.raw), agentSpecs, ["id", "name"]);
   const agentIds = new Set(agentSpecs.map((agent) => agent.id));
 
   return {
@@ -403,7 +512,7 @@ function normalizeTemplate(rawTemplate: any): BoardTemplate | null {
     name,
     description: String(rawTemplate.description || "").trim(),
     builtIn: false,
-    lanes: lanes.map((lane) => normalizeLaneAgentDefaults(lane, agentIds)),
+    lanes: lanes.map((lane) => normalizeLaneAgentDefaults(lane, agentIds, agentAliases)),
     agentSpecs,
     createdAt: rawTemplate.createdAt || new Date().toISOString()
   };
@@ -411,14 +520,22 @@ function normalizeTemplate(rawTemplate: any): BoardTemplate | null {
 
 function normalizeDraft(draft: any): BoardDraft | null {
   if (!draft || !Array.isArray(draft.lanes)) return null;
-  const lanes = withUniqueLaneIds(draft.lanes.map(normalizeLane).filter(isNonNull));
+  const rawLaneRecords: AnyRecord[] = draft.lanes.filter(isRecord);
+  const normalizedLanePairs = rawLaneRecords
+    .map((rawLane) => ({ raw: rawLane, lane: normalizeLane(rawLane) }))
+    .filter((pair): pair is { raw: AnyRecord; lane: Lane } => Boolean(pair.lane));
+  const lanes = withUniqueLaneIds(normalizedLanePairs.map((pair) => pair.lane));
+  const laneAliases = buildAliasMap(normalizedLanePairs.map((pair) => pair.raw), lanes, ["id", "title"]);
   const laneIds = new Set(lanes.map((lane) => lane.id));
-  const agentSpecs = Array.isArray(draft.agentSpecs)
-    ? withUniqueAgentIds(draft.agentSpecs.map((agent: any) => normalizeAgentSpec(agent, laneIds)).filter(isNonNull))
-    : [];
+  const rawAgentRecords: AnyRecord[] = Array.isArray(draft.agentSpecs) ? draft.agentSpecs.filter(isRecord) : [];
+  const normalizedAgentPairs = rawAgentRecords
+    .map((rawAgent) => ({ raw: rawAgent, agent: normalizeAgentSpec(rawAgent, laneIds, laneAliases) }))
+    .filter((pair): pair is { raw: AnyRecord; agent: AgentSpec } => Boolean(pair.agent));
+  const agentSpecs = withUniqueAgentIds(normalizedAgentPairs.map((pair) => pair.agent));
+  const agentAliases = buildAliasMap(normalizedAgentPairs.map((pair) => pair.raw), agentSpecs, ["id", "name"]);
   const agentIds = new Set(agentSpecs.map((agent) => agent.id));
   return {
-    lanes: lanes.map((lane) => normalizeLaneAgentDefaults(lane, agentIds)),
+    lanes: lanes.map((lane) => normalizeLaneAgentDefaults(lane, agentIds, agentAliases)),
     agentSpecs
   };
 }
@@ -430,7 +547,7 @@ function normalizeLane(lane: any): Lane | null {
   if (!title) return null;
 
   const description = String(lane.description || "").trim();
-  const id = String(lane.id || slugify(title)).trim() || slugify(title);
+  const id = slugify(lane.id || title) || slugify(title);
   const gateTitle = String(lane.gate?.title || `${title} gate`).trim();
   const checks = Array.isArray(lane.gate?.checks)
     ? lane.gate.checks.map((check: any) => String(check || "").trim()).filter(Boolean)
@@ -449,10 +566,10 @@ function normalizeLane(lane: any): Lane | null {
   };
 }
 
-function normalizeAgentSpec(rawAgent: any, laneIds: Set<string> = new Set()): AgentSpec | null {
+function normalizeAgentSpec(rawAgent: any, laneIds: Set<string> = new Set(), laneAliases: AliasMap = new Map()): AgentSpec | null {
   if (!rawAgent || typeof rawAgent !== "object") return null;
   const name = String(rawAgent.name || "").trim();
-  const id = String(rawAgent.id || slugify(name)).trim() || slugify(name);
+  const id = slugify(rawAgent.id || name) || slugify(name);
   if (!id || !name) return null;
 
   return {
@@ -460,18 +577,77 @@ function normalizeAgentSpec(rawAgent: any, laneIds: Set<string> = new Set()): Ag
     name,
     role: String(rawAgent.role || "").trim(),
     laneIds: Array.isArray(rawAgent.laneIds)
-      ? rawAgent.laneIds.map((laneId: any) => String(laneId || "").trim()).filter((laneId: string) => laneIds.has(laneId))
+      ? rawAgent.laneIds.map((laneId: any) => resolveAlias(laneId, laneAliases) || slugify(laneId)).filter((laneId: string) => laneIds.has(laneId))
       : [],
     instructions: String(rawAgent.instructions || "").trim(),
     skillNotes: String(rawAgent.skillNotes || "").trim()
   };
 }
 
-function normalizeLaneAgentDefaults(lane: Lane, agentIds: Set<string> = new Set()): Lane {
+function normalizeWorkItem(
+  rawItem: any,
+  lanes: Lane[] = [],
+  laneAliases: AliasMap = new Map(),
+  agentIds: Set<string> = new Set(),
+  agentAliases: AliasMap = new Map()
+): WorkItem | null {
+  if (!rawItem || typeof rawItem !== "object") return null;
+  const title = String(rawItem.title || "").trim();
+  if (!title) return null;
+  const laneIds = new Set(lanes.map((lane) => lane.id));
+  const fallbackLaneId = lanes[0]?.id || "";
+  const requestedLaneId = String(rawItem.laneId || "").trim();
+  const resolvedLaneId = resolveAlias(requestedLaneId, laneAliases) || requestedLaneId;
+  const now = new Date().toISOString();
+  return {
+    id: String(rawItem.id || makeId("item")),
+    title,
+    summary: String(rawItem.summary || "").trim(),
+    laneId: laneIds.has(resolvedLaneId) ? resolvedLaneId : fallbackLaneId,
+    requesterMemberId: optionalText(rawItem.requesterMemberId),
+    ownerMemberId: optionalText(rawItem.ownerMemberId),
+    reviewerMemberId: optionalText(rawItem.reviewerMemberId),
+    ownerAgentId: normalizeLinkedAgentId(rawItem.ownerAgentId, agentIds, agentAliases),
+    reviewerAgentId: normalizeLinkedAgentId(rawItem.reviewerAgentId, agentIds, agentAliases),
+    blockers: Array.isArray(rawItem.blockers) ? rawItem.blockers : [],
+    approvals: Array.isArray(rawItem.approvals) ? rawItem.approvals : [],
+    completed: Boolean(rawItem.completed),
+    delivered: Boolean(rawItem.delivered),
+    comments: Array.isArray(rawItem.comments) ? rawItem.comments.map(normalizeComment).filter(isNonNull) : [],
+    createdAt: String(rawItem.createdAt || now),
+    updatedAt: String(rawItem.updatedAt || now)
+  };
+}
+
+function normalizeComment(rawComment: any): WorkItemComment | null {
+  if (!rawComment || typeof rawComment !== "object") return null;
+  const text = String(rawComment.text || "").trim();
+  if (!text) return null;
+  const now = new Date().toISOString();
+  const kind = ["progress", "instruction", "question", "change_request", "note"].includes(String(rawComment.kind))
+    ? String(rawComment.kind) as WorkItemComment["kind"]
+    : "note";
+  const status = ["open", "acknowledged", "resolved"].includes(String(rawComment.status))
+    ? String(rawComment.status) as WorkItemComment["status"]
+    : "open";
+  return {
+    id: String(rawComment.id || makeId("comment")),
+    kind,
+    status,
+    text,
+    author: String(rawComment.author || "agent").trim() || "agent",
+    createdAt: String(rawComment.createdAt || now),
+    updatedAt: String(rawComment.updatedAt || rawComment.createdAt || now)
+  };
+}
+
+function normalizeLaneAgentDefaults(lane: Lane, agentIds: Set<string> = new Set(), agentAliases: AliasMap = new Map()): Lane {
+  const ownerAgentId = normalizeLinkedAgentId(lane.defaultOwnerAgentId, agentIds, agentAliases);
+  const reviewerAgentId = normalizeLinkedAgentId(lane.defaultReviewerAgentId, agentIds, agentAliases);
   return {
     ...lane,
-    defaultOwnerAgentId: lane.defaultOwnerAgentId && agentIds.has(lane.defaultOwnerAgentId) ? lane.defaultOwnerAgentId : null,
-    defaultReviewerAgentId: lane.defaultReviewerAgentId && agentIds.has(lane.defaultReviewerAgentId) ? lane.defaultReviewerAgentId : null
+    defaultOwnerAgentId: ownerAgentId,
+    defaultReviewerAgentId: reviewerAgentId
   };
 }
 
@@ -708,6 +884,11 @@ function getActiveBoard(): Board {
   return board;
 }
 
+function getBoardById(boardId: string | null | undefined): Board | null {
+  if (!boardId) return null;
+  return state.boards.find((board) => board.id === boardId) || null;
+}
+
 function touchBoard(board: Board): void {
   board.updatedAt = new Date().toISOString();
 }
@@ -817,6 +998,10 @@ function render(): void {
   state = normalizeWorkspace(state);
   ensureActiveBoardWithinProject();
   const board = getActiveBoardOrNull();
+  const hasSelectedCard = Boolean(board?.selectedId && board.workItems.some((item) => item.id === board.selectedId));
+  if (!hasSelectedCard) inspectorDrawerOpen = false;
+  document.body.classList.toggle("has-selected-card", hasSelectedCard);
+  document.body.classList.toggle("inspector-drawer-open", inspectorDrawerOpen && hasSelectedCard);
 
   renderTopbar(board);
   if (authSessionLoaded && authSession && !authSession.isTeamMember) {
@@ -832,6 +1017,8 @@ function render(): void {
 }
 
 function renderNoTeamAccess(): void {
+  inspectorDrawerOpen = false;
+  document.body.classList.remove("has-selected-card", "inspector-drawer-open");
   if (boardTitle) boardTitle.textContent = "Team access required";
   document.querySelector("#metric-active")!.textContent = "0";
   document.querySelector("#metric-blocked")!.textContent = "0";
@@ -1118,24 +1305,15 @@ function renderEmptyProjectSetup(): string {
 }
 
 function renderFlowSetup(board: Board): string {
+  const draft = normalizeDraft(board.configDraft);
   return `
     <section class="flow-panel flow-panel-wide setup-panel" aria-labelledby="flow-setup-title">
       <div class="flow-panel-heading">
         <p class="eyebrow">Board setup</p>
-        <h2 id="flow-setup-title">Choose a template or describe the flow</h2>
+        <h2 id="flow-setup-title">Describe the workflow</h2>
       </div>
-      ${renderTextField({ label: "Board name", id: "board-name", value: board.name, className: "board-name-field" })}
       ${renderTemplateGallery()}
-      <div class="custom-flow-section">
-        <div class="section-heading">
-          <h3>Custom flow</h3>
-        </div>
-        ${renderTextAreaField({ label: "Kanban flow description", id: "flow-prompt", value: board.flowPrompt, rows: 4, placeholder: "Intake, Research, Draft, Review, Release", className: "flow-prompt-field", srOnly: true })}
-        <div class="flow-actions">
-          <button class="primary-button" type="button" data-action="generate-flow">Generate flow</button>
-        </div>
-        ${renderFlowMessage()}
-      </div>
+      ${renderFlowCommandWorkspace(board, draft)}
     </section>
   `;
 }
@@ -1225,7 +1403,7 @@ function renderFlowEditor(board: Board): string {
       <div class="flow-panel-heading flow-panel-heading-with-actions">
         <div>
           <p class="eyebrow">Board setup</p>
-          <h2 id="flow-editor-title">Edit flow</h2>
+          <h2 id="flow-editor-title">Flow command workspace</h2>
         </div>
         <div class="flow-menu-wrap">
           <button class="icon-action flow-menu-button" type="button" data-action="toggle-flow-menu" aria-haspopup="menu" aria-expanded="${flowActionsMenuOpen ? "true" : "false"}" aria-label="Flow actions">...</button>
@@ -1236,31 +1414,171 @@ function renderFlowEditor(board: Board): string {
           ` : ""}
         </div>
       </div>
-      ${renderTextField({ label: "Board name", id: "board-name", value: board.name, className: "board-name-field" })}
-      ${renderTextAreaField({ label: "Description", id: "flow-prompt", value: board.flowPrompt, rows: 3, placeholder: "Intake, Research, Draft, Review, Release", className: "flow-prompt-field" })}
-      <div class="flow-actions">
-        <button class="secondary-button" type="button" data-action="generate-flow">Regenerate</button>
-        <button class="secondary-button" type="button" data-action="add-lane">Add lane</button>
-      </div>
-      ${renderFlowMessage()}
-      ${renderAgentSetup(draft)}
-      <div class="lane-editor-list">
-        ${draft.lanes.map((lane, laneIndex) => renderLaneEditor(lane, laneIndex, draft)).join("")}
-      </div>
-      <div class="flow-actions final-actions">
-        <div class="final-action-group">
-          <button class="primary-button" type="button" data-action="apply-board">Apply board</button>
-          <button class="secondary-button" type="button" data-action="start-over">${board.lanes.length ? "Cancel edits" : "Start over"}</button>
-        </div>
-        ${board.lanes.length ? `
-          <div class="final-action-group final-action-group-right">
-            <button class="secondary-button" type="button" data-action="save-template">Save as template</button>
-          </div>
-        ` : ""}
-      </div>
+      ${renderFlowCommandWorkspace(board, draft)}
       ${templateFormOpen ? renderSaveTemplatePanel(board) : ""}
     </section>
   `;
+}
+
+function renderFlowCommandWorkspace(board: Board, draft: BoardDraft | null): string {
+  const canApply = Boolean(draft && draft.lanes.length >= MIN_LANES && !flowAiLoading && !flowApplyInFlight);
+  const quickPrompts = [
+    "Tighten this into a paid SaaS product roadmap flow",
+    "Add stronger review and release gates",
+    "Split research, planning, build, review, and launch responsibilities",
+    "Make agents explicit and keep humans accountable"
+  ];
+  return `
+    <section class="flow-ai-workspace" aria-label="AI flow command workspace">
+      <div class="flow-ai-command">
+        ${renderTextField({ label: "Board name", id: "board-name", value: board.name, className: "board-name-field" })}
+        ${renderTextAreaField({
+          label: "Flow command",
+          id: "flow-prompt",
+          value: board.flowPrompt,
+          rows: 4,
+          placeholder: "Describe the workflow you want. Example: Intake, research, plan, build, review, release with explicit agent ownership and approval gates.",
+          className: "flow-prompt-field"
+        })}
+        <div class="flow-prompt-chips" aria-label="Quick flow commands">
+          ${quickPrompts.map((prompt) => `<button class="prompt-chip" type="button" data-action="use-flow-chip" data-flow-chip="${escapeAttribute(prompt)}">${escapeHtml(prompt)}</button>`).join("")}
+        </div>
+        <div class="flow-actions">
+          <button class="primary-button" type="button" data-action="generate-flow" ${flowAiLoading ? "disabled" : ""}>${draft ? "Revise with AI" : "Generate with AI"}</button>
+          <button class="primary-button" type="button" data-action="apply-board" ${canApply ? "" : "disabled"}>${flowApplyInFlight ? "Applying..." : "Apply flow"}</button>
+          <button class="secondary-button" type="button" data-action="start-over">${board.lanes.length ? "Cancel edits" : "Start over"}</button>
+          ${board.lanes.length ? `<button class="secondary-button" type="button" data-action="save-template">Save as template</button>` : ""}
+        </div>
+        ${renderFlowAiStatus()}
+      </div>
+      ${renderFlowDraftPreview(board, draft)}
+      ${draft ? `
+        <section class="flow-advanced-panel">
+          <div class="section-heading">
+            <h3>Advanced controls</h3>
+            <div class="flow-actions compact-actions">
+              <button class="secondary-button small" type="button" data-action="toggle-flow-advanced">${flowAdvancedOpen ? "Hide advanced" : "Open advanced"}</button>
+              <button class="secondary-button small" type="button" data-action="add-lane">Add lane</button>
+            </div>
+          </div>
+          ${flowAdvancedOpen ? `
+            ${renderAgentSetup(draft)}
+            <div class="lane-editor-list">
+              ${draft.lanes.map((lane, laneIndex) => renderLaneEditor(lane, laneIndex, draft)).join("")}
+            </div>
+          ` : '<p class="empty-note">Detailed lane, gate, and agent form controls are available when needed.</p>'}
+        </section>
+      ` : ""}
+    </section>
+  `;
+}
+
+function renderFlowAiStatus(): string {
+  const messages = [
+    flowAiLoading ? "Asking LM Studio for a structured board flow..." : "",
+    flowApplyInFlight ? "Applying flow and preserving cards..." : ""
+  ].filter(Boolean);
+  if (!messages.length) return "";
+  return `
+    <div class="flow-ai-status">
+      ${messages.map((message) => `<p class="flow-message neutral">${escapeHtml(message)}</p>`).join("")}
+    </div>
+  `;
+}
+
+function renderFlowDraftNotes(): string {
+  const summary = String(flowAiSummary || "").trim();
+  const warnings = flowAiWarnings.map((warning) => String(warning || "").trim()).filter(Boolean);
+  if (!summary && !warnings.length) return "";
+  return `
+    <section class="flow-draft-notes" aria-label="Draft notes">
+      ${summary ? `
+        <div>
+          <p class="meta-label">Draft notes</p>
+          <p>${escapeHtml(summary)}</p>
+        </div>
+      ` : ""}
+      ${warnings.length ? `
+        <div>
+          <p class="meta-label">Warnings</p>
+          <ul class="flow-warning-list">
+            ${warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join("")}
+          </ul>
+        </div>
+      ` : ""}
+    </section>
+  `;
+}
+
+function renderFlowDraftPreview(board: Board, draft: BoardDraft | null): string {
+  if (!draft) {
+    return `
+      <section class="flow-preview-panel empty-flow-preview">
+        <div class="section-heading"><h3>Preview</h3></div>
+        <p class="empty-note">Generate a flow to preview lanes, gates, agents, and card remapping before applying.</p>
+      </section>
+    `;
+  }
+  const diff = describeFlowDiff(board, draft);
+  return `
+    <section class="flow-preview-panel">
+      <div class="section-heading">
+        <h3>Preview</h3>
+        <span class="template-lane-count">${draft.lanes.length} lanes / ${draft.agentSpecs.length} agents</span>
+      </div>
+      <div class="flow-diff-grid">
+        ${renderStateGridItem("Lane changes", diff.laneChange)}
+        ${renderStateGridItem("Agent changes", diff.agentChange)}
+        ${renderStateGridItem("Card remap", diff.cardRemap)}
+        ${renderStateGridItem("Apply mode", "Preview first")}
+      </div>
+      ${renderFlowDraftNotes()}
+      <div class="flow-preview-lanes">
+        ${draft.lanes.map((lane, index) => renderFlowPreviewLane(lane, index, draft)).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderFlowPreviewLane(lane: Lane, index: number, draft: BoardDraft): string {
+  const owner = draft.agentSpecs.find((agent) => agent.id === lane.defaultOwnerAgentId);
+  const reviewer = draft.agentSpecs.find((agent) => agent.id === lane.defaultReviewerAgentId);
+  return `
+    <article class="flow-preview-lane">
+      <div class="flow-preview-lane-header">
+        <span class="lane-position">${index + 1}</span>
+        <div>
+          <h4>${escapeHtml(lane.title)}</h4>
+          <p>${escapeHtml(lane.description || "No description.")}</p>
+        </div>
+      </div>
+      <div class="flow-preview-agents">
+        <span>${escapeHtml(owner ? `Owner: ${owner.name}` : "Owner: unassigned")}</span>
+        <span>${escapeHtml(reviewer ? `Reviewer: ${reviewer.name}` : "Reviewer: unassigned")}</span>
+      </div>
+      <div class="flow-preview-gate">
+        <span class="meta-label">${escapeHtml(lane.gate.title || `${lane.title} gate`)}</span>
+        <ul>${lane.gate.checks.map((check) => `<li>${escapeHtml(check)}</li>`).join("")}</ul>
+      </div>
+    </article>
+  `;
+}
+
+function describeFlowDiff(board: Board, draft: BoardDraft): { laneChange: string; agentChange: string; cardRemap: string } {
+  const oldLaneIds = new Set(board.lanes.map((lane) => lane.id));
+  const newLaneIds = new Set(draft.lanes.map((lane) => lane.id));
+  const addedLanes = draft.lanes.filter((lane) => !oldLaneIds.has(lane.id)).length;
+  const removedLanes = board.lanes.filter((lane) => !newLaneIds.has(lane.id)).length;
+  const oldAgentIds = new Set(board.agentSpecs.map((agent) => agent.id));
+  const newAgentIds = new Set(draft.agentSpecs.map((agent) => agent.id));
+  const addedAgents = draft.agentSpecs.filter((agent) => !oldAgentIds.has(agent.id)).length;
+  const removedAgents = board.agentSpecs.filter((agent) => !newAgentIds.has(agent.id)).length;
+  const remapCount = board.workItems.filter((item) => !newLaneIds.has(item.laneId)).length;
+  return {
+    laneChange: `${addedLanes} added / ${removedLanes} removed`,
+    agentChange: `${addedAgents} added / ${removedAgents} removed`,
+    cardRemap: remapCount ? `${remapCount} card${remapCount === 1 ? "" : "s"} will move` : "No card moves"
+  };
 }
 
 function renderAgentSetup(draft: BoardDraft): string {
@@ -1374,6 +1692,254 @@ function formatAgentOption(agent: AgentSpec): string {
   return agent.role ? `${agent.name} - ${agent.role}` : agent.name;
 }
 
+function renderMemberOptions(selectedId: string | null = ""): string {
+  const members = getKnownMembers();
+  return `
+    <option value="">Unassigned</option>
+    ${members.map((member) => `
+      <option value="${escapeAttribute(member.id)}" ${member.id === selectedId ? "selected" : ""}>${escapeHtml(formatMemberOption(member))}</option>
+    `).join("")}
+  `;
+}
+
+function formatMemberOption(member: PublicTeamMember): string {
+  const label = member.name || member.email || member.userId;
+  return member.email && member.email !== label ? `${label} - ${member.email}` : label;
+}
+
+function getKnownMembers(): PublicTeamMember[] {
+  const members = new Map<string, PublicTeamMember>();
+  const addMember = (member: PublicTeamMember | null | undefined) => {
+    if (!member?.id) return;
+    members.set(member.id, member);
+  };
+
+  for (const member of state.members || []) addMember(member);
+  for (const member of teamSettingsData?.members || []) addMember(member);
+  if (authSession?.memberId && !members.has(authSession.memberId)) {
+    const now = new Date().toISOString();
+    addMember({
+      id: authSession.memberId,
+      teamId: authSession.teamId,
+      userId: authSession.userId,
+      email: authSession.email,
+      name: authSession.name || authSession.email,
+      role: authSession.role || "member",
+      projectIds: authSession.projectIds.length ? authSession.projectIds : ["*"],
+      createdAt: now,
+      updatedAt: now,
+      lastSeenAt: now
+    });
+  }
+  return Array.from(members.values()).sort((a, b) => (a.name || a.email).localeCompare(b.name || b.email));
+}
+
+function findMemberById(memberId: string | null | undefined): PublicTeamMember | null {
+  if (!memberId) return null;
+  return getKnownMembers().find((member) => member.id === memberId) || null;
+}
+
+function findMemberByIdentity(identity: { userId?: unknown; email?: unknown; name?: unknown }): PublicTeamMember | null {
+  const userId = optionalText(identity.userId);
+  const email = optionalText(identity.email)?.toLowerCase();
+  const name = optionalText(identity.name)?.toLowerCase();
+  return getKnownMembers().find((member) => {
+    if (userId && member.userId === userId) return true;
+    if (email && member.email.toLowerCase() === email) return true;
+    if (name && member.name.toLowerCase() === name) return true;
+    return false;
+  }) || null;
+}
+
+function actorFromMember(member: PublicTeamMember): ActorRef {
+  const label = member.name || member.email || member.userId;
+  const detail = member.email && member.email !== label ? member.email : member.userId;
+  return makeActorRef("human", member.id, label, detail, member.role || "Member");
+}
+
+function actorFromMemberId(memberId: string | null | undefined, fallbackLabel = "Unassigned"): ActorRef {
+  const member = findMemberById(memberId);
+  if (member) return actorFromMember(member);
+  if (memberId) return makeActorRef("human", memberId, memberId, "Member", "Human");
+  return makeActorRef("unknown", "unassigned", fallbackLabel, "", "");
+}
+
+function actorFromAgent(board: Board | null | undefined, agentId: string | null | undefined): ActorRef {
+  if (!agentId) return makeActorRef("unknown", "unassigned-agent", "Unassigned", "", "");
+  const agent = board?.agentSpecs?.find((candidate) => candidate.id === agentId);
+  if (!agent) return makeActorRef("agent", agentId, agentId, "Board agent", "Agent");
+  return makeActorRef("agent", agent.id, agent.name, agent.role || agent.id, "Agent");
+}
+
+function actorFromService(label: string, detail = ""): ActorRef {
+  return makeActorRef("service", slugify(label) || "service", label, detail, "Service");
+}
+
+function actorFromSessionRecord(tokenRecord: Pick<PublicTokenRecord, "sessionId" | "label" | "projectId" | "delegatedBy" | "capabilities" | "expiresAt" | "revokedAt" | "lastUsedAt">, board?: Board | null): ActorRef {
+  const status = tokenRecord.revokedAt ? "Revoked" : isExpiredTimestamp(tokenRecord.expiresAt) ? "Expired" : "Active";
+  return {
+    ...makeActorRef("session", tokenRecord.sessionId || "agent-session", tokenRecord.label || shortSessionId(tokenRecord.sessionId) || "AgentSession", `Session ${shortSessionId(tokenRecord.sessionId) || "n/a"}`, status),
+    sessionId: tokenRecord.sessionId,
+    delegatedBy: tokenRecord.delegatedBy,
+    projectId: tokenRecord.projectId,
+    capabilities: tokenRecord.capabilities,
+    status,
+    title: [
+      tokenRecord.label || "AgentSession",
+      tokenRecord.sessionId ? `Session ${tokenRecord.sessionId}` : "",
+      tokenRecord.projectId ? `Project ${tokenRecord.projectId}` : "",
+      board?.name ? `Board ${board.name}` : ""
+    ].filter(Boolean).join(" / ")
+  };
+}
+
+function actorFromActivitySession(event: InspectorActivityEvent, board?: Board | null): ActorRef {
+  const sessionId = activityValue(event.delegation, "sessionId") || activityValue(event.payload, "sessionId");
+  if (!sessionId) return makeActorRef("unknown", "no-session", "No session", "", "");
+  return actorFromSessionRecord({
+    sessionId,
+    label: activityValue(event.delegation, "label") || shortSessionId(sessionId),
+    projectId: activityValue(event.delegation, "projectId") || activityValue(event.payload, "projectId") || null,
+    delegatedBy: activityValue(event.delegation, "delegatedBy") || activityValue(event.payload, "delegatedBy") || null,
+    capabilities: Array.isArray(event.delegation?.capabilities) ? event.delegation.capabilities.map(String) : [],
+    expiresAt: activityValue(event.delegation, "expiresAt") || null,
+    revokedAt: null,
+    lastUsedAt: event.createdAt || null
+  }, board);
+}
+
+function actorFromProvenance(actor: AnyRecord | null, board?: Board | null): ActorRef {
+  if (!actor) return makeActorRef("unknown", "unknown-actor", "Unknown actor", "", "");
+  const type = activityValue(actor, "type");
+  if (type === "agent") return actorFromAgent(board, activityValue(actor, "agentId") || activityValue(actor, "userId"));
+  if (type === "user") {
+    const member = findMemberByIdentity({
+      userId: activityValue(actor, "userId"),
+      email: activityValue(actor, "email"),
+      name: activityValue(actor, "name")
+    });
+    if (member) return actorFromMember(member);
+    return makeActorRef("human", activityValue(actor, "userId") || activityValue(actor, "email") || "user", activityValue(actor, "name") || activityValue(actor, "email") || "User", activityValue(actor, "email") || activityValue(actor, "userId"), "Human");
+  }
+  if (type === "service") {
+    const method = activityValue(actor, "method");
+    const label = activityValue(actor, "name") || (method === "break-glass" ? "Break-glass admin" : "Service");
+    return actorFromService(label, method || activityValue(actor, "userId"));
+  }
+  return makeActorRef("unknown", activityValue(actor, "userId") || type || "unknown-actor", activityValue(actor, "name") || type || "Unknown actor", "", "");
+}
+
+function actorFromDelegatedBy(value: unknown, board?: Board | null): ActorRef {
+  const text = optionalText(value);
+  if (!text) return makeActorRef("unknown", "no-delegation", "No delegation", "", "");
+  if (text.startsWith("user:")) {
+    const userId = text.slice("user:".length);
+    const member = findMemberByIdentity({ userId });
+    return member ? actorFromMember(member) : makeActorRef("human", userId, userId, "Delegating user", "Human");
+  }
+  if (text.startsWith("agent:")) return actorFromAgent(board, text.slice("agent:".length));
+  if (text.startsWith("service:")) return actorFromService(text.slice("service:".length) || "Service", "Delegation source");
+  const member = findMemberByIdentity({ userId: text, email: text });
+  return member ? actorFromMember(member) : actorFromService(text, "Delegation source");
+}
+
+function actorFromCommentAuthor(board: Board | null | undefined, author: string | null | undefined): ActorRef {
+  const text = optionalText(author);
+  if (!text) return actorFromService("System", "Comment");
+  const agent = board?.agentSpecs?.find((candidate) => candidate.id === text || candidate.name === text);
+  if (agent) return actorFromAgent(board, agent.id);
+  const member = findMemberByIdentity({ userId: text, email: text, name: text });
+  if (member) return actorFromMember(member);
+  if (text === "system" || text === "admin" || text === "human-reviewer") return actorFromService(text, "Comment actor");
+  return makeActorRef("unknown", text, text, "Comment actor", "");
+}
+
+function makeActorRef(kind: ActorKind, id: string, label: string, detail = "", badge = ""): ActorRef {
+  const fallbackInitials: Record<ActorKind, string> = {
+    human: "HU",
+    agent: "AG",
+    service: "SV",
+    session: "SE",
+    unknown: "--"
+  };
+  const normalizedLabel = label || (kind === "unknown" ? "Unassigned" : kind);
+  return {
+    kind,
+    id,
+    label: normalizedLabel,
+    detail,
+    initials: actorInitials(normalizedLabel, fallbackInitials[kind]),
+    badge,
+    title: [normalizedLabel, detail, badge].filter(Boolean).join(" / ")
+  };
+}
+
+function actorInitials(value: string, fallback = "--"): string {
+  const emailName = value.includes("@") ? value.split("@")[0] : value;
+  const parts = emailName
+    .replace(/[^a-zA-Z0-9]+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (!parts.length) return fallback;
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return `${parts[0][0] || ""}${parts[1][0] || ""}`.toUpperCase() || fallback;
+}
+
+function renderActorChip(actor: ActorRef, options: { compact?: boolean; subtle?: boolean } = {}): string {
+  const classes = [
+    "actor-chip",
+    `actor-chip-${actor.kind}`,
+    options.compact ? "is-compact" : "",
+    options.subtle ? "is-subtle" : ""
+  ].filter(Boolean).join(" ");
+  return `
+    <span class="${escapeAttribute(classes)}" title="${escapeAttribute(actor.title)}">
+      <span class="actor-avatar" aria-hidden="true">${escapeHtml(actor.initials)}</span>
+      <span class="actor-chip-text">
+        <strong>${escapeHtml(actor.label)}</strong>
+        ${options.compact || !actor.detail ? "" : `<small>${escapeHtml(actor.detail)}</small>`}
+      </span>
+      ${options.compact || !actor.badge ? "" : `<span class="actor-badge">${escapeHtml(actor.badge)}</span>`}
+    </span>
+  `;
+}
+
+function renderActorRole(label: string, actor: ActorRef, compact = false): string {
+  return `
+    <div class="actor-role-row">
+      <span class="meta-label">${escapeHtml(label)}</span>
+      ${renderActorChip(actor, { compact })}
+    </div>
+  `;
+}
+
+function renderMetadataActorItem(label: string, actor: ActorRef): string {
+  return renderMetadataHtmlItem(label, renderActorChip(actor, { compact: true }));
+}
+
+function renderMetadataHtmlItem(label: string, html: string): string {
+  return `
+    <div>
+      <dt>${escapeHtml(label)}</dt>
+      <dd class="metadata-rich">${html}</dd>
+    </div>
+  `;
+}
+
+function shortSessionId(sessionId: unknown): string {
+  const text = optionalText(sessionId);
+  if (!text) return "";
+  return text.length <= 12 ? text : `${text.slice(0, 8)}...${text.slice(-4)}`;
+}
+
+function isExpiredTimestamp(value: unknown): boolean {
+  const text = optionalText(value);
+  if (!text) return false;
+  const time = new Date(text).getTime();
+  return !Number.isNaN(time) && time <= Date.now();
+}
+
 function renderFlowMessage(): string {
   if (!flowMessage) return "";
   return `<p class="flow-message ${escapeHtml(flowMessageTone)}">${escapeHtml(flowMessage)}</p>`;
@@ -1390,21 +1956,43 @@ function renderWorkItemCard(item: WorkItem, board: Board): string {
         <span class="${escapeAttribute(attentionChipClass(current.attention))}">${escapeHtml(current.attention.label)}</span>
       </div>
       <p class="card-summary">${escapeHtml(item.summary || "No summary provided.")}</p>
-      <div class="card-agent-grid">
-        <div>
-          <span class="meta-label">Owner</span>
-          <strong>${escapeHtml(resolveAgentShortName(board, item.ownerAgentId))}</strong>
-        </div>
-        <div>
-          <span class="meta-label">Reviewer</span>
-          <strong>${escapeHtml(resolveAgentShortName(board, item.reviewerAgentId))}</strong>
-        </div>
-      </div>
+      ${renderCardActorGrid(item, board)}
       <div class="card-state-footer">
         ${openRequestText ? `<span class="card-request-count">${escapeHtml(openRequestText)}</span>` : ""}
-        <p>${escapeHtml(formatCardLatestActivity(current.latestComment))}</p>
+        <p>${escapeHtml(formatCardLatestActivity(current.latestComment, board))}</p>
       </div>
     </article>
+  `;
+}
+
+function renderCardActorGrid(item: WorkItem, board: Board): string {
+  const ownerActor = item.ownerMemberId
+    ? actorFromMemberId(item.ownerMemberId)
+    : actorFromAgent(board, item.ownerAgentId);
+  const reviewerActor = item.reviewerMemberId
+    ? actorFromMemberId(item.reviewerMemberId)
+    : actorFromAgent(board, item.reviewerAgentId);
+  const delegatedAgentIds = [
+    item.ownerMemberId ? item.ownerAgentId : null,
+    item.reviewerMemberId ? item.reviewerAgentId : null
+  ]
+    .filter((agentId): agentId is string => Boolean(agentId))
+    .filter((agentId, index, ids) => ids.indexOf(agentId) === index);
+  const showDelegatedAgent = delegatedAgentIds.length > 0;
+
+  return `
+    <div class="card-actor-grid">
+      ${renderActorRole("Owner", ownerActor, true)}
+      ${renderActorRole("Reviewer", reviewerActor, true)}
+      ${showDelegatedAgent ? `
+        <div class="card-delegated-agent">
+          <span class="meta-label">Delegated agent</span>
+          <div class="actor-chip-group">
+            ${delegatedAgentIds.map((agentId) => renderActorChip(actorFromAgent(board, agentId), { compact: true })).join("")}
+          </div>
+        </div>
+      ` : ""}
+    </div>
   `;
 }
 
@@ -1437,7 +2025,10 @@ function renderInspector(board: Board | null = getActiveBoardOrNull()): void {
   inspectorPanel.innerHTML = `
     <div class="inspector-label">
       <span>Inspector</span>
-      <strong>Selected card</strong>
+      <div class="inspector-label-actions">
+        <strong>Selected card</strong>
+        <button class="icon-action inspector-close" type="button" data-action="close-inspector-drawer" aria-label="Close inspector">x</button>
+      </div>
     </div>
     <section class="work-item-detail">
       <div class="detail-header">
@@ -1445,12 +2036,13 @@ function renderInspector(board: Board | null = getActiveBoardOrNull()): void {
         <h2>${escapeHtml(selected.title || "Untitled card")}</h2>
         <p>${escapeHtml(selected.summary || "No summary provided.")}</p>
       </div>
+      ${renderPeopleAndAgentsPanel(selected, board)}
       ${renderCurrentStatePanel(selected, board)}
       <div class="comment-thread">
         <div class="section-heading">
           <h3>Activity</h3>
         </div>
-        ${renderCommentThread(selected)}
+        ${renderCommentThread(selected, board)}
       </div>
       ${renderInspectorActivityPanel()}
     </section>
@@ -1475,6 +2067,11 @@ function resetInspectorActivity(): void {
   inspectorActivityLoading = false;
   inspectorActivityUnavailable = false;
   inspectorActivityError = "";
+}
+
+function closeInspectorDrawer(): void {
+  inspectorDrawerOpen = false;
+  render();
 }
 
 async function loadInspectorActivity(boardId: string, cardId: string): Promise<void> {
@@ -1507,6 +2104,45 @@ async function loadInspectorActivity(boardId: string, cardId: string): Promise<v
   }
 }
 
+function renderPeopleAndAgentsPanel(item: WorkItem, board: Board): string {
+  const ownerAgent = item.ownerAgentId ? actorFromAgent(board, item.ownerAgentId) : null;
+  const reviewerAgent = item.reviewerAgentId ? actorFromAgent(board, item.reviewerAgentId) : null;
+  const latestSessionEvent = inspectorActivityEvents.find((event) => activityValue(event.delegation, "sessionId") || activityValue(event.payload, "sessionId"));
+  const latestEvent = inspectorActivityEvents[0] || null;
+  const current = getWorkItemCurrentState(board, item);
+  const lastActor = latestEvent?.actor
+    ? actorFromProvenance(latestEvent.actor, board)
+    : current.latestComment
+      ? actorFromCommentAuthor(board, current.latestComment.author)
+      : makeActorRef("unknown", "no-actor", "No activity", "", "");
+
+  const agentRows = (() => {
+    if (ownerAgent && reviewerAgent && item.ownerAgentId === item.reviewerAgentId) {
+      return renderActorRole("Delegated agent", ownerAgent);
+    }
+    return [
+      ownerAgent ? renderActorRole("Owner agent", ownerAgent) : "",
+      reviewerAgent ? renderActorRole("Reviewer agent", reviewerAgent) : ""
+    ].join("");
+  })();
+
+  return `
+    <section class="people-agents-panel" aria-labelledby="people-agents-title">
+      <div class="section-heading">
+        <h3 id="people-agents-title">People & agents</h3>
+      </div>
+      <div class="actor-role-grid">
+        ${renderActorRole("Requester", actorFromMemberId(item.requesterMemberId))}
+        ${renderActorRole("Human owner", actorFromMemberId(item.ownerMemberId))}
+        ${renderActorRole("Human reviewer", actorFromMemberId(item.reviewerMemberId))}
+        ${agentRows || renderActorRole("Delegated agent", makeActorRef("unknown", "no-agent", "No agent", "", ""))}
+        ${renderActorRole("Latest AgentSession", latestSessionEvent ? actorFromActivitySession(latestSessionEvent, board) : makeActorRef("unknown", "no-session", "No session yet", "", ""))}
+        ${renderActorRole("Last actor", lastActor)}
+      </div>
+    </section>
+  `;
+}
+
 function renderCurrentStatePanel(item: WorkItem, board: Board): string {
   const current = getWorkItemCurrentState(board, item);
   const laneTitle = current.lane?.title || "Unknown lane";
@@ -1518,8 +2154,6 @@ function renderCurrentStatePanel(item: WorkItem, board: Board): string {
       </div>
       <div class="current-state-grid">
         ${renderStateGridItem("Lane", laneTitle)}
-        ${renderStateGridItem("Owner", resolveAgentDisplayName(board, item.ownerAgentId))}
-        ${renderStateGridItem("Reviewer", resolveAgentDisplayName(board, item.reviewerAgentId))}
         ${renderStateGridItem("Open requests", String(current.openRequests.length))}
         ${renderStateGridItem("Change requests", String(current.openChangeRequests.length))}
         ${renderStateGridItem("Blockers", String(current.openBlockers.length))}
@@ -1529,7 +2163,7 @@ function renderCurrentStatePanel(item: WorkItem, board: Board): string {
       <div class="current-state-rows">
         <div class="current-state-row">
           <span class="meta-label">Latest</span>
-          <p>${escapeHtml(formatLatestActivitySentence(current.latestComment))}</p>
+          <p>${escapeHtml(formatLatestActivitySentence(current.latestComment, board))}</p>
         </div>
         <div class="current-state-row">
           <span class="meta-label">Open requests</span>
@@ -1611,7 +2245,8 @@ function renderInspectorActivityPanel(): string {
 }
 
 function renderInspectorActivityEvent(event: InspectorActivityEvent): string {
-  const actor = formatActivityActor(event);
+  const board = getBoardById(event.boardId || "") || getActiveBoardOrNull();
+  const actor = actorFromProvenance(event.actor, board);
   const sessionId = activityValue(event.delegation, "sessionId") || activityValue(event.payload, "sessionId");
   const projectId = activityValue(event.payload, "projectId") ||
     activityValue(event.actor, "projectId") ||
@@ -1619,18 +2254,23 @@ function renderInspectorActivityEvent(event: InspectorActivityEvent): string {
   const capabilities = formatActivityCapabilities(event.delegation?.capabilities || event.payload.capabilities);
   const reason = activityValue(event.delegation, "reason") || activityValue(event.payload, "reason");
   const delegatedBy = activityValue(event.delegation, "delegatedBy") || activityValue(event.payload, "delegatedBy");
+  const sessionActor = sessionId ? actorFromActivitySession(event, board) : makeActorRef("unknown", "no-session", "No session", "", "");
+  const delegatedActor = delegatedBy ? actorFromDelegatedBy(delegatedBy, board) : makeActorRef("unknown", "no-delegation", "No delegation", "", "");
 
   return `
     <article class="activity-event">
       <div class="activity-event-header">
-        <strong>${escapeHtml(formatActivityTitle(event))}</strong>
+        <div class="activity-event-actor">
+          ${renderActorChip(actor, { compact: true })}
+          <strong>${escapeHtml(formatActivityTitle(event))}</strong>
+        </div>
         ${event.createdAt ? `<time datetime="${escapeAttribute(event.createdAt)}">${escapeHtml(formatDateTime(event.createdAt) || formatRelativeTime(event.createdAt))}</time>` : ""}
       </div>
       <dl class="metadata-grid compact">
-        ${renderMetadataItem("Actor", actor)}
-        ${renderMetadataItem("Session", sessionId || "n/a")}
+        ${renderMetadataActorItem("Actor", actor)}
+        ${renderMetadataActorItem("Session", sessionId ? sessionActor : makeActorRef("unknown", "no-session", "No session", "", ""))}
         ${renderMetadataItem("Project", projectId || "n/a")}
-        ${renderMetadataItem("Delegated by", delegatedBy || "n/a")}
+        ${renderMetadataActorItem("Delegated by", delegatedBy ? delegatedActor : makeActorRef("unknown", "no-delegation", "No delegation", "", ""))}
         ${renderMetadataItem("Capabilities", capabilities || "n/a")}
         ${renderMetadataItem("Reason", reason || "n/a")}
       </dl>
@@ -1657,17 +2297,6 @@ function formatActivityTitle(event: InspectorActivityEvent): string {
   return `${formatCommentKind(action)} / ${formatCommentKind(subjectType)}`;
 }
 
-function formatActivityActor(event: InspectorActivityEvent): string {
-  const actor = event.actor;
-  if (!actor) return "unknown";
-  return activityValue(actor, "email") ||
-    activityValue(actor, "name") ||
-    activityValue(actor, "userId") ||
-    activityValue(actor, "agentId") ||
-    activityValue(actor, "type") ||
-    "unknown";
-}
-
 function formatActivityCapabilities(value: unknown): string {
   return Array.isArray(value) ? value.map((item) => String(item)).filter(Boolean).join(", ") : String(value || "");
 }
@@ -1690,53 +2319,53 @@ function formatMetadataValue(value: unknown): string {
   return String(value);
 }
 
-function renderCommentThread(item: WorkItem): string {
+function renderCommentThread(item: WorkItem, board: Board): string {
   const comments = Array.isArray(item.comments) ? item.comments : [];
   if (!comments.length) return '<p class="empty-note">No activity yet</p>';
 
-  return comments.map((comment) => `
-    <article class="comment-card ${escapeAttribute(comment.kind || "note")}">
-      <div class="comment-card-header">
-        <span class="comment-kind">${escapeHtml(comment.kind || "note")}</span>
-        <span class="comment-status">${escapeHtml(comment.status || "open")}</span>
-      </div>
-      <p>${escapeHtml(comment.text || "")}</p>
-      <div class="comment-meta">
-        <span>${escapeHtml(comment.author || "agent")}</span>
-        <time datetime="${escapeAttribute(comment.createdAt || "")}">${escapeHtml(formatDateTime(comment.createdAt))}</time>
-      </div>
-    </article>
-  `).join("");
+  return comments.map((comment) => {
+    const actor = actorFromCommentAuthor(board, comment.author);
+    return `
+      <article class="comment-card ${escapeAttribute(comment.kind || "note")}">
+        <div class="comment-card-header">
+          <div class="comment-actor-line">
+            ${renderActorChip(actor, { compact: true })}
+            <span class="comment-kind">${escapeHtml(comment.kind || "note")}</span>
+          </div>
+          <span class="comment-status">${escapeHtml(comment.status || "open")}</span>
+        </div>
+        <p>${escapeHtml(comment.text || "")}</p>
+        <div class="comment-meta">
+          <span>${escapeHtml(formatActorActionLabel(actor, "commented"))}</span>
+          <time datetime="${escapeAttribute(comment.createdAt || "")}">${escapeHtml(formatDateTime(comment.createdAt))}</time>
+        </div>
+      </article>
+    `;
+  }).join("");
 }
 
-function resolveAgentDisplayName(board: Board, agentId: string | null | undefined): string {
-  if (!agentId) return "Unassigned";
-  const agent = board.agentSpecs?.find((candidate) => candidate.id === agentId);
-  if (!agent) return agentId;
-  return agent.role ? `${agent.name} (${agent.role})` : agent.name;
-}
-
-function resolveAgentShortName(board: Board, agentId: string | null | undefined): string {
-  if (!agentId) return "Unassigned";
-  const agent = board.agentSpecs?.find((candidate) => candidate.id === agentId);
-  return agent?.name || agentId;
-}
-
-function formatCardLatestActivity(comment: WorkItemComment | null): string {
+function formatCardLatestActivity(comment: WorkItemComment | null, board: Board): string {
   if (!comment) return "Latest: no activity yet";
+  const actor = actorFromCommentAuthor(board, comment.author);
   const pieces = [
-    comment.author || "agent",
+    actor.label,
     formatCommentKind(comment.kind),
     formatRelativeTime(comment.updatedAt || comment.createdAt)
   ].filter(Boolean);
   return `Latest: ${pieces.join(" / ")}`;
 }
 
-function formatLatestActivitySentence(comment: WorkItemComment | null): string {
+function formatLatestActivitySentence(comment: WorkItemComment | null, board: Board): string {
   if (!comment) return "No activity yet.";
+  const actor = actorFromCommentAuthor(board, comment.author);
   const age = formatRelativeTime(comment.updatedAt || comment.createdAt);
   const suffix = age ? ` ${age}` : "";
-  return `${comment.author || "agent"} posted ${formatCommentKind(comment.kind)}${suffix}.`;
+  return `${formatActorActionLabel(actor, "posted")} ${formatCommentKind(comment.kind)}${suffix}.`;
+}
+
+function formatActorActionLabel(actor: ActorRef, verb: string): string {
+  if (actor.kind === "session" && actor.delegatedBy) return `${actor.label} ${verb}`;
+  return `${actor.label} ${verb}`;
 }
 
 function formatRequestSummary(current: WorkItemCurrentState): string {
@@ -1834,8 +2463,7 @@ function renderTeamMemberRow(member: PublicTeamMember): string {
   return `
     <li class="team-row" data-team-member-id="${escapeAttribute(member.id)}">
       <div class="team-row-main">
-        <strong>${escapeHtml(member.name || member.email)}</strong>
-        <span>${escapeHtml(member.email)}</span>
+        ${renderActorChip(actorFromMember(member))}
         <span>${escapeHtml(member.userId)}</span>
       </div>
       <div class="team-row-controls">
@@ -1850,11 +2478,11 @@ function renderTeamMemberRow(member: PublicTeamMember): string {
 
 function renderTeamInviteRow(invite: PublicTeamInvite): string {
   const editable = canManageRoleInUi(invite.role);
+  const actor = makeActorRef("human", invite.email, invite.email, "Pending invite", invite.role);
   return `
     <li class="team-row" data-team-invite-id="${escapeAttribute(invite.id)}">
       <div class="team-row-main">
-        <strong>${escapeHtml(invite.email)}</strong>
-        <span>${escapeHtml(invite.role)}</span>
+        ${renderActorChip(actor, { subtle: true })}
         <span>${escapeHtml(invite.projectIds.includes("*") ? "All projects" : invite.projectIds.join(", "))}</span>
         <time datetime="${escapeAttribute(invite.expiresAt)}">${escapeHtml(formatDateTime(invite.expiresAt))}</time>
       </div>
@@ -1983,19 +2611,29 @@ function renderConnectAgentDialog(board: Board): string {
   const command = agentConnectToken?.token ? buildAgentSetupCommand(board, agent, agentConnectToken.token) : "";
   const tokenRows = agentConnectTokens.length
     ? agentConnectTokens.map((tokenRecord) => `
-      <li class="token-row">
+      <li class="token-row agent-session-row" data-agent-session-id="${escapeAttribute(tokenRecord.sessionId)}">
         <div class="token-row-main">
           <div class="token-row-heading">
-            <strong>${escapeHtml(tokenRecord.label || "Local agent")}</strong>
-            <span>ending ${escapeHtml(tokenRecord.last4)}</span>
+            ${renderActorChip(actorFromSessionRecord(tokenRecord, board))}
+            <span>Session ${escapeHtml(tokenRecord.sessionId || "n/a")} · token ending ${escapeHtml(tokenRecord.last4)}</span>
             <time datetime="${escapeAttribute(tokenRecord.createdAt || "")}">${escapeHtml(formatDateTime(tokenRecord.createdAt))}</time>
           </div>
-          ${renderAgentTokenMetadata(tokenRecord)}
+          ${renderAgentTokenMetadata(tokenRecord, board)}
+          ${renderAgentSessionTrace(tokenRecord, board)}
+          <div class="agent-session-edit-grid">
+            ${renderTextField({ label: "Label", value: tokenRecord.label || "", attributes: { "data-agent-session-label": true } })}
+            ${renderTextField({ label: "Expires", value: formatDateTimeLocalInput(tokenRecord.expiresAt), attributes: { type: "datetime-local", "data-agent-session-expires": true } })}
+            ${renderTextAreaField({ label: "Reason", value: tokenRecord.reason || "", rows: 2, className: "full-field", attributes: { "data-agent-session-reason": true } })}
+            ${renderAgentSessionCapabilityGroup(tokenRecord.capabilities || [])}
+          </div>
         </div>
-        <button class="secondary-button small danger-button" type="button" data-action="revoke-agent-token" data-token-id="${escapeAttribute(tokenRecord.id)}">Revoke</button>
+        <div class="token-row-actions">
+          <button class="secondary-button small" type="button" data-action="update-agent-session" data-session-id="${escapeAttribute(tokenRecord.sessionId)}" ${agentConnectLoading ? "disabled" : ""}>Save</button>
+          <button class="secondary-button small danger-button" type="button" data-action="revoke-agent-session" data-session-id="${escapeAttribute(tokenRecord.sessionId)}" ${agentConnectLoading ? "disabled" : ""}>Revoke</button>
+        </div>
       </li>
     `).join("")
-    : '<li class="empty-note">No active tokens</li>';
+    : '<li class="empty-note">No active AgentSessions</li>';
 
   return `
     <div class="modal-backdrop" data-action="close-modal">
@@ -2007,12 +2645,17 @@ function renderConnectAgentDialog(board: Board): string {
           </div>
           <button class="icon-action" type="button" data-action="cancel-agent-connect" aria-label="Close agent connection">x</button>
         </div>
-        <p class="modal-copy" id="connect-agent-description">${escapeHtml(agent.id)} receives board-scoped API access for assigned cards.</p>
+        <p class="modal-copy" id="connect-agent-description">${escapeHtml(agent.id)} receives board-scoped AgentSession access for assigned cards.</p>
         ${agentConnectError ? `<p class="flow-message warning">${escapeHtml(agentConnectError)}</p>` : ""}
-        <form class="modal-form" data-agent-token-form>
-          ${renderTextField({ label: "Token label", value: `${agent.name} local access`, attributes: { "data-agent-token-label": true } })}
+        <form class="modal-form" data-agent-session-form>
+          ${renderFieldGrid(`
+            ${renderTextField({ label: "Session label", value: `${agent.name} local session`, attributes: { "data-agent-session-label": true } })}
+            ${renderTextField({ label: "Expires", value: "", attributes: { type: "datetime-local", "data-agent-session-expires": true } })}
+          `)}
+          ${renderTextAreaField({ label: "Reason", value: `Board-scoped access for ${agent.name}.`, rows: 2, attributes: { "data-agent-session-reason": true } })}
+          ${renderAgentSessionCapabilityGroup(AGENT_SESSION_CAPABILITIES)}
           <div class="modal-actions">
-            <button class="primary-button" type="button" data-action="create-agent-token" ${agentConnectLoading ? "disabled" : ""}>Create token</button>
+            <button class="primary-button" type="button" data-action="create-agent-session" ${agentConnectLoading ? "disabled" : ""}>Create AgentSession</button>
           </div>
         </form>
         ${command ? `
@@ -2022,14 +2665,15 @@ function renderConnectAgentDialog(board: Board): string {
           </div>
           <div class="new-token-metadata">
             <div class="section-heading">
-              <h3>New token session</h3>
+              <h3>New AgentSession</h3>
             </div>
-            ${renderAgentTokenMetadata(agentConnectToken)}
+            ${renderAgentTokenMetadata(agentConnectToken, board)}
+            ${renderAgentSessionTrace(agentConnectToken, board)}
           </div>
         ` : ""}
         <div class="token-list-block">
           <div class="section-heading">
-            <h3>Active tokens</h3>
+            <h3>Active AgentSessions</h3>
           </div>
           <ul class="token-list">
             ${tokenRows}
@@ -2040,13 +2684,29 @@ function renderConnectAgentDialog(board: Board): string {
   `;
 }
 
-function renderAgentTokenMetadata(tokenRecord: PublicTokenRecord | CreatedAgentTokenPayload | null): string {
+function renderAgentSessionCapabilityGroup(selectedCapabilities: unknown): string {
+  const selected = new Set(Array.isArray(selectedCapabilities) ? selectedCapabilities.map((capability) => String(capability)) : []);
+  return renderCheckboxGroup({
+    legend: "Capabilities",
+    className: "agent-session-capabilities",
+    gridClassName: "agent-session-capability-grid",
+    options: AGENT_SESSION_CAPABILITIES.map((capability) => ({
+      label: AGENT_SESSION_CAPABILITY_LABELS[capability],
+      checked: selected.has(capability),
+      attributes: {
+        "data-agent-session-capability": capability
+      }
+    }))
+  });
+}
+
+function renderAgentTokenMetadata(tokenRecord: PublicTokenRecord | CreatedAgentTokenPayload | null, board?: Board | null): string {
   if (!tokenRecord) return "";
   return `
     <dl class="metadata-grid token-metadata">
-      ${renderMetadataItem("Session", tokenRecord.sessionId || "n/a")}
+      ${renderMetadataActorItem("Session", actorFromSessionRecord(tokenRecord, board))}
       ${renderMetadataItem("Project", tokenRecord.projectId || "n/a")}
-      ${renderMetadataItem("Delegated by", tokenRecord.delegatedBy || "n/a")}
+      ${renderMetadataActorItem("Delegated by", tokenRecord.delegatedBy ? actorFromDelegatedBy(tokenRecord.delegatedBy, board) : makeActorRef("unknown", "no-delegation", "No delegation", "", ""))}
       ${renderMetadataItem("Capabilities", formatMetadataValue(tokenRecord.capabilities) || "n/a")}
       ${renderMetadataItem("Expires", tokenRecord.expiresAt ? formatDateTime(tokenRecord.expiresAt) : "Never")}
       ${renderMetadataItem("Reason", tokenRecord.reason || "n/a")}
@@ -2055,11 +2715,39 @@ function renderAgentTokenMetadata(tokenRecord: PublicTokenRecord | CreatedAgentT
   `;
 }
 
+function renderAgentSessionTrace(tokenRecord: PublicTokenRecord | CreatedAgentTokenPayload | null, board?: Board | null): string {
+  if (!tokenRecord) return "";
+  const agentActor = actorFromAgent(board, tokenRecord.agentId);
+  const sessionActor = actorFromSessionRecord(tokenRecord, board);
+  const delegatedActor = tokenRecord.delegatedBy
+    ? actorFromDelegatedBy(tokenRecord.delegatedBy, board)
+    : makeActorRef("unknown", "no-delegation", "No delegation", "", "");
+  return `
+    <div class="agent-session-trace-panel">
+      <div class="actor-chip-group">
+        ${renderActorChip(agentActor, { compact: true })}
+        ${renderActorChip(sessionActor, { compact: true })}
+        ${renderActorChip(delegatedActor, { compact: true, subtle: !tokenRecord.delegatedBy })}
+      </div>
+      <dl class="session-trace-list">
+        ${renderMetadataItem("Status", sessionActor.status || "Active")}
+        ${renderMetadataItem("Capabilities", formatMetadataValue(tokenRecord.capabilities) || "n/a")}
+        ${renderMetadataItem("Reason", tokenRecord.reason || "n/a")}
+        ${renderMetadataItem("Last used", tokenRecord.lastUsedAt ? formatDateTime(tokenRecord.lastUsedAt) : "Never")}
+      </dl>
+    </div>
+  `;
+}
+
 function renderCreateWorkItemDialog(board: Board): string {
   const firstLane = board.lanes[0] || ({} as Partial<Lane>);
   const selectedLane = board.lanes.find((lane) => lane.id === workItemDialogLaneId) || firstLane;
   const selectedLaneId = selectedLane.id || "";
   const agentOptions = renderAgentOptions(board.agentSpecs || []);
+  const memberOptions = renderMemberOptions(authSession?.memberId || null);
+  const ownerMemberOptions = renderMemberOptions(null);
+  const reviewerMemberOptions = renderMemberOptions(null);
+  const hasMembers = getKnownMembers().length > 0;
   const laneOptions = board.lanes.map((lane) => `
     <option value="${escapeAttribute(lane.id)}" ${lane.id === selectedLaneId ? "selected" : ""}>${escapeHtml(lane.title)}</option>
   `).join("");
@@ -2079,6 +2767,11 @@ function renderCreateWorkItemDialog(board: Board): string {
           ${renderTextField({ label: "Title", required: true, attributes: { "data-work-item-field": "title" } })}
           ${renderTextAreaField({ label: "Summary", rows: 3, attributes: { "data-work-item-field": "summary" } })}
           ${renderSelectField({ label: "Lane", optionsHtml: laneOptions, attributes: { "data-work-item-field": "laneId" } })}
+          ${hasMembers ? renderFieldGrid(`
+            ${renderSelectField({ label: "Requester", optionsHtml: memberOptions, attributes: { "data-work-item-field": "requesterMemberId" } })}
+            ${renderSelectField({ label: "Human owner", optionsHtml: ownerMemberOptions, attributes: { "data-work-item-field": "ownerMemberId" } })}
+            ${renderSelectField({ label: "Human reviewer", optionsHtml: reviewerMemberOptions, attributes: { "data-work-item-field": "reviewerMemberId" } })}
+          `, "human-assignment-grid") : ""}
           ${board.agentSpecs?.length ? "" : '<p class="empty-note">No board agents configured yet. Add agents in Edit flow to make assignments selectable.</p>'}
           ${renderFieldGrid(`
             ${renderSelectField({ label: "Owner agent", optionsHtml: agentOptions(selectedLane.defaultOwnerAgentId), attributes: { "data-work-item-field": "ownerAgentId" } })}
@@ -2117,8 +2810,7 @@ function renderDeleteBoardDialog(board: Board): string {
 }
 
 function resetBoardScopedUi(): void {
-  flowMessage = "";
-  flowMessageTone = "neutral";
+  resetFlowAiState();
   templateFormOpen = false;
   editingTemplateId = null;
   resetWorkItemDialogState();
@@ -2127,6 +2819,19 @@ function resetBoardScopedUi(): void {
   boardSettingsDialogOpen = false;
   resetAgentConnectDialog();
   resetInspectorActivity();
+  inspectorDrawerOpen = false;
+}
+
+function resetFlowAiState(): void {
+  dismissToast(FLOW_AI_TOAST_KEY);
+  flowMessage = "";
+  flowMessageTone = "neutral";
+  flowAiLoading = false;
+  flowAiError = "";
+  flowAiSummary = "";
+  flowAiWarnings = [];
+  flowApplyInFlight = false;
+  flowAdvancedOpen = false;
 }
 
 async function openTeamSettingsDialog(): Promise<void> {
@@ -2500,22 +3205,44 @@ function useTemplate(templateId: string): void {
   if (shouldAdoptTemplateName(board)) {
     board.name = uniqueBoardName(template.name, board.id);
   }
-  board.lanes = withUniqueLaneIds(clone(template.lanes));
-  board.agentSpecs = clone(template.agentSpecs || []);
-  board.workItems = [];
-  board.selectedId = null;
+  board.configDraft = {
+    lanes: withUniqueLaneIds(clone(template.lanes)),
+    agentSpecs: clone(template.agentSpecs || [])
+  };
   board.flowPrompt = template.lanes.map((lane) => lane.title).join(", ");
-  board.configDraft = null;
-  board.isEditingFlow = false;
+  board.isEditingFlow = true;
   touchBoard(board);
   flowMessage = "";
   flowMessageTone = "neutral";
+  flowAiSummary = `${template.name} template is ready to review.`;
+  flowAiWarnings = [];
+  flowAiError = "";
+  flowAdvancedOpen = false;
   templateFormOpen = false;
   editingTemplateId = null;
   resetWorkItemDialogState();
   flowActionsMenuOpen = false;
   deleteBoardDialogOpen = false;
   resetAgentConnectDialog();
+  showToast({
+    title: "Template loaded",
+    message: "Review the draft and apply it when ready.",
+    tone: "success"
+  });
+  saveState();
+  render();
+}
+
+function useFlowPromptChip(prompt: string | undefined): void {
+  const text = String(prompt || "").trim();
+  if (!text) return;
+  const board = getActiveBoard();
+  const current = String(board.flowPrompt || "").trim();
+  board.flowPrompt = current ? `${current}\n\n${text}` : text;
+  touchBoard(board);
+  flowAiError = "";
+  flowMessage = "";
+  flowMessageTone = "neutral";
   saveState();
   render();
 }
@@ -2577,7 +3304,7 @@ async function openAgentConnectDialog(agentId: string | undefined): Promise<void
   agentConnectError = "";
   render();
   await refreshAgentTokens(board.id);
-  (modalRoot?.querySelector("[data-agent-token-label]") as HTMLElement | null)?.focus();
+  (modalRoot?.querySelector("[data-agent-session-label]") as HTMLElement | null)?.focus();
 }
 
 function resetAgentConnectDialog(): void {
@@ -2597,16 +3324,16 @@ function closeAgentConnectDialog(): void {
 async function refreshAgentTokens(boardId: string = getActiveBoard().id): Promise<void> {
   if (!agentConnectDialogOpen) return;
   try {
-    const response = await fetch(`${API_BASE_URL}/boards/${encodeURIComponent(boardId)}/agent-tokens`, {
+    const response = await fetch(`${API_BASE_URL}/boards/${encodeURIComponent(boardId)}/agent-sessions`, {
       headers: apiHeaders(false),
       credentials: "same-origin"
     });
-    if (!response.ok) throw new Error(`Token list failed with ${response.status}`);
+    if (!response.ok) throw new Error(`AgentSession list failed with ${response.status}`);
     const payload = await response.json();
-    agentConnectTokens = Array.isArray(payload.tokens) ? payload.tokens : [];
+    agentConnectTokens = Array.isArray(payload.sessions) ? payload.sessions : Array.isArray(payload.tokens) ? payload.tokens : [];
     agentConnectError = "";
   } catch (error) {
-    agentConnectError = "Could not load active tokens.";
+    agentConnectError = "Could not load active AgentSessions.";
   } finally {
     agentConnectLoading = false;
     render();
@@ -2618,32 +3345,46 @@ async function createAgentTokenFromForm(action: HTMLElement): Promise<void> {
   const agent = board.agentSpecs?.find((candidate) => candidate.id === agentConnectAgentId);
   if (!agent || agentConnectLoading) return;
 
-  const form = action.closest("[data-agent-token-form]");
-  const label = (form?.querySelector("[data-agent-token-label]") as FormControlElement | null)?.value.trim() || `${agent.name} local access`;
+  const form = action.closest("[data-agent-session-form]");
+  const label = (form?.querySelector("[data-agent-session-label]") as FormControlElement | null)?.value.trim() || `${agent.name} local session`;
+  const reason = (form?.querySelector("[data-agent-session-reason]") as FormControlElement | null)?.value.trim() || `Board-scoped access for ${agent.name}.`;
+  const expiresAt = readAgentSessionExpiresAt(form?.querySelector("[data-agent-session-expires]") as FormControlElement | null);
+  const capabilities = readAgentSessionCapabilities(form);
+  if (!capabilities.length) {
+    agentConnectError = "Select at least one capability.";
+    render();
+    return;
+  }
   agentConnectLoading = true;
   agentConnectError = "";
   render();
 
   try {
-    const response = await fetch(`${API_BASE_URL}/boards/${encodeURIComponent(board.id)}/agent-tokens`, {
+    const response = await fetch(`${API_BASE_URL}/boards/${encodeURIComponent(board.id)}/agent-sessions`, {
       method: "POST",
       headers: apiHeaders(true),
       credentials: "same-origin",
-      body: JSON.stringify({ agentId: agent.id, label })
+      body: JSON.stringify({ agentId: agent.id, label, capabilities, expiresAt, reason })
     });
     const payload = await response.json();
-    if (!response.ok) throw new Error(payload?.error || `Token creation failed with ${response.status}`);
+    if (!response.ok) throw new Error(payload?.error || `AgentSession creation failed with ${response.status}`);
     agentConnectToken = normalizeCreatedAgentTokenPayload(payload);
     await refreshAgentTokens(board.id);
-    showToast("Agent token created.");
+    showToast("AgentSession created.");
   } catch (error) {
-    agentConnectError = error instanceof Error ? error.message : "Could not create token.";
+    agentConnectError = error instanceof Error ? error.message : "Could not create AgentSession.";
     agentConnectLoading = false;
     render();
   }
 }
 
 function normalizeCreatedAgentTokenPayload(payload: any): CreatedAgentTokenPayload {
+  if (payload?.session && typeof payload.session === "object") {
+    return {
+      ...payload.session,
+      token: payload.token
+    } as CreatedAgentTokenPayload;
+  }
   if (payload?.tokenRecord && typeof payload.tokenRecord === "object") {
     return {
       ...payload.tokenRecord,
@@ -2653,29 +3394,91 @@ function normalizeCreatedAgentTokenPayload(payload: any): CreatedAgentTokenPaylo
   return payload as CreatedAgentTokenPayload;
 }
 
-async function revokeAgentToken(tokenId: string | undefined): Promise<void> {
+async function updateAgentSession(action: HTMLElement): Promise<void> {
   const board = getActiveBoard();
-  if (!tokenId || agentConnectLoading) return;
+  const row = action.closest("[data-agent-session-id]") as HTMLElement | null;
+  const sessionId = row?.dataset.agentSessionId || action.dataset.sessionId || "";
+  if (!sessionId || agentConnectLoading) return;
+  const label = (row?.querySelector("[data-agent-session-label]") as FormControlElement | null)?.value.trim() || "Local agent";
+  const reason = (row?.querySelector("[data-agent-session-reason]") as FormControlElement | null)?.value.trim() || "Board-scoped agent access.";
+  const expiresAt = readAgentSessionExpiresAt(row?.querySelector("[data-agent-session-expires]") as FormControlElement | null);
+  const capabilities = readAgentSessionCapabilities(row);
+  if (!capabilities.length) {
+    agentConnectError = "Select at least one capability.";
+    render();
+    return;
+  }
+
   agentConnectLoading = true;
   agentConnectError = "";
   render();
 
   try {
-    const response = await fetch(`${API_BASE_URL}/boards/${encodeURIComponent(board.id)}/agent-tokens/${encodeURIComponent(tokenId)}`, {
+    const response = await fetch(`${API_BASE_URL}/boards/${encodeURIComponent(board.id)}/agent-sessions/${encodeURIComponent(sessionId)}`, {
+      method: "PATCH",
+      headers: apiHeaders(true),
+      credentials: "same-origin",
+      body: JSON.stringify({ label, capabilities, expiresAt, reason })
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload?.error || `AgentSession update failed with ${response.status}`);
+    if (agentConnectToken?.sessionId === sessionId && payload?.session) {
+      agentConnectToken = { ...payload.session, token: agentConnectToken.token };
+    }
+    await refreshAgentTokens(board.id);
+    showToast("AgentSession updated.");
+  } catch (error) {
+    agentConnectError = error instanceof Error ? error.message : "Could not update AgentSession.";
+    agentConnectLoading = false;
+    render();
+  }
+}
+
+async function revokeAgentSession(sessionId: string | undefined): Promise<void> {
+  const board = getActiveBoard();
+  if (!sessionId || agentConnectLoading) return;
+  agentConnectLoading = true;
+  agentConnectError = "";
+  render();
+
+  try {
+    const response = await fetch(`${API_BASE_URL}/boards/${encodeURIComponent(board.id)}/agent-sessions/${encodeURIComponent(sessionId)}`, {
       method: "DELETE",
       headers: apiHeaders(false),
       credentials: "same-origin"
     });
     const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload?.error || `Token revoke failed with ${response.status}`);
-    if (agentConnectToken?.id === tokenId) agentConnectToken = null;
+    if (!response.ok) throw new Error(payload?.error || `AgentSession revoke failed with ${response.status}`);
+    if (agentConnectToken?.sessionId === sessionId) agentConnectToken = null;
     await refreshAgentTokens(board.id);
-    showToast("Agent token revoked.");
+    showToast("AgentSession revoked.");
   } catch (error) {
-    agentConnectError = error instanceof Error ? error.message : "Could not revoke token.";
+    agentConnectError = error instanceof Error ? error.message : "Could not revoke AgentSession.";
     agentConnectLoading = false;
     render();
   }
+}
+
+function readAgentSessionCapabilities(root: Element | null | undefined): AgentCapability[] {
+  if (!root) return [];
+  return Array.from(root.querySelectorAll<HTMLInputElement>("[data-agent-session-capability]:checked"))
+    .map((input) => input.dataset.agentSessionCapability || "")
+    .filter((capability): capability is AgentCapability => AGENT_SESSION_CAPABILITIES.includes(capability as AgentCapability));
+}
+
+function readAgentSessionExpiresAt(input: FormControlElement | null | undefined): string | null {
+  const value = input?.value.trim() || "";
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function formatDateTimeLocalInput(value: unknown): string {
+  if (!value) return "";
+  const date = new Date(String(value));
+  if (Number.isNaN(date.getTime())) return "";
+  const localTime = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+  return localTime.toISOString().slice(0, 16);
 }
 
 function buildAgentSetupCommand(board: Board, agent: AgentSpec, token: string): string {
@@ -2700,11 +3503,14 @@ function createWorkItemFromForm(action: HTMLElement): void {
     ? requestedLaneId
     : board.lanes[0].id;
   const now = new Date().toISOString();
-  const item = {
+  const item: WorkItem = {
     id: makeId("item"),
     title,
     summary: (form?.querySelector('[data-work-item-field="summary"]') as FormControlElement | null)?.value.trim() || "",
     laneId,
+    requesterMemberId: optionalText((form?.querySelector('[data-work-item-field="requesterMemberId"]') as FormControlElement | null)?.value),
+    ownerMemberId: optionalText((form?.querySelector('[data-work-item-field="ownerMemberId"]') as FormControlElement | null)?.value),
+    reviewerMemberId: optionalText((form?.querySelector('[data-work-item-field="reviewerMemberId"]') as FormControlElement | null)?.value),
     ownerAgentId: optionalText((form?.querySelector('[data-work-item-field="ownerAgentId"]') as FormControlElement | null)?.value),
     reviewerAgentId: optionalText((form?.querySelector('[data-work-item-field="reviewerAgentId"]') as FormControlElement | null)?.value),
     blockers: [],
@@ -2718,6 +3524,7 @@ function createWorkItemFromForm(action: HTMLElement): void {
 
   board.workItems.push(item);
   board.selectedId = item.id;
+  inspectorDrawerOpen = true;
   touchBoard(board);
   resetWorkItemDialogState();
   saveState();
@@ -2839,61 +3646,130 @@ function deleteTemplate(templateId: string): void {
   render();
 }
 
-function generateDraftFromPrompt(): void {
+async function generateDraftFromPrompt(): Promise<void> {
   const board = getActiveBoard();
-  const stages = parseFlowPrompt(board.flowPrompt);
+  const prompt = String(board.flowPrompt || "").trim();
 
-  if (stages.length < MIN_LANES) {
-    board.configDraft = null;
-    board.isEditingFlow = false;
-    flowMessage = "Use at least two comma-separated stages.";
-    flowMessageTone = "warning";
-    saveState();
+  if (!prompt) {
+    flowMessage = "";
+    flowMessageTone = "neutral";
+    showFlowAiToast({
+      title: "Flow command needed",
+      message: "Describe the workflow you want before generating a draft.",
+      tone: "warning"
+    });
     render();
     return;
   }
 
-  const cappedStages = stages.slice(0, MAX_LANES);
-  board.configDraft = {
-    lanes: cappedStages.map((stage, index) => {
-      const nextStage = cappedStages[index + 1] || "";
-      return makeLane(stage, defaultLaneDescription(stage, nextStage), nextStage);
-    }),
-    agentSpecs: clone(board.agentSpecs || [])
-  };
+  flowAiLoading = true;
+  flowAiError = "";
+  flowAiSummary = "";
+  flowAiWarnings = [];
+  flowMessage = "";
+  flowMessageTone = "neutral";
+  const previousConfigDraft = clone(board.configDraft);
+  const previousIsEditingFlow = board.isEditingFlow;
   board.isEditingFlow = true;
-  flowMessage = stages.length > MAX_LANES
-    ? `Using the first ${MAX_LANES} stages.`
-    : "Draft flow generated.";
-  flowMessageTone = stages.length > MAX_LANES ? "warning" : "success";
-  touchBoard(board);
-  saveState();
   render();
+
+  try {
+    const payload = await fetchApiJson<FlowAiDraftPayload>(`${API_BASE_URL}/boards/${encodeURIComponent(board.id)}/flow/ai-draft`, {
+      method: "POST",
+      body: JSON.stringify({ prompt })
+    });
+    const draft = normalizeDraft(payload.draft);
+    if (!draft || draft.lanes.length < MIN_LANES) throw new Error("LM Studio returned a draft without enough lanes.");
+    board.configDraft = draft;
+    board.isEditingFlow = true;
+    flowAiSummary = payload.summary || "AI flow draft ready.";
+    flowAiWarnings = Array.isArray(payload.warnings) ? payload.warnings : [];
+    flowMessage = "";
+    flowMessageTone = "neutral";
+    touchBoard(board);
+    saveState();
+    showFlowAiToast({
+      title: "Flow draft ready",
+      message: `${payload.model ? `Draft generated with ${payload.model}. ` : ""}Review the preview, then apply it when ready.${flowAiWarnings.length ? ` ${flowAiWarnings.length} warning${flowAiWarnings.length === 1 ? "" : "s"} included in the preview.` : ""}`,
+      tone: "success"
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Could not generate flow draft.";
+    board.configDraft = previousConfigDraft;
+    board.isEditingFlow = previousIsEditingFlow;
+    flowAiError = "";
+    flowMessage = "";
+    flowMessageTone = "neutral";
+    showFlowAiToast({
+      title: "Flow draft failed",
+      message,
+      tone: "warning"
+    });
+  } finally {
+    flowAiLoading = false;
+    render();
+  }
 }
 
-function applyBoard(): void {
+async function applyBoard(): Promise<void> {
   const board = getActiveBoard();
   const draft = normalizeDraft(board.configDraft);
 
   if (!draft || draft.lanes.length < MIN_LANES) {
-    flowMessage = "Keep at least two lanes before applying the board.";
-    flowMessageTone = "warning";
+    flowMessage = "";
+    flowMessageTone = "neutral";
+    showFlowAiToast({
+      title: "Flow cannot be applied",
+      message: "Keep at least two lanes before applying the board.",
+      tone: "warning"
+    });
     render();
     return;
   }
 
-  board.lanes = withUniqueLaneIds(draft.lanes);
-  board.agentSpecs = draft.agentSpecs || [];
-  board.workItems = [];
-  board.selectedId = null;
-  board.configDraft = null;
-  board.isEditingFlow = false;
-  templateFormOpen = false;
-  touchBoard(board);
-  flowMessage = "";
-  flowMessageTone = "neutral";
-  saveState();
+  flowApplyInFlight = true;
+  flowAiError = "";
   render();
+
+  try {
+    const payload = await fetchApiJson<FlowApplyPayload>(`${API_BASE_URL}/boards/${encodeURIComponent(board.id)}/flow/apply`, {
+      method: "POST",
+      body: JSON.stringify({
+        draft,
+        flowPrompt: board.flowPrompt,
+        source: "ai"
+      })
+    });
+    await reloadWorkspaceStateFromApi();
+    state.activeBoardId = payload.board.id;
+    templateFormOpen = false;
+    flowAdvancedOpen = false;
+    flowAiSummary = "Flow applied without deleting cards.";
+    flowAiWarnings = Array.isArray(payload.warnings) ? payload.warnings : [];
+    const movedCount = payload.movedCards?.length || 0;
+    flowMessage = "";
+    flowMessageTone = "neutral";
+    showFlowAiToast({
+      title: "Flow applied",
+      message: movedCount
+        ? `${movedCount} card${movedCount === 1 ? "" : "s"} remapped. Existing cards were preserved.`
+        : "Existing cards were preserved.",
+      tone: "success"
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Could not apply flow.";
+    flowAiError = "";
+    flowMessage = "";
+    flowMessageTone = "neutral";
+    showFlowAiToast({
+      title: "Flow apply failed",
+      message,
+      tone: "warning"
+    });
+  } finally {
+    flowApplyInFlight = false;
+    render();
+  }
 }
 
 function editCurrentFlow(): void {
@@ -2906,8 +3782,7 @@ function editCurrentFlow(): void {
   };
   board.isEditingFlow = true;
   templateFormOpen = false;
-  flowMessage = "";
-  flowMessageTone = "neutral";
+  resetFlowAiState();
   saveState();
   render();
 }
@@ -2982,8 +3857,7 @@ function startOver(): void {
     board.isEditingFlow = false;
   }
 
-  flowMessage = "";
-  flowMessageTone = "neutral";
+  resetFlowAiState();
   templateFormOpen = false;
   saveState();
   render();
@@ -3010,8 +3884,12 @@ function ensureDraft(): BoardDraft {
 function addLane(): void {
   const draft = ensureDraft();
   if (draft.lanes.length >= MAX_LANES) {
-    flowMessage = `Use ${MAX_LANES} lanes or fewer.`;
-    flowMessageTone = "warning";
+    flowMessage = "";
+    flowMessageTone = "neutral";
+    showToast({
+      message: `Use ${MAX_LANES} lanes or fewer.`,
+      tone: "warning"
+    });
     render();
     return;
   }
@@ -3289,7 +4167,7 @@ function defaultGateChecks(title: string, nextTitle = ""): string[] {
 function withUniqueLaneIds(lanes: Lane[]): Lane[] {
   const used = new Map<string, number>();
   return lanes.map((lane) => {
-    const baseId = slugify(lane.title) || "lane";
+    const baseId = slugify(lane.id) || slugify(lane.title) || "lane";
     const nextCount = (used.get(baseId) || 0) + 1;
     used.set(baseId, nextCount);
     const id = nextCount === 1 ? baseId : `${baseId}-${nextCount}`;
@@ -3375,15 +4253,112 @@ function slugify(value: unknown): string {
     .slice(0, 48);
 }
 
-function showToast(message: string): void {
+function buildAliasMap<T extends { id: string }>(rawRecords: AnyRecord[], normalizedRecords: T[], fields: string[]): AliasMap {
+  const aliases: AliasMap = new Map();
+  rawRecords.forEach((rawRecord, index) => {
+    const normalizedId = normalizedRecords[index]?.id;
+    if (!normalizedId) return;
+    addAlias(aliases, normalizedId, normalizedId);
+    for (const field of fields) addAlias(aliases, rawRecord[field], normalizedId);
+  });
+  return aliases;
+}
+
+function addAlias(aliases: AliasMap, value: unknown, normalizedId: string): void {
+  const raw = String(value || "").trim();
+  if (!raw) return;
+  if (!aliases.has(raw)) aliases.set(raw, normalizedId);
+  const slug = slugify(raw);
+  if (slug && !aliases.has(slug)) aliases.set(slug, normalizedId);
+}
+
+function resolveAlias(value: unknown, aliases: AliasMap): string | null {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  return aliases.get(raw) || aliases.get(slugify(raw)) || null;
+}
+
+function normalizeLinkedAgentId(value: unknown, agentIds: Set<string>, agentAliases: AliasMap): string | null {
+  const raw = optionalText(value);
+  if (!raw) return null;
+  const resolved = resolveAlias(raw, agentAliases) || raw;
+  return !agentIds.size || agentIds.has(resolved) ? resolved : null;
+}
+
+function showToast(input: string | ToastOptions): void {
   if (!toastRegion) return;
+  const options: ToastOptions = typeof input === "string" ? { message: input } : input;
+  const message = String(options.message || "").trim();
+  if (!message) return;
+  const key = String(options.key || "").trim();
+  if (key) {
+    toastRegion.querySelectorAll(`[data-toast-key="${cssEscape(key)}"]`).forEach((existingToast) => existingToast.remove());
+  }
   const toast = document.createElement("div");
-  toast.className = "toast";
-  toast.textContent = message;
+  toast.className = `toast${toastToneClass(options.tone)}${options.persistent ? " is-persistent" : ""}`;
+  toast.setAttribute("role", toastRole(options.tone));
+  if (key) toast.dataset.toastKey = key;
+
+  const content = document.createElement("div");
+  content.className = "toast-content";
+  const title = String(options.title || "").trim();
+  if (title) {
+    const titleElement = document.createElement("strong");
+    titleElement.className = "toast-title";
+    titleElement.textContent = title;
+    content.appendChild(titleElement);
+  }
+  const messageElement = document.createElement("span");
+  messageElement.className = "toast-message";
+  messageElement.textContent = message;
+  content.appendChild(messageElement);
+  toast.appendChild(content);
+
+  if (options.persistent) {
+    const dismiss = document.createElement("button");
+    dismiss.className = "toast-dismiss";
+    dismiss.type = "button";
+    dismiss.dataset.toastDismiss = "true";
+    dismiss.setAttribute("aria-label", "Dismiss notification");
+    dismiss.textContent = "x";
+    dismiss.addEventListener("click", () => toast.remove());
+    toast.appendChild(dismiss);
+  }
+
   toastRegion.appendChild(toast);
-  window.setTimeout(() => {
-    toast.remove();
-  }, 2600);
+  if (!options.persistent) {
+    window.setTimeout(() => {
+      toast.remove();
+    }, options.durationMs ?? 2600);
+  }
+}
+
+function showFlowAiToast(options: Omit<ToastOptions, "key" | "persistent">): void {
+  showToast({
+    ...options,
+    key: FLOW_AI_TOAST_KEY,
+    persistent: true
+  });
+}
+
+function dismissToast(key: string): void {
+  if (!toastRegion) return;
+  toastRegion.querySelectorAll(`[data-toast-key="${cssEscape(key)}"]`).forEach((existingToast) => existingToast.remove());
+}
+
+function toastToneClass(tone: ToastTone = "neutral"): string {
+  if (tone === "success" || tone === "ok") return " ok";
+  if (tone === "warning" || tone === "warn") return " warn";
+  return "";
+}
+
+function toastRole(tone: ToastTone = "neutral"): string {
+  return tone === "warning" || tone === "warn" ? "alert" : "status";
+}
+
+function cssEscape(value: string): string {
+  if (window.CSS?.escape) return window.CSS.escape(value);
+  return value.replace(/["\\]/g, "\\$&");
 }
 
 function formatDateTime(value: unknown): string {
@@ -3417,6 +4392,10 @@ function optionalText(value: unknown): string | null {
   return text || null;
 }
 
+function isRecord(value: unknown): value is AnyRecord {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
 function escapeHtml(value: unknown): string {
   return String(value ?? "")
     .replace(/&/g, "&amp;")
@@ -3445,8 +4424,13 @@ boardCanvas.addEventListener("click", (event: MouseEvent) => {
     if (action.dataset.action === "open-project-settings") openProjectSettingsDialog();
     if (action.dataset.action === "open-work-item-dialog") openWorkItemDialog(action.dataset.laneId || null);
     if (action.dataset.action === "open-delete-board") openDeleteBoardDialog();
-    if (action.dataset.action === "generate-flow") generateDraftFromPrompt();
-    if (action.dataset.action === "apply-board") applyBoard();
+    if (action.dataset.action === "generate-flow") void generateDraftFromPrompt();
+    if (action.dataset.action === "apply-board") void applyBoard();
+    if (action.dataset.action === "use-flow-chip") useFlowPromptChip(action.dataset.flowChip);
+    if (action.dataset.action === "toggle-flow-advanced") {
+      flowAdvancedOpen = !flowAdvancedOpen;
+      render();
+    }
     if (action.dataset.action === "start-over") startOver();
     if (action.dataset.action === "save-template") saveCurrentFlowAsTemplate();
     if (action.dataset.action === "add-lane") addLane();
@@ -3487,8 +4471,14 @@ boardCanvas.addEventListener("click", (event: MouseEvent) => {
   if (!card) return;
   const board = getActiveBoard();
   board.selectedId = card.dataset.workItemId || null;
+  inspectorDrawerOpen = Boolean(board.selectedId);
   saveState();
   render();
+});
+
+inspectorPanel.addEventListener("click", (event: MouseEvent) => {
+  const action = (event.target as HTMLElement).closest("[data-action]") as HTMLElement | null;
+  if (action?.dataset.action === "close-inspector-drawer") closeInspectorDrawer();
 });
 
 boardCanvas.addEventListener("input", (event: Event) => {
@@ -3498,6 +4488,21 @@ boardCanvas.addEventListener("input", (event: Event) => {
     return;
   }
   updateDraftField(target);
+});
+
+boardCanvas.addEventListener("change", (event: Event) => {
+  const target = event.target as FormControlElement;
+  if (target.matches("select[data-field]")) {
+    updateDraftField(target);
+    render();
+  }
+});
+
+boardCanvas.addEventListener("focusout", (event: FocusEvent) => {
+  const target = event.target as FormControlElement;
+  if (target.closest?.(".lane-editor, .agent-editor") && target.matches("[data-field], [data-agent-field]")) {
+    render();
+  }
 });
 
 if (editFlowButton) {
@@ -3541,6 +4546,12 @@ if (boardSelect) {
     switchBoard((event.target as HTMLSelectElement).value);
   });
 }
+
+document.addEventListener("keydown", (event: KeyboardEvent) => {
+  if (event.key !== "Escape" || !inspectorDrawerOpen) return;
+  if (workItemDialogOpen || deleteBoardDialogOpen || agentConnectDialogOpen || teamSettingsDialogOpen || projectDialogOpen || boardSettingsDialogOpen) return;
+  closeInspectorDrawer();
+});
 
 if (modalRoot) {
   modalRoot.addEventListener("click", (event: MouseEvent) => {
@@ -3596,16 +4607,22 @@ if (modalRoot) {
       createWorkItemFromForm(action);
     }
     if (action.dataset.action === "cancel-agent-connect") closeAgentConnectDialog();
-    if (action.dataset.action === "create-agent-token") createAgentTokenFromForm(action);
-    if (action.dataset.action === "revoke-agent-token") revokeAgentToken(action.dataset.tokenId);
+    if (action.dataset.action === "create-agent-session") createAgentTokenFromForm(action);
+    if (action.dataset.action === "update-agent-session") void updateAgentSession(action);
+    if (action.dataset.action === "revoke-agent-session") void revokeAgentSession(action.dataset.sessionId);
     if (action.dataset.action === "cancel-delete-board") closeDeleteBoardDialog();
     if (action.dataset.action === "confirm-delete-board") deleteCurrentBoardFromDialog(action);
   });
 
   modalRoot.addEventListener("submit", (event: SubmitEvent) => {
     const form = event.target as HTMLElement;
-    if (!form.matches("[data-work-item-form], [data-project-form], [data-board-settings-form], [data-team-invite-form]")) return;
+    if (!form.matches("[data-work-item-form], [data-project-form], [data-board-settings-form], [data-team-invite-form], [data-agent-session-form]")) return;
     event.preventDefault();
+    if (form.matches("[data-agent-session-form]")) {
+      const action = form.querySelector('[data-action="create-agent-session"]') as HTMLElement | null;
+      if (action) void createAgentTokenFromForm(action);
+      return;
+    }
     if (form.matches("[data-team-invite-form]")) {
       const action = form.querySelector('[data-action="create-team-invite"]') as HTMLElement | null;
       if (action) void createTeamInviteFromDialog(action);

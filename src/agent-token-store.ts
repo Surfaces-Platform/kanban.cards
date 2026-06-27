@@ -5,9 +5,11 @@ import { Pool } from "pg";
 
 import { normalizePostgresConnectionString, resolvePostgresSsl } from "./postgres-config";
 import type {
+  AgentCapability,
   AgentTokenCreateInput,
   AgentTokenStore,
   AgentTokenStoreOptions,
+  AgentTokenUpdateInput,
   CreatedAgentToken,
   PostgresClient,
   PostgresOptions,
@@ -17,7 +19,8 @@ import type {
 
 const DEFAULT_TABLE_NAME = "agent_access_tokens";
 const DEFAULT_TOKEN_FILE = path.join(__dirname, "data", "agent-access-tokens.json");
-const DEFAULT_AGENT_CAPABILITIES = ["view", "create", "update", "comment", "move"];
+const DEFAULT_AGENT_CAPABILITIES: AgentCapability[] = ["view", "create", "update", "comment", "move"];
+const AGENT_CAPABILITY_SET = new Set<string>(DEFAULT_AGENT_CAPABILITIES);
 type UnknownRecord = Record<string, any>;
 
 export function createAgentTokenStore(options: AgentTokenStoreOptions = {}): AgentTokenStore {
@@ -103,7 +106,7 @@ export function createFileAgentTokenStore(dataPath: string = DEFAULT_TOKEN_FILE)
       projectId: input.projectId || null,
       sessionId: input.sessionId || `agsess_${crypto.randomUUID()}`,
       delegatedBy: input.delegatedBy || null,
-      capabilities: input.capabilities || DEFAULT_AGENT_CAPABILITIES,
+      capabilities: normalizeCapabilityInput(input.capabilities, true),
       expiresAt: input.expiresAt || null,
       reason: input.reason || "Board-scoped agent access.",
       createdAt: now,
@@ -119,6 +122,15 @@ export function createFileAgentTokenStore(dataPath: string = DEFAULT_TOKEN_FILE)
     const tokenRecord = toPublicTokenRecord(record);
     if (!tokenRecord) throw new Error("Unable to create public agent token record.");
     return { token: rawToken, tokenRecord };
+  }
+
+  async function update(boardId: string, sessionId: string, input: AgentTokenUpdateInput): Promise<PublicTokenRecord | null> {
+    return updateTokens((tokens) => {
+      const record = tokens.find((candidate) => candidate.boardId === boardId && candidate.sessionId === sessionId && !candidate.revokedAt);
+      if (!record) return null;
+      applyTokenUpdate(record, input);
+      return toPublicTokenRecord(record);
+    });
   }
 
   async function verify(rawToken: string): Promise<PublicTokenRecord | null> {
@@ -142,7 +154,17 @@ export function createFileAgentTokenStore(dataPath: string = DEFAULT_TOKEN_FILE)
     });
   }
 
-  return { kind: "file", path: resolvedPath, ensureReady, list, create, verify, revoke };
+  async function revokeSession(boardId: string, sessionId: string): Promise<PublicTokenRecord | null> {
+    const now = new Date().toISOString();
+    return updateTokens((tokens) => {
+      const record = tokens.find((candidate) => candidate.sessionId === sessionId && candidate.boardId === boardId);
+      if (!record) return null;
+      if (!record.revokedAt) record.revokedAt = now;
+      return toPublicTokenRecord(record);
+    });
+  }
+
+  return { kind: "file", path: resolvedPath, ensureReady, list, create, update, verify, revoke, revokeSession };
 }
 
 export function createPostgresAgentTokenStore(options: AgentTokenStoreOptions = {}): AgentTokenStore {
@@ -228,7 +250,7 @@ export function createPostgresAgentTokenStore(options: AgentTokenStoreOptions = 
         nullableString(input.projectId),
         sanitizeSessionId(input.sessionId) || `agsess_${crypto.randomUUID()}`,
         nullableString(input.delegatedBy),
-        JSON.stringify(normalizeCapabilities(input.capabilities)),
+        JSON.stringify(normalizeCapabilityInput(input.capabilities, true)),
         nullableDate(input.expiresAt),
         sanitizeReason(input.reason)
       ]
@@ -236,6 +258,36 @@ export function createPostgresAgentTokenStore(options: AgentTokenStoreOptions = 
     const tokenRecord = toPublicTokenRecord(result.rows[0]);
     if (!tokenRecord) throw new Error("Unable to create public agent token record.");
     return { token: rawToken, tokenRecord };
+  }
+
+  async function update(boardId: string, sessionId: string, input: AgentTokenUpdateInput): Promise<PublicTokenRecord | null> {
+    await ensureReady();
+    const hasLabel = hasOwn(input, "label");
+    const hasCapabilities = hasOwn(input, "capabilities");
+    const hasExpiresAt = hasOwn(input, "expiresAt");
+    const hasReason = hasOwn(input, "reason");
+    const result = await pool.query(
+      `UPDATE ${tableName}
+       SET label = CASE WHEN $3 THEN $4 ELSE label END,
+           capabilities = CASE WHEN $5 THEN $6::jsonb ELSE capabilities END,
+           expires_at = CASE WHEN $7 THEN $8::timestamptz ELSE expires_at END,
+           reason = CASE WHEN $9 THEN $10 ELSE reason END
+       WHERE board_id = $1 AND session_id = $2 AND revoked_at IS NULL
+       RETURNING id, board_id, agent_id, label, last4, team_id, project_id, session_id, delegated_by, capabilities, expires_at, reason, created_at, last_used_at, revoked_at`,
+      [
+        boardId,
+        sessionId,
+        hasLabel,
+        sanitizeLabel(input.label),
+        hasCapabilities,
+        hasCapabilities ? JSON.stringify(normalizeCapabilityInput(input.capabilities, false)) : null,
+        hasExpiresAt,
+        nullableDate(input.expiresAt),
+        hasReason,
+        sanitizeReason(input.reason)
+      ]
+    );
+    return result.rows[0] ? toPublicTokenRecord(result.rows[0]) : null;
   }
 
   async function verify(rawToken: string): Promise<PublicTokenRecord | null> {
@@ -262,7 +314,19 @@ export function createPostgresAgentTokenStore(options: AgentTokenStoreOptions = 
     return result.rows[0] ? toPublicTokenRecord(result.rows[0]) : null;
   }
 
-  return { kind: "postgres", path: tableName, ensureReady, list, create, verify, revoke };
+  async function revokeSession(boardId: string, sessionId: string): Promise<PublicTokenRecord | null> {
+    await ensureReady();
+    const result = await pool.query(
+      `UPDATE ${tableName}
+       SET revoked_at = COALESCE(revoked_at, now())
+       WHERE board_id = $1 AND session_id = $2
+       RETURNING id, board_id, agent_id, label, last4, team_id, project_id, session_id, delegated_by, capabilities, expires_at, reason, created_at, last_used_at, revoked_at`,
+      [boardId, sessionId]
+    );
+    return result.rows[0] ? toPublicTokenRecord(result.rows[0]) : null;
+  }
+
+  return { kind: "postgres", path: tableName, ensureReady, list, create, update, verify, revoke, revokeSession };
 }
 
 export function generateAgentToken(): string {
@@ -294,7 +358,7 @@ function normalizeTokenRecord(record: unknown): TokenRecord | null {
     projectId: nullableString(record.projectId || record.project_id),
     sessionId,
     delegatedBy: nullableString(record.delegatedBy || record.delegated_by),
-    capabilities: normalizeCapabilities(record.capabilities),
+    capabilities: normalizeStoredCapabilities(record.capabilities),
     expiresAt: nullableDate(record.expiresAt || record.expires_at),
     reason: sanitizeReason(record.reason || "Legacy board-scoped token."),
     createdAt: dateToIso(record.createdAt || record.created_at) || new Date().toISOString(),
@@ -322,7 +386,7 @@ function toPublicTokenRecord(record: unknown): PublicTokenRecord | null {
     projectId: nullableString(record.projectId || record.project_id),
     sessionId,
     delegatedBy: nullableString(record.delegatedBy || record.delegated_by),
-    capabilities: normalizeCapabilities(record.capabilities),
+    capabilities: normalizeStoredCapabilities(record.capabilities),
     expiresAt: nullableDate(record.expiresAt || record.expires_at),
     reason: sanitizeReason(record.reason || "Legacy board-scoped token."),
     createdAt: dateToIso(record.createdAt || record.created_at) || new Date().toISOString(),
@@ -345,12 +409,45 @@ function sanitizeReason(value: unknown): string {
   return String(value || "Board-scoped agent access.").trim().slice(0, 500) || "Board-scoped agent access.";
 }
 
-function normalizeCapabilities(value: unknown): string[] {
-  const rawValues = Array.isArray(value) ? value : DEFAULT_AGENT_CAPABILITIES;
+function applyTokenUpdate(record: TokenRecord, input: AgentTokenUpdateInput): void {
+  if (hasOwn(input, "label")) record.label = sanitizeLabel(input.label);
+  if (hasOwn(input, "capabilities")) record.capabilities = normalizeCapabilityInput(input.capabilities, false);
+  if (hasOwn(input, "expiresAt")) record.expiresAt = nullableDate(input.expiresAt);
+  if (hasOwn(input, "reason")) record.reason = sanitizeReason(input.reason);
+}
+
+function normalizeStoredCapabilities(value: unknown): string[] {
+  if (value == null) return [...DEFAULT_AGENT_CAPABILITIES];
+  try {
+    return normalizeCapabilities(value, true);
+  } catch {
+    return ["view"];
+  }
+}
+
+function normalizeCapabilityInput(value: unknown, defaultOnMissing: boolean): string[] {
+  return normalizeCapabilities(value, defaultOnMissing);
+}
+
+function normalizeCapabilities(value: unknown, defaultOnMissing: boolean): string[] {
+  if (!Array.isArray(value)) return defaultOnMissing ? [...DEFAULT_AGENT_CAPABILITIES] : invalidCapabilities();
+  const rawValues = value;
   const capabilities = rawValues
     .map((capability) => String(capability || "").trim())
     .filter(Boolean);
-  return [...new Set(capabilities.length ? capabilities : DEFAULT_AGENT_CAPABILITIES)].slice(0, 20);
+  const unique = [...new Set(capabilities)];
+  if (!unique.length) return invalidCapabilities();
+  const invalid = unique.find((capability) => !AGENT_CAPABILITY_SET.has(capability));
+  if (invalid) throw new Error(`Invalid agent capability: ${invalid}`);
+  return unique.slice(0, DEFAULT_AGENT_CAPABILITIES.length);
+}
+
+function invalidCapabilities(): never {
+  throw new Error("At least one agent capability is required.");
+}
+
+function hasOwn(value: object, property: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, property);
 }
 
 function nullableString(value: unknown): string | null {

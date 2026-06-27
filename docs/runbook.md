@@ -45,6 +45,30 @@ npm test
 
 Do not commit pulled `.env` files or tokens.
 
+## Local Flow AI Check
+
+Flow drafting is local-only in this pass and uses LM Studio's OpenAI-compatible API. Production Auth0, database, and board APIs do not require LM Studio to be running.
+
+For local QA:
+
+1. Start LM Studio from the Developer tab or run `lms server start`.
+2. Load a model that supports structured output.
+3. Confirm the model endpoint:
+
+```bash
+curl http://127.0.0.1:1234/v1/models
+```
+
+4. Start kanban.cards with optional overrides when needed:
+
+```bash
+LM_STUDIO_BASE_URL=http://127.0.0.1:1234/v1 \
+LM_STUDIO_MODEL='<model-id>' \
+npm run dev
+```
+
+The flow editor sends a schema-constrained `POST /v1/chat/completions` request and keeps drafts unapplied until the user reviews and applies them.
+
 ## Database Init
 
 Initialize the workspace, agent token, and event tables after production Postgres env vars are available:

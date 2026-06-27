@@ -56,15 +56,25 @@ test("agent API protects writes, persists cards, and returns instructions", asyn
       title: "Draft progress update",
       summary: "Create an agent-visible update.",
       laneId: board.lanes[0].id,
+      requesterMemberId: "member-requester",
+      ownerMemberId: "member-owner",
+      reviewerMemberId: "member-reviewer",
       ownerAgentId: "agent-a",
       reviewerAgentId: "reviewer-a"
     });
     assert.equal(item.laneId, board.lanes[0].id);
+    assert.equal(item.requesterMemberId, "member-requester");
+    assert.equal(item.ownerMemberId, "member-owner");
+    assert.equal(item.reviewerMemberId, "member-reviewer");
 
     const moved = await writeJson(`${baseUrl}/api/boards/${board.id}/work-items/${item.id}`, token, {
-      laneId: board.lanes[1].id
+      laneId: board.lanes[1].id,
+      ownerMemberId: "member-owner-2",
+      reviewerMemberId: null
     }, "PATCH");
     assert.equal(moved.laneId, board.lanes[1].id);
+    assert.equal(moved.ownerMemberId, "member-owner-2");
+    assert.equal(moved.reviewerMemberId, null);
 
     const instruction = await writeJson(`${baseUrl}/api/boards/${board.id}/work-items/${item.id}/comments`, token, {
       kind: "instruction",
@@ -76,6 +86,9 @@ test("agent API protects writes, persists cards, and returns instructions", asyn
     const instructions = await getJson(`${baseUrl}/api/agent/instructions?agentId=agent-a`);
     assert.equal(instructions.instructions.length, 1);
     assert.equal(instructions.instructions[0].comment.text, "Tighten the handoff note.");
+    assert.equal(instructions.instructions[0].requesterMemberId, "member-requester");
+    assert.equal(instructions.instructions[0].ownerMemberId, "member-owner-2");
+    assert.equal(instructions.instructions[0].reviewerMemberId, null);
 
     const resolved = await writeJson(`${baseUrl}/api/boards/${board.id}/work-items/${item.id}/comments/${instruction.id}`, token, {
       status: "resolved"
@@ -91,6 +104,9 @@ test("agent API protects writes, persists cards, and returns instructions", asyn
       const persistedBoard = await getJson(`${restartedBase}/api/boards/${board.id}`);
       assert.equal(persistedBoard.workItems.length, 1);
       assert.equal(persistedBoard.workItems[0].comments[0].status, "resolved");
+      assert.equal(persistedBoard.workItems[0].requesterMemberId, "member-requester");
+      assert.equal(persistedBoard.workItems[0].ownerMemberId, "member-owner-2");
+      assert.equal(persistedBoard.workItems[0].reviewerMemberId, null);
       assert.equal(persistedBoard.agentSpecs[0].name, "Agent A");
       assert.equal(persistedBoard.lanes[0].defaultOwnerAgentId, "agent-a");
     } finally {

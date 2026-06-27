@@ -18,9 +18,9 @@ test("legacy workspace state normalizes into Team, Project, and board ownership"
       {
         id: "board-legacy",
         name: "Legacy board",
-        lanes: [],
+        lanes: [{ id: "todo", title: "To do", description: "", defaultOwnerAgentId: null, defaultReviewerAgentId: null, gate: { title: "To do gate", checks: ["Ready"] } }],
         agentSpecs: [],
-        workItems: [],
+        workItems: [{ id: "legacy-card", title: "Legacy card", laneId: "todo", comments: [] }],
         selectedId: null
       }
     ],
@@ -33,8 +33,65 @@ test("legacy workspace state normalizes into Team, Project, and board ownership"
   assert.equal(state.projects[0].id, DEFAULT_PROJECT_ID);
   assert.equal(state.activeProjectId, DEFAULT_PROJECT_ID);
   assert.equal(state.boards[0].projectId, DEFAULT_PROJECT_ID);
+  assert.equal(state.boards[0].workItems[0].requesterMemberId, null);
+  assert.equal(state.boards[0].workItems[0].ownerMemberId, null);
+  assert.equal(state.boards[0].workItems[0].reviewerMemberId, null);
   assert.deepEqual(state.members, []);
   assert.deepEqual(state.invites, []);
+});
+
+test("legacy lane and agent aliases preserve card placement and defaults", () => {
+  const state = normalizeWorkspace({
+    boards: [
+      {
+        id: "board-aliases",
+        name: "Alias board",
+        lanes: [
+          {
+            id: "Plan Lane",
+            title: "Plan",
+            description: "",
+            defaultOwnerAgentId: "Owner Agent",
+            defaultReviewerAgentId: "Review Agent",
+            gate: { title: "Plan gate", checks: ["Ready"] }
+          },
+          {
+            id: "Review Lane",
+            title: "Review",
+            description: "",
+            defaultOwnerAgentId: "Review Agent",
+            defaultReviewerAgentId: "Owner Agent",
+            gate: { title: "Review gate", checks: ["Checked"] }
+          }
+        ],
+        agentSpecs: [
+          { id: "Owner Agent", name: "Owner Agent", role: "Owner", laneIds: ["Plan Lane"], instructions: "", skillNotes: "" },
+          { id: "Review Agent", name: "Review Agent", role: "Reviewer", laneIds: ["Review Lane"], instructions: "", skillNotes: "" }
+        ],
+        workItems: [
+          {
+            id: "legacy-card",
+            title: "Legacy card",
+            laneId: "Review Lane",
+            ownerAgentId: "Owner Agent",
+            reviewerAgentId: "Review Agent",
+            comments: []
+          }
+        ],
+        selectedId: null
+      }
+    ],
+    activeBoardId: "board-aliases",
+    templates: []
+  });
+
+  const board = state.boards[0];
+  assert.equal(board.lanes[0].id, "plan-lane");
+  assert.equal(board.lanes[0].defaultOwnerAgentId, "owner-agent");
+  assert.deepEqual(board.agentSpecs[0].laneIds, ["plan-lane"]);
+  assert.equal(board.workItems[0].laneId, "review-lane");
+  assert.equal(board.workItems[0].ownerAgentId, "owner-agent");
+  assert.equal(board.workItems[0].reviewerAgentId, "review-agent");
 });
 
 test("project APIs create, rename, activate, and scope board listing", async () => {
@@ -105,6 +162,10 @@ test("session users can use project APIs with Auth0 workspace as team seed", asy
       assert.equal(session.role, "owner");
       assert.equal(session.isTeamMember, true);
       assert.deepEqual(session.projectIds, ["*"]);
+
+      const publicState = await getJson(`${baseUrl}/api/state`, cookieHeaders(sessionCookie));
+      assert.equal(publicState.members.length, 1);
+      assert.equal(publicState.members[0].email, "project@example.com");
     } finally {
       await closeServer(server);
       await fs.rm(tempDir, { recursive: true, force: true });
@@ -162,6 +223,13 @@ test("team invite acceptance hashes one-time tokens and grants member-scoped car
       const memberSession = await getJson(`${baseUrl}/auth/session`, cookieHeaders(memberCookie));
       assert.equal(memberSession.role, "member");
       assert.equal(memberSession.isTeamMember, true);
+
+      const ownerStateAfterAccept = await getJson(`${baseUrl}/api/state`, cookieHeaders(ownerCookie));
+      assert.equal(ownerStateAfterAccept.members.length, 2);
+
+      const memberStateAfterAccept = await getJson(`${baseUrl}/api/state`, cookieHeaders(memberCookie));
+      assert.equal(memberStateAfterAccept.members.length, 1);
+      assert.equal(memberStateAfterAccept.members[0].email, "member@example.com");
 
       const secondAccept = await fetch(`${baseUrl}/api/invites/accept`, {
         method: "POST",
@@ -254,6 +322,7 @@ test("agent tokens normalize legacy sessions and reject expired sessions", async
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-agent-session-store-"));
   const tokenPath = path.join(tempDir, "tokens.json");
   const legacyToken = "kcagt_legacy_token";
+  const corruptCapabilitiesToken = "kcagt_corrupt_caps";
   const store = createFileAgentTokenStore(tokenPath);
 
   try {
@@ -269,6 +338,18 @@ test("agent tokens normalize legacy sessions and reject expired sessions", async
           createdAt: new Date().toISOString(),
           lastUsedAt: null,
           revokedAt: null
+        },
+        {
+          id: "agtok_corrupt_caps",
+          boardId: "board-1",
+          agentId: "agent-a",
+          label: "Corrupt capabilities",
+          tokenHash: hashAgentToken(corruptCapabilitiesToken),
+          last4: corruptCapabilitiesToken.slice(-4),
+          capabilities: ["view", "delete-everything"],
+          createdAt: new Date().toISOString(),
+          lastUsedAt: null,
+          revokedAt: null
         }
       ]
     }));
@@ -276,6 +357,9 @@ test("agent tokens normalize legacy sessions and reject expired sessions", async
     const legacy = await store.verify(legacyToken);
     assert.equal(legacy?.sessionId, "legacy:agtok_legacy");
     assert.deepEqual(legacy?.capabilities, ["view", "create", "update", "comment", "move"]);
+
+    const corruptCapabilities = await store.verify(corruptCapabilitiesToken);
+    assert.deepEqual(corruptCapabilities?.capabilities, ["view"]);
 
     const expired = await store.create({
       boardId: "board-1",
