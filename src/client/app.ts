@@ -109,6 +109,24 @@ interface FlowApplyPayload {
   movedCards: Array<{ cardId: string; title: string; fromLaneId: string; toLaneId: string }>;
 }
 
+interface FlowAiRequestScope {
+  requestId: number;
+  boardId: string;
+  contextKey: string;
+}
+
+interface AgentConnectRequestScope {
+  epoch: number;
+  boardId: string;
+  agentId: string;
+}
+
+interface InspectorActivityRequestScope {
+  requestId: number;
+  boardId: string;
+  cardId: string;
+}
+
 type ToastTone = "neutral" | "success" | "warning" | "ok" | "warn";
 
 interface ToastOptions {
@@ -171,6 +189,7 @@ let flowAiError = "";
 let flowAiSummary = "";
 let flowAiWarnings: string[] = [];
 let flowApplyInFlight = false;
+let flowAiRequestId = 0;
 let flowAdvancedOpen = false;
 let templateFormOpen = false;
 let editingTemplateId: string | null = null;
@@ -184,6 +203,7 @@ let agentConnectTokens: PublicTokenRecord[] = [];
 let agentConnectToken: CreatedAgentTokenPayload | null = null;
 let agentConnectLoading = false;
 let agentConnectError = "";
+let agentConnectRequestEpoch = 0;
 let projectDialogOpen = false;
 let projectDialogMode: ProjectDialogMode = "settings";
 let projectDialogSaving = false;
@@ -204,6 +224,7 @@ let inspectorActivityEvents: InspectorActivityEvent[] = [];
 let inspectorActivityLoading = false;
 let inspectorActivityUnavailable = false;
 let inspectorActivityError = "";
+let inspectorActivityRequestId = 0;
 let inspectorDrawerOpen = false;
 let apiOnline = false;
 let saveQueue: Promise<unknown> = Promise.resolve();
@@ -891,6 +912,99 @@ function getBoardById(boardId: string | null | undefined): Board | null {
 
 function touchBoard(board: Board): void {
   board.updatedAt = new Date().toISOString();
+}
+
+function serializeFlowAiLane(lane: Lane): AnyRecord {
+  return {
+    id: lane.id,
+    title: lane.title,
+    description: lane.description,
+    defaultOwnerAgentId: lane.defaultOwnerAgentId,
+    defaultReviewerAgentId: lane.defaultReviewerAgentId,
+    gate: {
+      title: lane.gate?.title || `${lane.title} gate`,
+      checks: Array.isArray(lane.gate?.checks) ? [...lane.gate.checks] : []
+    }
+  };
+}
+
+function serializeFlowAiAgent(agent: AgentSpec): AnyRecord {
+  return {
+    id: agent.id,
+    name: agent.name,
+    role: agent.role,
+    laneIds: Array.isArray(agent.laneIds) ? [...agent.laneIds] : [],
+    instructions: agent.instructions,
+    skillNotes: agent.skillNotes
+  };
+}
+
+function buildFlowAiRequestContext(board: Board, configDraft: BoardDraft | null): AnyRecord {
+  return {
+    board: {
+      id: board.id,
+      projectId: board.projectId,
+      name: board.name,
+      flowPrompt: board.flowPrompt,
+      lanes: board.lanes.map(serializeFlowAiLane),
+      agentSpecs: (board.agentSpecs || []).map(serializeFlowAiAgent),
+      cardCountsByLane: board.lanes.map((lane) => ({
+        laneId: lane.id,
+        title: lane.title,
+        cards: board.workItems.filter((item) => item.laneId === lane.id).length
+      }))
+    },
+    configDraft: configDraft
+      ? {
+          lanes: configDraft.lanes.map(serializeFlowAiLane),
+          agentSpecs: (configDraft.agentSpecs || []).map(serializeFlowAiAgent)
+        }
+      : null
+  };
+}
+
+function flowAiRequestContextKey(board: Board, configDraft: BoardDraft | null = normalizeDraft(board.configDraft)): string {
+  return JSON.stringify(buildFlowAiRequestContext(board, configDraft));
+}
+
+function buildFlowAiPromptWithContext(command: string, context: AnyRecord): string {
+  return [
+    command,
+    "",
+    "Current normalized kanban.cards configDraft/context for this request:",
+    JSON.stringify(context)
+  ].join("\n");
+}
+
+function getCurrentFlowAiBoard(scope: FlowAiRequestScope): Board | null {
+  if (scope.requestId !== flowAiRequestId) return null;
+  const board = getActiveBoardOrNull();
+  if (!board || board.id !== scope.boardId) return null;
+  return flowAiRequestContextKey(board) === scope.contextKey ? board : null;
+}
+
+function isLatestFlowAiRequestForBoard(scope: FlowAiRequestScope): boolean {
+  if (scope.requestId !== flowAiRequestId) return false;
+  return getActiveBoardOrNull()?.id === scope.boardId;
+}
+
+function makeAgentConnectRequestScope(boardId: string, agentId: string | null | undefined = agentConnectAgentId): AgentConnectRequestScope {
+  return {
+    epoch: agentConnectRequestEpoch,
+    boardId,
+    agentId: agentId || ""
+  };
+}
+
+function isCurrentAgentConnectRequest(scope: AgentConnectRequestScope): boolean {
+  const board = getActiveBoardOrNull();
+  return Boolean(
+    agentConnectDialogOpen &&
+    scope.epoch === agentConnectRequestEpoch &&
+    board?.id === scope.boardId &&
+    agentConnectAgentId === scope.agentId &&
+    board.agentSpecs?.some((agent) => agent.id === scope.agentId)
+  );
 }
 
 function getAllTemplates(): TemplateLike[] {
@@ -2057,10 +2171,17 @@ function ensureInspectorActivity(board: Board, item: WorkItem): void {
   inspectorActivityLoading = true;
   inspectorActivityUnavailable = false;
   inspectorActivityError = "";
-  void loadInspectorActivity(board.id, item.id);
+  const requestScope: InspectorActivityRequestScope = {
+    requestId: inspectorActivityRequestId + 1,
+    boardId: board.id,
+    cardId: item.id
+  };
+  inspectorActivityRequestId = requestScope.requestId;
+  void loadInspectorActivity(requestScope);
 }
 
 function resetInspectorActivity(): void {
+  inspectorActivityRequestId += 1;
   inspectorActivityBoardId = null;
   inspectorActivityCardId = null;
   inspectorActivityEvents = [];
@@ -2074,14 +2195,27 @@ function closeInspectorDrawer(): void {
   render();
 }
 
-async function loadInspectorActivity(boardId: string, cardId: string): Promise<void> {
-  const params = new URLSearchParams({ cardId, limit: "20" });
+function isCurrentInspectorActivityRequest(scope: InspectorActivityRequestScope): boolean {
+  const board = getActiveBoardOrNull();
+  return Boolean(
+    scope.requestId === inspectorActivityRequestId &&
+    inspectorActivityBoardId === scope.boardId &&
+    inspectorActivityCardId === scope.cardId &&
+    board?.id === scope.boardId &&
+    board.selectedId === scope.cardId &&
+    board.workItems.some((item) => item.id === scope.cardId)
+  );
+}
+
+async function loadInspectorActivity(scope: InspectorActivityRequestScope): Promise<void> {
+  const params = new URLSearchParams({ cardId: scope.cardId, limit: "20" });
   try {
-    const response = await fetch(`${API_BASE_URL}/boards/${encodeURIComponent(boardId)}/events?${params.toString()}`, {
+    const response = await fetch(`${API_BASE_URL}/boards/${encodeURIComponent(scope.boardId)}/events?${params.toString()}`, {
       headers: apiHeaders(false),
       credentials: "same-origin"
     });
     if (response.status === 404 || response.status === 405) {
+      if (!isCurrentInspectorActivityRequest(scope)) return;
       inspectorActivityUnavailable = true;
       inspectorActivityEvents = [];
       return;
@@ -2089,15 +2223,17 @@ async function loadInspectorActivity(boardId: string, cardId: string): Promise<v
     if (!response.ok) throw new Error(`Event request failed with ${response.status}`);
     const payload = await response.json();
     const rawEvents = Array.isArray(payload?.events) ? payload.events : Array.isArray(payload) ? payload : [];
+    if (!isCurrentInspectorActivityRequest(scope)) return;
     inspectorActivityEvents = rawEvents.map(normalizeInspectorActivityEvent).filter(isNonNull);
     inspectorActivityUnavailable = false;
     inspectorActivityError = "";
   } catch (_error) {
+    if (!isCurrentInspectorActivityRequest(scope)) return;
     inspectorActivityEvents = [];
     inspectorActivityUnavailable = true;
     inspectorActivityError = "Provenance is not available for this board.";
   } finally {
-    if (inspectorActivityBoardId === boardId && inspectorActivityCardId === cardId) {
+    if (isCurrentInspectorActivityRequest(scope)) {
       inspectorActivityLoading = false;
       renderInspector(getActiveBoardOrNull());
     }
@@ -2823,6 +2959,7 @@ function resetBoardScopedUi(): void {
 }
 
 function resetFlowAiState(): void {
+  flowAiRequestId += 1;
   dismissToast(FLOW_AI_TOAST_KEY);
   flowMessage = "";
   flowMessageTone = "neutral";
@@ -3296,18 +3433,22 @@ async function openAgentConnectDialog(agentId: string | undefined): Promise<void
   resetWorkItemDialogState();
   deleteBoardDialogOpen = false;
   flowActionsMenuOpen = false;
+  agentConnectRequestEpoch += 1;
   agentConnectDialogOpen = true;
   agentConnectAgentId = agent.id;
   agentConnectTokens = [];
   agentConnectToken = null;
   agentConnectLoading = true;
   agentConnectError = "";
+  const requestScope = makeAgentConnectRequestScope(board.id, agent.id);
   render();
-  await refreshAgentTokens(board.id);
+  await refreshAgentTokens(board.id, requestScope);
+  if (!isCurrentAgentConnectRequest(requestScope)) return;
   (modalRoot?.querySelector("[data-agent-session-label]") as HTMLElement | null)?.focus();
 }
 
 function resetAgentConnectDialog(): void {
+  agentConnectRequestEpoch += 1;
   agentConnectDialogOpen = false;
   agentConnectAgentId = null;
   agentConnectTokens = [];
@@ -3321,8 +3462,8 @@ function closeAgentConnectDialog(): void {
   render();
 }
 
-async function refreshAgentTokens(boardId: string = getActiveBoard().id): Promise<void> {
-  if (!agentConnectDialogOpen) return;
+async function refreshAgentTokens(boardId: string = getActiveBoard().id, requestScope: AgentConnectRequestScope = makeAgentConnectRequestScope(boardId)): Promise<void> {
+  if (!isCurrentAgentConnectRequest(requestScope)) return;
   try {
     const response = await fetch(`${API_BASE_URL}/boards/${encodeURIComponent(boardId)}/agent-sessions`, {
       headers: apiHeaders(false),
@@ -3330,11 +3471,14 @@ async function refreshAgentTokens(boardId: string = getActiveBoard().id): Promis
     });
     if (!response.ok) throw new Error(`AgentSession list failed with ${response.status}`);
     const payload = await response.json();
+    if (!isCurrentAgentConnectRequest(requestScope)) return;
     agentConnectTokens = Array.isArray(payload.sessions) ? payload.sessions : Array.isArray(payload.tokens) ? payload.tokens : [];
     agentConnectError = "";
   } catch (error) {
+    if (!isCurrentAgentConnectRequest(requestScope)) return;
     agentConnectError = "Could not load active AgentSessions.";
   } finally {
+    if (!isCurrentAgentConnectRequest(requestScope)) return;
     agentConnectLoading = false;
     render();
   }
@@ -3344,6 +3488,8 @@ async function createAgentTokenFromForm(action: HTMLElement): Promise<void> {
   const board = getActiveBoard();
   const agent = board.agentSpecs?.find((candidate) => candidate.id === agentConnectAgentId);
   if (!agent || agentConnectLoading) return;
+  const requestScope = makeAgentConnectRequestScope(board.id, agent.id);
+  if (!isCurrentAgentConnectRequest(requestScope)) return;
 
   const form = action.closest("[data-agent-session-form]");
   const label = (form?.querySelector("[data-agent-session-label]") as FormControlElement | null)?.value.trim() || `${agent.name} local session`;
@@ -3368,10 +3514,13 @@ async function createAgentTokenFromForm(action: HTMLElement): Promise<void> {
     });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload?.error || `AgentSession creation failed with ${response.status}`);
+    if (!isCurrentAgentConnectRequest(requestScope)) return;
     agentConnectToken = normalizeCreatedAgentTokenPayload(payload);
-    await refreshAgentTokens(board.id);
+    await refreshAgentTokens(board.id, requestScope);
+    if (!isCurrentAgentConnectRequest(requestScope)) return;
     showToast("AgentSession created.");
   } catch (error) {
+    if (!isCurrentAgentConnectRequest(requestScope)) return;
     agentConnectError = error instanceof Error ? error.message : "Could not create AgentSession.";
     agentConnectLoading = false;
     render();
@@ -3396,9 +3545,10 @@ function normalizeCreatedAgentTokenPayload(payload: any): CreatedAgentTokenPaylo
 
 async function updateAgentSession(action: HTMLElement): Promise<void> {
   const board = getActiveBoard();
+  const requestScope = makeAgentConnectRequestScope(board.id, agentConnectAgentId);
   const row = action.closest("[data-agent-session-id]") as HTMLElement | null;
   const sessionId = row?.dataset.agentSessionId || action.dataset.sessionId || "";
-  if (!sessionId || agentConnectLoading) return;
+  if (!sessionId || agentConnectLoading || !isCurrentAgentConnectRequest(requestScope)) return;
   const label = (row?.querySelector("[data-agent-session-label]") as FormControlElement | null)?.value.trim() || "Local agent";
   const reason = (row?.querySelector("[data-agent-session-reason]") as FormControlElement | null)?.value.trim() || "Board-scoped agent access.";
   const expiresAt = readAgentSessionExpiresAt(row?.querySelector("[data-agent-session-expires]") as FormControlElement | null);
@@ -3422,12 +3572,15 @@ async function updateAgentSession(action: HTMLElement): Promise<void> {
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload?.error || `AgentSession update failed with ${response.status}`);
+    if (!isCurrentAgentConnectRequest(requestScope)) return;
     if (agentConnectToken?.sessionId === sessionId && payload?.session) {
       agentConnectToken = { ...payload.session, token: agentConnectToken.token };
     }
-    await refreshAgentTokens(board.id);
+    await refreshAgentTokens(board.id, requestScope);
+    if (!isCurrentAgentConnectRequest(requestScope)) return;
     showToast("AgentSession updated.");
   } catch (error) {
+    if (!isCurrentAgentConnectRequest(requestScope)) return;
     agentConnectError = error instanceof Error ? error.message : "Could not update AgentSession.";
     agentConnectLoading = false;
     render();
@@ -3436,7 +3589,8 @@ async function updateAgentSession(action: HTMLElement): Promise<void> {
 
 async function revokeAgentSession(sessionId: string | undefined): Promise<void> {
   const board = getActiveBoard();
-  if (!sessionId || agentConnectLoading) return;
+  const requestScope = makeAgentConnectRequestScope(board.id, agentConnectAgentId);
+  if (!sessionId || agentConnectLoading || !isCurrentAgentConnectRequest(requestScope)) return;
   agentConnectLoading = true;
   agentConnectError = "";
   render();
@@ -3449,10 +3603,13 @@ async function revokeAgentSession(sessionId: string | undefined): Promise<void> 
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload?.error || `AgentSession revoke failed with ${response.status}`);
+    if (!isCurrentAgentConnectRequest(requestScope)) return;
     if (agentConnectToken?.sessionId === sessionId) agentConnectToken = null;
-    await refreshAgentTokens(board.id);
+    await refreshAgentTokens(board.id, requestScope);
+    if (!isCurrentAgentConnectRequest(requestScope)) return;
     showToast("AgentSession revoked.");
   } catch (error) {
+    if (!isCurrentAgentConnectRequest(requestScope)) return;
     agentConnectError = error instanceof Error ? error.message : "Could not revoke AgentSession.";
     agentConnectLoading = false;
     render();
@@ -3662,6 +3819,15 @@ async function generateDraftFromPrompt(): Promise<void> {
     return;
   }
 
+  const requestConfigDraft = normalizeDraft(board.configDraft);
+  const requestContext = buildFlowAiRequestContext(board, requestConfigDraft);
+  const requestScope: FlowAiRequestScope = {
+    requestId: flowAiRequestId + 1,
+    boardId: board.id,
+    contextKey: JSON.stringify(requestContext)
+  };
+  flowAiRequestId = requestScope.requestId;
+
   flowAiLoading = true;
   flowAiError = "";
   flowAiSummary = "";
@@ -3676,17 +3842,25 @@ async function generateDraftFromPrompt(): Promise<void> {
   try {
     const payload = await fetchApiJson<FlowAiDraftPayload>(`${API_BASE_URL}/boards/${encodeURIComponent(board.id)}/flow/ai-draft`, {
       method: "POST",
-      body: JSON.stringify({ prompt })
+      body: JSON.stringify({
+        prompt: buildFlowAiPromptWithContext(prompt, requestContext),
+        command: prompt,
+        flowPrompt: prompt,
+        configDraft: requestConfigDraft,
+        context: requestContext
+      })
     });
+    const currentBoard = getCurrentFlowAiBoard(requestScope);
+    if (!currentBoard) return;
     const draft = normalizeDraft(payload.draft);
     if (!draft || draft.lanes.length < MIN_LANES) throw new Error("LM Studio returned a draft without enough lanes.");
-    board.configDraft = draft;
-    board.isEditingFlow = true;
+    currentBoard.configDraft = draft;
+    currentBoard.isEditingFlow = true;
     flowAiSummary = payload.summary || "AI flow draft ready.";
     flowAiWarnings = Array.isArray(payload.warnings) ? payload.warnings : [];
     flowMessage = "";
     flowMessageTone = "neutral";
-    touchBoard(board);
+    touchBoard(currentBoard);
     saveState();
     showFlowAiToast({
       title: "Flow draft ready",
@@ -3694,9 +3868,11 @@ async function generateDraftFromPrompt(): Promise<void> {
       tone: "success"
     });
   } catch (error) {
+    const currentBoard = getCurrentFlowAiBoard(requestScope);
+    if (!currentBoard) return;
     const message = error instanceof Error ? error.message : "Could not generate flow draft.";
-    board.configDraft = previousConfigDraft;
-    board.isEditingFlow = previousIsEditingFlow;
+    currentBoard.configDraft = previousConfigDraft;
+    currentBoard.isEditingFlow = previousIsEditingFlow;
     flowAiError = "";
     flowMessage = "";
     flowMessageTone = "neutral";
@@ -3706,8 +3882,10 @@ async function generateDraftFromPrompt(): Promise<void> {
       tone: "warning"
     });
   } finally {
-    flowAiLoading = false;
-    render();
+    if (isLatestFlowAiRequestForBoard(requestScope)) {
+      flowAiLoading = false;
+      render();
+    }
   }
 }
 

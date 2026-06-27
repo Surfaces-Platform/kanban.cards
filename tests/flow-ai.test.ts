@@ -7,7 +7,11 @@ import path from "node:path";
 import test from "node:test";
 import type { Express } from "express";
 
+import { createPostgresAgentTokenStore, hashAgentToken } from "../src/agent-token-store";
+import { createPostgresEventStore } from "../src/event-store";
 import { createApp } from "../src/server";
+import { createPostgresStateStore } from "../src/state-store";
+import { FakePostgresAgentTokenPool, FakePostgresEventPool, FakePostgresStatePool } from "./helpers/postgres-fakes";
 
 test("flow AI draft uses LM Studio structured output and leaves the board unchanged", async () => {
   await withEnv(async () => {
@@ -196,6 +200,141 @@ test("flow apply preserves cards and remaps removed lanes by id, title, then fal
   }
 });
 
+test("flow apply uses Postgres stores and reconciles cards, agent sessions, and events", async () => {
+  const apiToken = "admin-token";
+  const statePool = new FakePostgresStatePool();
+  const tokenPool = new FakePostgresAgentTokenPool();
+  const eventPool = new FakePostgresEventPool();
+  const store = createPostgresStateStore({ pool: statePool as any, workspaceId: "flow-apply-api" });
+  const tokenStore = createPostgresAgentTokenStore({ pool: tokenPool as any });
+  const eventStore = createPostgresEventStore({ pool: eventPool as any });
+  const server = await listen(createApp({ store, tokenStore, eventStore, apiToken }));
+  const baseUrl = `http://127.0.0.1:${serverPort(server)}`;
+
+  try {
+    const health = await getJson(`${baseUrl}/api/health`);
+    assert.equal(health.storage, "postgres");
+    assert.equal(health.tokenStorage, "postgres");
+    assert.equal(health.eventStorage, "postgres");
+
+    const board = await writeJson(`${baseUrl}/api/boards`, bearerHeaders(apiToken), {
+      name: "Postgres flow apply board",
+      lanes: [
+        lane("intake", "Intake", "Capture work.", "agent-kept", "agent-removed"),
+        lane("review", "Review", "Review work.", "agent-removed", "agent-kept"),
+        lane("archive", "Archive", "Retired work.", "agent-removed", "agent-removed")
+      ],
+      agentSpecs: [
+        agent("agent-kept", "Kept Agent", "Owner", ["intake", "review"]),
+        agent("agent-removed", "Removed Agent", "Retiring owner", ["intake", "review", "archive"])
+      ]
+    });
+    const keptSession = await writeJson(`${baseUrl}/api/boards/${board.id}/agent-sessions`, bearerHeaders(apiToken), {
+      agentId: "agent-kept",
+      label: "Kept agent session"
+    });
+    const removedSession = await writeJson(`${baseUrl}/api/boards/${board.id}/agent-sessions`, bearerHeaders(apiToken), {
+      agentId: "agent-removed",
+      label: "Removed agent session"
+    });
+
+    const keepCard = await writeJson(`${baseUrl}/api/boards/${board.id}/work-items`, bearerHeaders(apiToken), {
+      title: "Keep by lane id",
+      laneId: "intake",
+      ownerAgentId: "agent-kept",
+      reviewerAgentId: "agent-removed"
+    });
+    const reviewCard = await writeJson(`${baseUrl}/api/boards/${board.id}/work-items`, bearerHeaders(apiToken), {
+      title: "Move by lane title",
+      laneId: "review",
+      ownerAgentId: "agent-removed",
+      reviewerAgentId: "agent-kept"
+    });
+    const archiveCard = await writeJson(`${baseUrl}/api/boards/${board.id}/work-items`, bearerHeaders(apiToken), {
+      title: "Move to fallback lane",
+      laneId: "archive",
+      ownerAgentId: "agent-removed",
+      reviewerAgentId: "agent-removed"
+    });
+
+    assert.equal((await fetch(`${baseUrl}/api/agent/session`, { headers: bearerHeaders(keptSession.token) })).status, 200);
+    assert.equal((await fetch(`${baseUrl}/api/agent/session`, { headers: bearerHeaders(removedSession.token) })).status, 200);
+
+    const draft = boardDraft(
+      [
+        lane("intake", "Intake", "Capture and qualify work.", "agent-kept"),
+        lane("review-v2", "Review", "Review with stronger gates.", "agent-kept"),
+        lane("release", "Release", "Ship safely.", "agent-kept")
+      ],
+      [agent("agent-kept", "Kept Agent", "Owner", ["intake", "review-v2", "release"])]
+    );
+    const result = await writeJson(`${baseUrl}/api/boards/${board.id}/flow/apply`, bearerHeaders(apiToken), {
+      draft,
+      flowPrompt: "Retire the removed agent and preserve cards.",
+      source: "manual"
+    });
+    assert.equal(result.clearedAssignments.length, 4);
+    assert.deepEqual(new Set(result.clearedAssignments.map((assignment: any) => assignment.agentId)), new Set(["agent-removed"]));
+    assert.equal(result.revokedAgentSessions.length, 1);
+    assert.equal(result.revokedAgentSessions[0].agentId, "agent-removed");
+    assert.equal(result.revokedAgentSessions[0].sessionId, removedSession.session.sessionId);
+    const persisted = await getJson(`${baseUrl}/api/boards/${board.id}`, bearerHeaders(apiToken));
+    assert.deepEqual(cardFlowSummary(persisted, [keepCard.id, reviewCard.id, archiveCard.id]), cardFlowSummary(result.board, [keepCard.id, reviewCard.id, archiveCard.id]));
+
+    const events = await getJson(`${baseUrl}/api/boards/${board.id}/events?limit=20`, bearerHeaders(apiToken));
+    const event = events.events.find((candidate: any) => candidate.payload.reason === "board_flow_applied");
+    assert.ok(event);
+    assert.equal(event.payload.resource.type, "board_flow");
+    assert.equal(event.payload.source, "manual");
+    assert.equal(event.payload.movedCards.length, 2);
+    assert.equal(event.payload.clearedAssignments.length, 4);
+    assert.equal(event.payload.revokedAgentSessions.length, 1);
+    assert.equal(event.payload.revokedAgentSessions[0].sessionId, removedSession.session.sessionId);
+    const revokedEvent = events.events.find((candidate: any) =>
+      candidate.payload.reason === "agent_session_revoked" &&
+      candidate.payload.sessionId === removedSession.session.sessionId
+    );
+    assert.ok(revokedEvent);
+    assert.equal(revokedEvent.payload.agentId, "agent-removed");
+    assert.equal(revokedEvent.payload.revocationReason, "agent_removed_from_flow");
+    const eventJson = JSON.stringify(event);
+    assert.equal(eventJson.includes(keptSession.token), false);
+    assert.equal(eventJson.includes(removedSession.token), false);
+    assert.equal(eventJson.includes(hashAgentToken(keptSession.token)), false);
+    assert.equal(eventJson.includes(hashAgentToken(removedSession.token)), false);
+    assert.equal(eventJson.includes("tokenHash"), false);
+
+    const keptAfterApply = await fetch(`${baseUrl}/api/agent/session`, { headers: bearerHeaders(keptSession.token) });
+    const removedAfterApply = await fetch(`${baseUrl}/api/agent/session`, { headers: bearerHeaders(removedSession.token) });
+    assert.deepEqual(
+      {
+        cards: cardFlowSummary(persisted, [keepCard.id, reviewCard.id, archiveCard.id]),
+        sessions: {
+          keptStatus: keptAfterApply.status,
+          keptRevoked: isSessionRevoked(tokenPool, keptSession.session.sessionId),
+          removedStatus: removedAfterApply.status,
+          removedRevoked: isSessionRevoked(tokenPool, removedSession.session.sessionId)
+        }
+      },
+      {
+        cards: {
+          [keepCard.id]: { laneId: "intake", ownerAgentId: "agent-kept", reviewerAgentId: null },
+          [reviewCard.id]: { laneId: "review-v2", ownerAgentId: null, reviewerAgentId: "agent-kept" },
+          [archiveCard.id]: { laneId: "intake", ownerAgentId: null, reviewerAgentId: null }
+        },
+        sessions: {
+          keptStatus: 200,
+          keptRevoked: false,
+          removedStatus: 401,
+          removedRevoked: true
+        }
+      }
+    );
+  } finally {
+    await closeServer(server);
+  }
+});
+
 test("agent tokens cannot generate or apply flow drafts", async () => {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-cards-flow-agent-"));
   const dataPath = path.join(tempDir, "state.json");
@@ -277,6 +416,27 @@ function agent(id: string, name: string, role: string, laneIds: string[]) {
     instructions: `${name} instructions.`,
     skillNotes: "$kanban-cards"
   };
+}
+
+function cardFlowSummary(board: any, cardIds: string[]): Record<string, { laneId: string; ownerAgentId: string | null; reviewerAgentId: string | null }> {
+  const cards = new Map<string, any>(board.workItems.map((item: any) => [item.id, item]));
+  return Object.fromEntries(
+    cardIds.map((cardId) => {
+      const card = cards.get(cardId);
+      return [
+        cardId,
+        {
+          laneId: card?.laneId,
+          ownerAgentId: card?.ownerAgentId ?? null,
+          reviewerAgentId: card?.reviewerAgentId ?? null
+        }
+      ];
+    })
+  );
+}
+
+function isSessionRevoked(pool: FakePostgresAgentTokenPool, sessionId: string): boolean {
+  return Boolean(pool.tokens.find((token) => token.session_id === sessionId)?.revoked_at);
 }
 
 async function listen(app: Express): Promise<Server> {
