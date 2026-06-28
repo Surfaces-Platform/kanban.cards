@@ -22,6 +22,7 @@ import {
   findTeamMember,
   findTeamMemberByIdentity,
   findWorkItem,
+  normalizeDraft,
   normalizeWorkspace,
   touchBoard,
   touchTeamInvite,
@@ -47,7 +48,9 @@ import type {
   AgentInstruction,
   AgentSpec,
   AgentTokenStore,
+  AgentTokenUpdateInput,
   Board,
+  BoardDraft,
   CommentKind,
   CommentStatus,
   EventStore,
@@ -55,6 +58,7 @@ import type {
   Project,
   PublicTeamInvite,
   PublicTeamMember,
+  PublicTokenRecord,
   StateStore,
   TeamInvite,
   TeamMember,
@@ -146,6 +150,67 @@ interface CreateAppOptions extends PostgresOptions {
   port?: string | number;
 }
 
+interface FlowAiDraftResponse {
+  summary: string;
+  warnings: string[];
+  draft: BoardDraft;
+  model: string;
+  provider: "lm-studio";
+}
+
+interface FlowApplyResult {
+  board: Board;
+  warnings: string[];
+  movedCards: Array<{ cardId: string; title: string; fromLaneId: string; toLaneId: string }>;
+  removedAgents: RemovedAgentSummary[];
+  clearedAssignments: ClearedAgentAssignmentSummary[];
+  revokedAgentSessions: RevokedAgentSessionSummary[];
+}
+
+type AgentAssignmentField = "ownerAgentId" | "reviewerAgentId";
+type WorkItemMemberField = "requesterMemberId" | "ownerMemberId" | "reviewerMemberId";
+
+interface RemovedAgentSummary {
+  agentId: string;
+  name: string;
+}
+
+interface ClearedAgentAssignmentSummary {
+  cardId: string;
+  title: string;
+  field: AgentAssignmentField;
+  agentId: string;
+}
+
+interface AgentReconciliationResult {
+  removedAgents: RemovedAgentSummary[];
+  removedAgentIds: string[];
+  clearedAssignments: ClearedAgentAssignmentSummary[];
+}
+
+interface BoardAgentReconciliationResult {
+  board: Board;
+  reconciliation: AgentReconciliationResult;
+}
+
+interface BoardAgentReconciliationSnapshot {
+  agentSpecs: AgentSpec[];
+  workItems: Array<Pick<WorkItem, "id" | "title" | "ownerAgentId" | "reviewerAgentId">>;
+}
+
+interface RevokedAgentSessionSummary {
+  id: string;
+  sessionId: string;
+  agentId: string;
+  label: string;
+  last4: string;
+  delegatedBy: string | null;
+  capabilities: string[];
+  expiresAt: string | null;
+  reason: string;
+  revokedAt: string | null;
+}
+
 interface AuthConfig {
   accessAuthRequired: boolean;
   apiToken: string;
@@ -168,6 +233,11 @@ const PRODUCT_NAME = "kanban.cards";
 const SSE_HEARTBEAT_MS = 25_000;
 const SSE_POLL_MS = 1_000;
 const SSE_BATCH_LIMIT = 200;
+const MIN_FLOW_LANES = 2;
+const MAX_FLOW_LANES = 8;
+const AGENT_SESSION_CAPABILITIES: AgentCapability[] = ["view", "create", "update", "comment", "move"];
+const AGENT_SESSION_CAPABILITY_SET = new Set<string>(AGENT_SESSION_CAPABILITIES);
+const WORK_ITEM_MEMBER_FIELDS: WorkItemMemberField[] = ["requesterMemberId", "ownerMemberId", "reviewerMemberId"];
 const FALLBACK_INDEX_HTML = `<!doctype html>
 <html lang="en">
 <head>
@@ -411,12 +481,40 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
 
   app.put("/api/state", requireWriteAuth(), asyncHandler(async (req, res) => {
     if (isAgentAuth(req)) throw httpError(403, "Agent tokens cannot write full workspace state.");
+    let agentReconciliations: BoardAgentReconciliationResult[] = [];
     const { state: saved } = await store.update((current) => {
       const next = normalizeWorkspace(req.body);
+      const previousAgentSnapshotsByBoardId = snapshotBoardAgentReconciliationState(current);
+      assertWorkspaceMemberReferences(current, next);
       assertWorkspaceWriteAllowed(req, current, next);
       applyWorkspaceStateWrite(req, current, next);
+      agentReconciliations = reconcileWorkspaceStateRemovedAgentReferences(current, previousAgentSnapshotsByBoardId);
     });
-    await publishWorkspaceEvent(req, null, "update", { type: "workspace" }, "workspace_saved");
+    const agentReconciliationEvents = [];
+    for (const agentReconciliation of agentReconciliations) {
+      const revokedAgentSessions = await revokeActiveAgentSessionsForRemovedAgents(
+        req,
+        agentReconciliation.board,
+        agentReconciliation.reconciliation.removedAgents,
+        "agent_removed_from_state"
+      );
+      agentReconciliationEvents.push({
+        boardId: agentReconciliation.board.id,
+        boardName: agentReconciliation.board.name,
+        projectId: agentReconciliation.board.projectId,
+        removedAgents: agentReconciliation.reconciliation.removedAgents,
+        clearedAssignments: agentReconciliation.reconciliation.clearedAssignments,
+        revokedAgentSessions
+      });
+    }
+    await publishWorkspaceEvent(
+      req,
+      null,
+      "update",
+      { type: "workspace" },
+      "workspace_saved",
+      agentReconciliationEvents.length ? { agentReconciliations: agentReconciliationEvents } : {}
+    );
     res.json(publicWorkspaceState(saved, req.kanbanAuth));
   }));
 
@@ -617,6 +715,58 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     res.json({ events });
   }));
 
+  app.post("/api/boards/:boardId/flow/ai-draft", requireProjectManagerAuth(), asyncHandler(async (req, res) => {
+    const boardId = routeParam(req, "boardId");
+    const prompt = String(req.body?.prompt || req.body?.command || "").trim();
+    if (!prompt) throw httpError(400, "Flow command is required.");
+    const state = await store.read();
+    const board = findBoard(state, boardId);
+    if (!board) throw httpError(404, "Board not found.");
+    assertProjectManager(req, board.projectId);
+    const result = await generateFlowDraftWithLmStudio(board, prompt);
+    await publishWorkspaceEvent(req, board.id, "create", { type: "board_flow", id: board.id }, "board_flow_draft_generated", {
+      projectId: board.projectId,
+      provider: result.provider,
+      model: result.model,
+      summary: result.summary,
+      warnings: result.warnings,
+      laneCount: result.draft.lanes.length,
+      agentCount: result.draft.agentSpecs.length
+    });
+    res.json(result);
+  }));
+
+  app.post("/api/boards/:boardId/flow/apply", requireProjectManagerAuth(), asyncHandler(async (req, res) => {
+    const boardId = routeParam(req, "boardId");
+    const source = req.body?.source === "manual" ? "manual" : "ai";
+    const flowPrompt = typeof req.body?.flowPrompt === "string" ? req.body.flowPrompt : undefined;
+    const draft = parseBoardDraftInput(req.body?.draft);
+    const { result } = await store.update((state) => {
+      const board = findBoard(state, boardId);
+      if (!board) throw httpError(404, "Board not found.");
+      assertProjectManager(req, board.projectId);
+      return applyFlowDraftToBoard(board, draft, flowPrompt);
+    });
+    const revokedAgentSessions = await revokeActiveAgentSessionsForRemovedAgents(
+      req,
+      result.board,
+      result.removedAgents,
+      "agent_removed_from_flow"
+    );
+    const response: FlowApplyResult = { ...result, revokedAgentSessions };
+    await publishWorkspaceEvent(req, boardId, "update", { type: "board_flow", id: boardId }, "board_flow_applied", {
+      projectId: response.board.projectId,
+      source,
+      warnings: response.warnings,
+      movedCards: response.movedCards,
+      clearedAssignments: response.clearedAssignments,
+      revokedAgentSessions: response.revokedAgentSessions,
+      laneCount: response.board.lanes.length,
+      agentCount: response.board.agentSpecs.length
+    });
+    res.json(response);
+  }));
+
   app.get("/api/agent/instructions", requireAgentCapability("view"), asyncHandler(async (req, res) => {
     const state = await store.read();
     if (isAgentAuth(req)) {
@@ -675,17 +825,55 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       teamId: effectiveTeamId(req, state),
       projectId: board.projectId,
       delegatedBy: actorId(req.kanbanAuth),
-      capabilities: req.body?.capabilities,
-      expiresAt: nullableString(req.body?.expiresAt),
+      capabilities: parseAgentSessionCapabilities(req.body?.capabilities, true),
+      expiresAt: parseAgentSessionExpiresAt(req.body?.expiresAt),
       reason: req.body?.reason || `Board-scoped access for ${agent.name}.`
     });
-    await publishWorkspaceEvent(req, board.id, "create", { type: "agent_session", id: created.tokenRecord.sessionId }, "agent_token_created", {
-      projectId: board.projectId,
-      agentId: agent.id,
-      tokenId: created.tokenRecord.id
-    });
+    await publishWorkspaceEvent(
+      req,
+      board.id,
+      "create",
+      { type: "agent_session", id: created.tokenRecord.sessionId },
+      "agent_session_created",
+      agentSessionEventPayload(board, created.tokenRecord)
+    );
     res.status(201).json({
       ...created.tokenRecord,
+      token: created.token
+    });
+  }));
+
+  app.post("/api/boards/:boardId/agent-sessions", requireProjectManagerAuth(), asyncHandler(async (req, res) => {
+    const boardId = routeParam(req, "boardId");
+    const state = await store.read();
+    const board = findBoard(state, boardId);
+    if (!board) throw httpError(404, "Board not found.");
+    assertProjectManager(req, board.projectId);
+    const agentId = nullableString(req.body?.agentId);
+    if (!agentId) throw httpError(400, "agentId is required.");
+    const agent = findAgentSpec(board, agentId);
+    if (!agent) throw httpError(404, "Agent not found on this board.");
+    const created = await tokenStore.create({
+      boardId: board.id,
+      agentId: agent.id,
+      label: req.body?.label,
+      teamId: effectiveTeamId(req, state),
+      projectId: board.projectId,
+      delegatedBy: actorId(req.kanbanAuth),
+      capabilities: parseAgentSessionCapabilities(req.body?.capabilities, true),
+      expiresAt: parseAgentSessionExpiresAt(req.body?.expiresAt),
+      reason: req.body?.reason || `Board-scoped access for ${agent.name}.`
+    });
+    await publishWorkspaceEvent(
+      req,
+      board.id,
+      "create",
+      { type: "agent_session", id: created.tokenRecord.sessionId },
+      "agent_session_created",
+      agentSessionEventPayload(board, created.tokenRecord)
+    );
+    res.status(201).json({
+      session: created.tokenRecord,
       token: created.token
     });
   }));
@@ -699,6 +887,44 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     res.json({ tokens: await tokenStore.list(board.id) });
   }));
 
+  app.get("/api/boards/:boardId/agent-sessions", requireProjectManagerAuth(), asyncHandler(async (req, res) => {
+    const boardId = routeParam(req, "boardId");
+    const state = await store.read();
+    const board = findBoard(state, boardId);
+    if (!board) throw httpError(404, "Board not found.");
+    assertProjectManager(req, board.projectId);
+    res.json({ sessions: await tokenStore.list(board.id) });
+  }));
+
+  app.patch("/api/boards/:boardId/agent-sessions/:sessionId", requireProjectManagerAuth(), asyncHandler(async (req, res) => {
+    const boardId = routeParam(req, "boardId");
+    const sessionId = routeParam(req, "sessionId");
+    const state = await store.read();
+    const board = findBoard(state, boardId);
+    if (!board) throw httpError(404, "Board not found.");
+    assertProjectManager(req, board.projectId);
+    const previous = (await tokenStore.list(board.id)).find((tokenRecord) => tokenRecord.sessionId === sessionId) || null;
+    const updateInput = parseAgentSessionUpdateInput(req.body);
+    const tokenRecord = await tokenStore.update(board.id, sessionId, updateInput);
+    if (!tokenRecord) throw httpError(404, "Agent session not found.");
+    await publishWorkspaceEvent(
+      req,
+      board.id,
+      "update",
+      { type: "agent_session", id: tokenRecord.sessionId },
+      "agent_session_updated",
+      agentSessionEventPayload(board, tokenRecord, {
+        capabilityChanges: previous
+          ? {
+              before: previous.capabilities,
+              after: tokenRecord.capabilities
+            }
+          : null
+      })
+    );
+    res.json({ session: tokenRecord });
+  }));
+
   app.delete("/api/boards/:boardId/agent-tokens/:tokenId", requireProjectManagerAuth(), asyncHandler(async (req, res) => {
     const boardId = routeParam(req, "boardId");
     const tokenId = routeParam(req, "tokenId");
@@ -708,12 +934,35 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     assertProjectManager(req, board.projectId);
     const tokenRecord = await tokenStore.revoke(board.id, tokenId);
     if (!tokenRecord) throw httpError(404, "Token not found.");
-    await publishWorkspaceEvent(req, board.id, "revoke", { type: "agent_session", id: tokenRecord.sessionId }, "agent_token_revoked", {
-      projectId: board.projectId,
-      agentId: tokenRecord.agentId,
-      tokenId: tokenRecord.id
-    });
+    await publishWorkspaceEvent(
+      req,
+      board.id,
+      "revoke",
+      { type: "agent_session", id: tokenRecord.sessionId },
+      "agent_session_revoked",
+      agentSessionEventPayload(board, tokenRecord)
+    );
     res.json(tokenRecord);
+  }));
+
+  app.delete("/api/boards/:boardId/agent-sessions/:sessionId", requireProjectManagerAuth(), asyncHandler(async (req, res) => {
+    const boardId = routeParam(req, "boardId");
+    const sessionId = routeParam(req, "sessionId");
+    const state = await store.read();
+    const board = findBoard(state, boardId);
+    if (!board) throw httpError(404, "Board not found.");
+    assertProjectManager(req, board.projectId);
+    const tokenRecord = await tokenStore.revokeSession(board.id, sessionId);
+    if (!tokenRecord) throw httpError(404, "Agent session not found.");
+    await publishWorkspaceEvent(
+      req,
+      board.id,
+      "revoke",
+      { type: "agent_session", id: tokenRecord.sessionId },
+      "agent_session_revoked",
+      agentSessionEventPayload(board, tokenRecord)
+    );
+    res.json({ session: tokenRecord });
   }));
 
   app.post("/api/boards", requireProjectManagerAuth(), asyncHandler(async (req, res) => {
@@ -722,6 +971,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       if (!findProject(state, projectId)) throw httpError(404, "Project not found.");
       assertProjectManager(req, projectId);
       const board = createBoard({ ...(req.body || {}), projectId });
+      assertBoardMemberReferences(state, board);
       state.boards.push(board);
       state.activeBoardId = board.id;
       return board;
@@ -736,11 +986,14 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       const board = findBoard(state, boardId);
       if (!board) throw httpError(404, "Board not found.");
       assertProjectManager(req, board.projectId);
+      const previousAgentSpecs = board.agentSpecs.map((agent) => ({ ...agent, laneIds: [...agent.laneIds] }));
+      let projectChanged = false;
       if (typeof req.body.name === "string") board.name = req.body.name;
       if (typeof req.body.projectId === "string" && req.body.projectId !== board.projectId) {
         if (!findProject(state, req.body.projectId)) throw httpError(404, "Project not found.");
         assertProjectManager(req, req.body.projectId);
         board.projectId = req.body.projectId;
+        projectChanged = true;
       }
       if (typeof req.body.flowPrompt === "string") board.flowPrompt = req.body.flowPrompt;
       if (Object.prototype.hasOwnProperty.call(req.body, "configDraft")) board.configDraft = req.body.configDraft;
@@ -748,11 +1001,25 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       if (Array.isArray(req.body.lanes)) board.lanes = req.body.lanes;
       if (Array.isArray(req.body.agentSpecs)) board.agentSpecs = req.body.agentSpecs;
       if (req.body.active === true) state.activeBoardId = board.id;
+      const reconciliation = Array.isArray(req.body.agentSpecs)
+        ? reconcileRemovedAgentReferences(board, previousAgentSpecs)
+        : emptyAgentReconciliation();
+      if (projectChanged) assertBoardMemberReferences(state, board);
       touchBoard(board);
-      return board;
+      return { board, reconciliation };
     });
-    await publishWorkspaceEvent(req, result.id, "update", { type: "board", id: result.id }, "board_updated", { projectId: result.projectId });
-    res.json(result);
+    const revokedAgentSessions = await revokeActiveAgentSessionsForRemovedAgents(
+      req,
+      result.board,
+      result.reconciliation.removedAgents,
+      "agent_removed_from_board"
+    );
+    await publishWorkspaceEvent(req, result.board.id, "update", { type: "board", id: result.board.id }, "board_updated", {
+      projectId: result.board.projectId,
+      clearedAssignments: result.reconciliation.clearedAssignments,
+      revokedAgentSessions
+    });
+    res.json(result.board);
   }));
 
   app.post("/api/boards/:boardId/work-items", requireWriteAuth(), requireAgentCapability("create"), asyncHandler(async (req, res) => {
@@ -764,6 +1031,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       requireBoardProjectAccess(req, board);
       if (!String(req.body.title || "").trim()) throw httpError(400, "Card title is required.");
       const input = isAgentAuth(req) ? withAgentCreateDefaults(req, req.body || {}) : req.body;
+      assertWorkItemMemberReferences(state, board, input || {});
       const item = createWorkItem(input, board);
       if (!item) throw httpError(400, "Card is invalid.");
       if (isAgentAuth(req) && !isItemAssignedToAgent(item, req.kanbanAuth.agentId)) {
@@ -792,6 +1060,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
         throw httpError(403, "Agent tokens can only update cards assigned to that agent.");
       }
       if (isAgentAuth(req)) assertAgentWorkItemPatchAllowed(req.body || {});
+      assertWorkItemMemberReferences(state, board, req.body || {});
       applyWorkItemPatch(board, item, req.body || {});
       if (isAgentAuth(req) && !isItemAssignedToAgent(item, req.kanbanAuth.agentId)) {
         throw httpError(403, "Agent tokens cannot remove themselves from an assigned card.");
@@ -949,6 +1218,39 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     return event;
   }
 
+  async function revokeActiveAgentSessionsForRemovedAgents(
+    req: Request,
+    board: Board,
+    removedAgents: RemovedAgentSummary[],
+    revocationReason: string
+  ): Promise<RevokedAgentSessionSummary[]> {
+    if (!removedAgents.length) return [];
+    const removedAgentIds = new Set(removedAgents.map((agent) => agent.agentId));
+    const activeSessions = await tokenStore.list(board.id);
+    const revokedAgentSessions: RevokedAgentSessionSummary[] = [];
+
+    for (const activeSession of activeSessions) {
+      if (!removedAgentIds.has(activeSession.agentId)) continue;
+      const tokenRecord = await tokenStore.revokeSession(board.id, activeSession.sessionId);
+      if (!tokenRecord) continue;
+      const summary = summarizeRevokedAgentSession(tokenRecord);
+      revokedAgentSessions.push(summary);
+      await publishWorkspaceEvent(
+        req,
+        board.id,
+        "revoke",
+        { type: "agent_session", id: tokenRecord.sessionId },
+        "agent_session_revoked",
+        agentSessionEventPayload(board, tokenRecord, {
+          revocationReason,
+          removedAgentId: tokenRecord.agentId
+        })
+      );
+    }
+
+    return revokedAgentSessions;
+  }
+
   async function streamWorkspaceEvents(req: Request, res: Response): Promise<void> {
     await eventStore.ensureReady();
 
@@ -1037,9 +1339,447 @@ function writeSseEvent(res: Response, event: WorkspaceEvent): void {
   res.write(`data: ${JSON.stringify(event)}\n\n`);
 }
 
+async function generateFlowDraftWithLmStudio(board: Board, prompt: string): Promise<FlowAiDraftResponse> {
+  const baseUrl = normalizeLmStudioBaseUrl(process.env.LM_STUDIO_BASE_URL);
+  const model = await resolveLmStudioModel(baseUrl);
+  const timeoutMs = flowAiTimeoutMs();
+  const response = await fetchWithTimeout(`${baseUrl}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      Authorization: `Bearer ${process.env.LM_STUDIO_API_KEY || "lm-studio"}`
+    },
+    body: JSON.stringify({
+      model,
+      temperature: 0.2,
+      messages: [
+        { role: "system", content: flowAiSystemPrompt() },
+        { role: "user", content: flowAiUserPrompt(board, prompt) }
+      ],
+      response_format: {
+        type: "json_schema",
+        json_schema: {
+          name: "kanban_cards_flow_draft",
+          strict: true,
+          schema: FLOW_AI_RESPONSE_SCHEMA
+        }
+      }
+    })
+  }, timeoutMs).catch((error) => {
+    throw httpError(503, `LM Studio is unavailable: ${error instanceof Error ? error.message : String(error)}`);
+  });
+
+  if (!response.ok) {
+    throw httpError(503, `LM Studio draft request failed with ${response.status}. Confirm a model is loaded.`);
+  }
+
+  const payload = await response.json().catch(() => null) as any;
+  const content = payload?.choices?.[0]?.message?.content;
+  const parsed = parseLmStudioJsonContent(content);
+  if (!parsed) throw httpError(502, "LM Studio returned an invalid structured flow response.");
+  const draft = parseBoardDraftInput(parsed.draft);
+  return {
+    summary: String(parsed.summary || "Flow draft generated.").trim() || "Flow draft generated.",
+    warnings: Array.isArray(parsed.warnings) ? parsed.warnings.map((warning: unknown) => String(warning || "").trim()).filter(Boolean) : [],
+    draft,
+    model,
+    provider: "lm-studio"
+  };
+}
+
+function flowAiSystemPrompt(): string {
+  return [
+    "You generate kanban.cards board flow drafts.",
+    "Return only JSON matching the provided schema.",
+    "The draft must have 2 to 8 lanes.",
+    "Each lane needs a stable kebab-case id, title, description, default owner/reviewer agent ids when useful, and gate checks.",
+    "Agents should be project/board workflow participants, not human users.",
+    "Agent laneIds must reference lane ids in the draft.",
+    "Preserve useful existing agent IDs when their role still exists.",
+    "Do not create cards or comments."
+  ].join(" ");
+}
+
+function flowAiUserPrompt(board: Board, prompt: string): string {
+  return JSON.stringify({
+    command: prompt,
+    board: {
+      id: board.id,
+      name: board.name,
+      flowPrompt: board.flowPrompt,
+      lanes: board.lanes.map((lane) => ({
+        id: lane.id,
+        title: lane.title,
+        description: lane.description,
+        gate: lane.gate,
+        defaultOwnerAgentId: lane.defaultOwnerAgentId,
+        defaultReviewerAgentId: lane.defaultReviewerAgentId
+      })),
+      agents: board.agentSpecs.map((agent) => ({
+        id: agent.id,
+        name: agent.name,
+        role: agent.role,
+        laneIds: agent.laneIds,
+        instructions: agent.instructions,
+        skillNotes: agent.skillNotes
+      })),
+      cardCountsByLane: board.lanes.map((lane) => ({
+        laneId: lane.id,
+        title: lane.title,
+        cards: board.workItems.filter((item) => item.laneId === lane.id).length
+      }))
+    }
+  });
+}
+
+async function resolveLmStudioModel(baseUrl: string): Promise<string> {
+  const configured = String(process.env.LM_STUDIO_MODEL || "").trim();
+  if (configured) return configured;
+  const response = await fetchWithTimeout(`${baseUrl}/models`, {
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${process.env.LM_STUDIO_API_KEY || "lm-studio"}`
+    }
+  }, flowAiTimeoutMs()).catch((error) => {
+    throw httpError(503, `LM Studio is unavailable: ${error instanceof Error ? error.message : String(error)}`);
+  });
+  if (!response.ok) throw httpError(503, `LM Studio model listing failed with ${response.status}.`);
+  const payload = await response.json().catch(() => null) as any;
+  const models = Array.isArray(payload?.data) ? payload.data : [];
+  const model = models.map((candidate: unknown) => isRecord(candidate) ? String(candidate.id || "").trim() : "").find(Boolean);
+  if (!model) throw httpError(503, "LM Studio has no loaded or available models.");
+  return model;
+}
+
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<globalThis.Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function normalizeLmStudioBaseUrl(value: unknown): string {
+  const text = String(value || "http://127.0.0.1:1234/v1").trim() || "http://127.0.0.1:1234/v1";
+  return text.replace(/\/+$/, "");
+}
+
+function flowAiTimeoutMs(): number {
+  const value = Number(process.env.FLOW_AI_TIMEOUT_MS || 45_000);
+  return Number.isFinite(value) && value > 0 ? value : 45_000;
+}
+
+function parseLmStudioJsonContent(content: unknown): UnknownRecord | null {
+  if (isRecord(content)) return content;
+  if (typeof content !== "string") return null;
+  const trimmed = content.trim();
+  const withoutFence = trimmed.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+  try {
+    const parsed = JSON.parse(withoutFence);
+    return isRecord(parsed) ? parsed : null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function parseBoardDraftInput(value: unknown): BoardDraft {
+  const draft = normalizeDraft(value);
+  if (!draft) throw httpError(400, "Flow draft is invalid.");
+  if (draft.lanes.length < MIN_FLOW_LANES) throw httpError(400, `Flow draft must include at least ${MIN_FLOW_LANES} lanes.`);
+  if (draft.lanes.length > MAX_FLOW_LANES) throw httpError(400, `Flow draft must include ${MAX_FLOW_LANES} lanes or fewer.`);
+  return draft;
+}
+
+function applyFlowDraftToBoard(board: Board, draft: BoardDraft, flowPrompt: string | undefined): FlowApplyResult {
+  const oldLanes = board.lanes || [];
+  const previousAgentSpecs = board.agentSpecs.map((agent) => ({ ...agent, laneIds: [...agent.laneIds] }));
+  const newLaneById = new Set(draft.lanes.map((lane) => lane.id));
+  const titleToNewLane = new Map(draft.lanes.map((lane) => [normalizeLaneTitle(lane.title), lane.id]));
+  const fallbackLaneId = draft.lanes[0]?.id || "";
+  const movedCards: FlowApplyResult["movedCards"] = [];
+  const warnings: string[] = [];
+
+  for (const item of board.workItems) {
+    const fromLaneId = item.laneId;
+    if (newLaneById.has(item.laneId)) continue;
+    const oldLane = oldLanes.find((lane) => lane.id === item.laneId);
+    const titleMatch = oldLane ? titleToNewLane.get(normalizeLaneTitle(oldLane.title)) : undefined;
+    const nextLaneId = titleMatch || fallbackLaneId;
+    item.laneId = nextLaneId;
+    touchWorkItem(item);
+    movedCards.push({ cardId: item.id, title: item.title, fromLaneId, toLaneId: nextLaneId });
+  }
+
+  if (movedCards.length) {
+    warnings.push(`${movedCards.length} card${movedCards.length === 1 ? "" : "s"} moved because their previous lanes were not in the new flow.`);
+  }
+
+  board.lanes = draft.lanes;
+  board.agentSpecs = draft.agentSpecs || [];
+  const reconciliation = reconcileRemovedAgentReferences(board, previousAgentSpecs);
+  if (reconciliation.clearedAssignments.length) {
+    warnings.push(`${reconciliation.clearedAssignments.length} agent assignment${reconciliation.clearedAssignments.length === 1 ? "" : "s"} cleared because removed agents were not in the new flow.`);
+  }
+  board.selectedId = board.workItems.some((item) => item.id === board.selectedId) ? board.selectedId : null;
+  board.configDraft = null;
+  board.isEditingFlow = false;
+  if (typeof flowPrompt === "string") board.flowPrompt = flowPrompt;
+  touchBoard(board);
+  return {
+    board,
+    warnings,
+    movedCards,
+    removedAgents: reconciliation.removedAgents,
+    clearedAssignments: reconciliation.clearedAssignments,
+    revokedAgentSessions: []
+  };
+}
+
+function normalizeLaneTitle(value: unknown): string {
+  return String(value || "").trim().toLowerCase();
+}
+
+function emptyAgentReconciliation(): AgentReconciliationResult {
+  return {
+    removedAgents: [],
+    removedAgentIds: [],
+    clearedAssignments: []
+  };
+}
+
+function snapshotBoardAgentReconciliationState(state: WorkspaceState): Map<string, BoardAgentReconciliationSnapshot> {
+  return new Map(state.boards.map((board) => [
+    board.id,
+    {
+      agentSpecs: board.agentSpecs.map((agent) => ({ ...agent, laneIds: [...agent.laneIds] })),
+      workItems: board.workItems.map((item) => ({
+        id: item.id,
+        title: item.title,
+        ownerAgentId: item.ownerAgentId,
+        reviewerAgentId: item.reviewerAgentId
+      }))
+    }
+  ]));
+}
+
+function reconcileWorkspaceStateRemovedAgentReferences(
+  state: WorkspaceState,
+  previousAgentSnapshotsByBoardId: Map<string, BoardAgentReconciliationSnapshot>
+): BoardAgentReconciliationResult[] {
+  const results: BoardAgentReconciliationResult[] = [];
+
+  for (const board of state.boards) {
+    const previousSnapshot = previousAgentSnapshotsByBoardId.get(board.id);
+    if (!previousSnapshot) continue;
+    const reconciliation = reconcileRemovedAgentReferences(board, previousSnapshot.agentSpecs);
+    if (!reconciliation.removedAgents.length) continue;
+    reconciliation.clearedAssignments = mergeClearedAssignments(
+      reconciliation.clearedAssignments,
+      summarizeRemovedAgentAssignments(previousSnapshot, reconciliation.removedAgentIds)
+    );
+    touchBoard(board);
+    results.push({ board, reconciliation });
+  }
+
+  return results;
+}
+
+function summarizeRemovedAgentAssignments(
+  previousSnapshot: BoardAgentReconciliationSnapshot,
+  removedAgentIds: string[]
+): ClearedAgentAssignmentSummary[] {
+  const removedAgentIdSet = new Set(removedAgentIds);
+  const clearedAssignments: ClearedAgentAssignmentSummary[] = [];
+  for (const item of previousSnapshot.workItems) {
+    if (item.ownerAgentId && removedAgentIdSet.has(item.ownerAgentId)) {
+      clearedAssignments.push({
+        cardId: item.id,
+        title: item.title,
+        field: "ownerAgentId",
+        agentId: item.ownerAgentId
+      });
+    }
+    if (item.reviewerAgentId && removedAgentIdSet.has(item.reviewerAgentId)) {
+      clearedAssignments.push({
+        cardId: item.id,
+        title: item.title,
+        field: "reviewerAgentId",
+        agentId: item.reviewerAgentId
+      });
+    }
+  }
+  return clearedAssignments;
+}
+
+function mergeClearedAssignments(
+  first: ClearedAgentAssignmentSummary[],
+  second: ClearedAgentAssignmentSummary[]
+): ClearedAgentAssignmentSummary[] {
+  const assignments = new Map<string, ClearedAgentAssignmentSummary>();
+  for (const assignment of [...first, ...second]) {
+    assignments.set(`${assignment.cardId}:${assignment.field}:${assignment.agentId}`, assignment);
+  }
+  return [...assignments.values()];
+}
+
+function reconcileRemovedAgentReferences(board: Board, previousAgentSpecs: AgentSpec[]): AgentReconciliationResult {
+  const currentAgentIds = new Set(board.agentSpecs.map((agent) => agent.id));
+  const removedAgents = previousAgentSpecs
+    .filter((agent) => !currentAgentIds.has(agent.id))
+    .map((agent) => ({ agentId: agent.id, name: agent.name }));
+  if (!removedAgents.length) return emptyAgentReconciliation();
+
+  const removedAgentIds = removedAgents.map((agent) => agent.agentId);
+  const removedAgentIdSet = new Set(removedAgentIds);
+  const clearedAssignments: ClearedAgentAssignmentSummary[] = [];
+
+  for (const lane of board.lanes) {
+    if (lane.defaultOwnerAgentId && removedAgentIdSet.has(lane.defaultOwnerAgentId)) lane.defaultOwnerAgentId = null;
+    if (lane.defaultReviewerAgentId && removedAgentIdSet.has(lane.defaultReviewerAgentId)) lane.defaultReviewerAgentId = null;
+  }
+
+  for (const item of board.workItems) {
+    let changed = false;
+    if (item.ownerAgentId && removedAgentIdSet.has(item.ownerAgentId)) {
+      clearedAssignments.push({
+        cardId: item.id,
+        title: item.title,
+        field: "ownerAgentId",
+        agentId: item.ownerAgentId
+      });
+      item.ownerAgentId = null;
+      changed = true;
+    }
+    if (item.reviewerAgentId && removedAgentIdSet.has(item.reviewerAgentId)) {
+      clearedAssignments.push({
+        cardId: item.id,
+        title: item.title,
+        field: "reviewerAgentId",
+        agentId: item.reviewerAgentId
+      });
+      item.reviewerAgentId = null;
+      changed = true;
+    }
+    if (changed) touchWorkItem(item);
+  }
+
+  return { removedAgents, removedAgentIds, clearedAssignments };
+}
+
+function assertWorkspaceMemberReferences(current: WorkspaceState, next: WorkspaceState): void {
+  const boardsById = new Map(current.boards.map((board) => [board.id, board]));
+  for (const board of next.boards) {
+    assertBoardMemberReferences(current, {
+      ...board,
+      projectId: board.projectId || boardsById.get(board.id)?.projectId || DEFAULT_PROJECT_ID
+    });
+  }
+}
+
+function assertBoardMemberReferences(state: WorkspaceState, board: Board): void {
+  for (const item of board.workItems) {
+    assertWorkItemMemberReferences(state, board, item);
+  }
+}
+
+function assertWorkItemMemberReferences(state: WorkspaceState, board: Board, value: Partial<Record<WorkItemMemberField, unknown>>): void {
+  for (const field of WORK_ITEM_MEMBER_FIELDS) {
+    const memberId = nullableString(value[field]);
+    if (!memberId) continue;
+    const member = findTeamMember(state, memberId);
+    if (!member || member.teamId !== state.team.id || !teamMemberHasProjectAccess(member, board.projectId)) {
+      throw httpError(400, `${field} must reference a team member with access to this board.`);
+    }
+  }
+}
+
+function teamMemberHasProjectAccess(member: TeamMember, projectId: string): boolean {
+  return member.projectIds.includes("*") || member.projectIds.includes(projectId);
+}
+
+function summarizeRevokedAgentSession(tokenRecord: PublicTokenRecord): RevokedAgentSessionSummary {
+  return {
+    id: tokenRecord.id,
+    sessionId: tokenRecord.sessionId,
+    agentId: tokenRecord.agentId,
+    label: tokenRecord.label,
+    last4: tokenRecord.last4,
+    delegatedBy: tokenRecord.delegatedBy,
+    capabilities: [...tokenRecord.capabilities],
+    expiresAt: tokenRecord.expiresAt,
+    reason: tokenRecord.reason,
+    revokedAt: tokenRecord.revokedAt
+  };
+}
+
+const FLOW_AI_RESPONSE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["summary", "warnings", "draft"],
+  properties: {
+    summary: { type: "string" },
+    warnings: { type: "array", items: { type: "string" } },
+    draft: {
+      type: "object",
+      additionalProperties: false,
+      required: ["lanes", "agentSpecs"],
+      properties: {
+        lanes: {
+          type: "array",
+          minItems: MIN_FLOW_LANES,
+          maxItems: MAX_FLOW_LANES,
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["id", "title", "description", "defaultOwnerAgentId", "defaultReviewerAgentId", "gate"],
+            properties: {
+              id: { type: "string" },
+              title: { type: "string" },
+              description: { type: "string" },
+              defaultOwnerAgentId: { anyOf: [{ type: "string" }, { type: "null" }] },
+              defaultReviewerAgentId: { anyOf: [{ type: "string" }, { type: "null" }] },
+              gate: {
+                type: "object",
+                additionalProperties: false,
+                required: ["title", "checks"],
+                properties: {
+                  title: { type: "string" },
+                  checks: { type: "array", minItems: 1, items: { type: "string" } }
+                }
+              }
+            }
+          }
+        },
+        agentSpecs: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["id", "name", "role", "laneIds", "instructions", "skillNotes"],
+            properties: {
+              id: { type: "string" },
+              name: { type: "string" },
+              role: { type: "string" },
+              laneIds: { type: "array", items: { type: "string" } },
+              instructions: { type: "string" },
+              skillNotes: { type: "string" }
+            }
+          }
+        }
+      }
+    }
+  }
+} as const;
+
 function applyWorkItemPatch(board: Board, item: WorkItem, patch: UnknownRecord): void {
   if (typeof patch.title === "string") item.title = patch.title;
   if (typeof patch.summary === "string") item.summary = patch.summary;
+  if (Object.prototype.hasOwnProperty.call(patch, "requesterMemberId")) item.requesterMemberId = nullableString(patch.requesterMemberId);
+  if (Object.prototype.hasOwnProperty.call(patch, "ownerMemberId")) item.ownerMemberId = nullableString(patch.ownerMemberId);
+  if (Object.prototype.hasOwnProperty.call(patch, "reviewerMemberId")) item.reviewerMemberId = nullableString(patch.reviewerMemberId);
   if (Object.prototype.hasOwnProperty.call(patch, "ownerAgentId")) item.ownerAgentId = nullableString(patch.ownerAgentId);
   if (Object.prototype.hasOwnProperty.call(patch, "reviewerAgentId")) item.reviewerAgentId = nullableString(patch.reviewerAgentId);
   if (Array.isArray(patch.blockers)) item.blockers = patch.blockers;
@@ -1067,6 +1807,11 @@ function applyCommentPatch(comment: WorkItemComment, patch: UnknownRecord): void
 }
 
 function assertAgentWorkItemPatchAllowed(patch: UnknownRecord): void {
+  if (Object.prototype.hasOwnProperty.call(patch, "requesterMemberId") ||
+      Object.prototype.hasOwnProperty.call(patch, "ownerMemberId") ||
+      Object.prototype.hasOwnProperty.call(patch, "reviewerMemberId")) {
+    throw httpError(403, "Agent sessions cannot change human accountability.");
+  }
   if (Object.prototype.hasOwnProperty.call(patch, "approvals")) {
     throw httpError(403, "Agent sessions cannot change approvals.");
   }
@@ -1098,6 +1843,58 @@ function assertAgentHasCapability(req: Request, capability: AgentCapability): vo
   if (!req.kanbanAuth.capabilities.includes(capability)) {
     throw httpError(403, `Agent token is missing the "${capability}" capability.`);
   }
+}
+
+function parseAgentSessionUpdateInput(body: unknown): AgentTokenUpdateInput {
+  if (!isRecord(body)) return {};
+  const input: AgentTokenUpdateInput = {};
+  if (hasOwnProperty(body, "label")) input.label = body.label;
+  if (hasOwnProperty(body, "capabilities")) input.capabilities = parseAgentSessionCapabilities(body.capabilities, false);
+  if (hasOwnProperty(body, "expiresAt")) input.expiresAt = parseAgentSessionExpiresAt(body.expiresAt);
+  if (hasOwnProperty(body, "reason")) input.reason = body.reason;
+  return input;
+}
+
+function parseAgentSessionCapabilities(value: unknown, defaultOnMissing: boolean): AgentCapability[] {
+  if (!Array.isArray(value)) {
+    if (defaultOnMissing && value == null) return [...AGENT_SESSION_CAPABILITIES];
+    throw httpError(400, "capabilities must be an array.");
+  }
+  const capabilities = value.map((capability) => String(capability || "").trim()).filter(Boolean);
+  const unique = [...new Set(capabilities)];
+  if (!unique.length) throw httpError(400, "At least one capability is required.");
+  const invalid = unique.find((capability) => !AGENT_SESSION_CAPABILITY_SET.has(capability));
+  if (invalid) throw httpError(400, `Invalid capability: ${invalid}`);
+  return unique as AgentCapability[];
+}
+
+function parseAgentSessionExpiresAt(value: unknown): string | null {
+  if (value == null || value === "") return null;
+  const date = new Date(String(value));
+  if (Number.isNaN(date.getTime())) throw httpError(400, "expiresAt must be a valid date.");
+  return date.toISOString();
+}
+
+function agentSessionEventPayload(
+  board: Board,
+  tokenRecord: PublicTokenRecord,
+  extraPayload: Record<string, unknown> = {}
+): Record<string, unknown> {
+  return {
+    ...extraPayload,
+    projectId: board.projectId,
+    agentId: tokenRecord.agentId,
+    tokenId: tokenRecord.id,
+    sessionId: tokenRecord.sessionId,
+    delegatedBy: tokenRecord.delegatedBy,
+    capabilities: tokenRecord.capabilities,
+    expiresAt: tokenRecord.expiresAt,
+    sessionReason: tokenRecord.reason
+  };
+}
+
+function hasOwnProperty(value: object, property: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, property);
 }
 
 function requestedProjectId(req: Request, state: WorkspaceState): string {
@@ -1209,6 +2006,9 @@ function collectAgentInstructions(state: WorkspaceState, agentId: unknown, board
           workItemId: item.id,
           workItemTitle: item.title,
           laneId: item.laneId,
+          requesterMemberId: item.requesterMemberId,
+          ownerMemberId: item.ownerMemberId,
+          reviewerMemberId: item.reviewerMemberId,
           ownerAgentId: item.ownerAgentId,
           reviewerAgentId: item.reviewerAgentId,
           comment
@@ -1232,6 +2032,9 @@ function withAgentCreateDefaults(req: Request, input: UnknownRecord): UnknownRec
   if (!isAgentAuth(req)) return input;
   const agentId = req.kanbanAuth.agentId;
   const next = { ...input };
+  delete next.requesterMemberId;
+  delete next.ownerMemberId;
+  delete next.reviewerMemberId;
   if (!next.ownerAgentId && !next.reviewerAgentId) next.ownerAgentId = agentId;
   return next;
 }
@@ -1256,10 +2059,19 @@ function publicWorkspaceState(state: WorkspaceState, auth: KanbanAuthContext | u
     team: state.team,
     projects,
     activeProjectId,
+    members: publicWorkspaceMembers(state, auth),
     boards,
     activeBoardId,
     templates: state.templates
   };
+}
+
+function publicWorkspaceMembers(state: WorkspaceState, auth: KanbanAuthContext | undefined): PublicTeamMember[] {
+  if (!auth || auth.kind === "anonymous") return [];
+  if (!isAdminAuthContext(auth) || !auth.isTeamMember) return [];
+  if (auth.role === "owner" || auth.role === "admin") return state.members.map(publicTeamMember);
+  const currentMember = auth.memberId ? findTeamMember(state, auth.memberId) : null;
+  return currentMember ? [publicTeamMember(currentMember)] : [];
 }
 
 function publicTeamState(state: WorkspaceState, auth: KanbanAuthContext | undefined): {

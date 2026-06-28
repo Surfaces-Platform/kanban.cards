@@ -86,14 +86,27 @@ test("scoped agent tokens are one-time, hashed, revocable, and board-agent limit
 
     const createdCard = await writeJson(`${baseUrl}/api/boards/${board.id}/work-items`, agentHeaders, {
       title: "Agent-owned card",
-      laneId: board.lanes[0].id
+      laneId: board.lanes[0].id,
+      requesterMemberId: "member-requester",
+      ownerMemberId: "member-owner",
+      reviewerMemberId: "member-reviewer"
     });
     assert.equal(createdCard.ownerAgentId, "agent-a");
+    assert.equal(createdCard.requesterMemberId, null);
+    assert.equal(createdCard.ownerMemberId, null);
+    assert.equal(createdCard.reviewerMemberId, null);
 
     const moved = await writeJson(`${baseUrl}/api/boards/${board.id}/work-items/${createdCard.id}`, agentHeaders, {
       laneId: board.lanes[1].id
     }, "PATCH");
     assert.equal(moved.laneId, board.lanes[1].id);
+
+    const humanAccountabilityDenied = await fetch(`${baseUrl}/api/boards/${board.id}/work-items/${createdCard.id}`, {
+      method: "PATCH",
+      headers: { ...agentHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({ ownerMemberId: "member-owner" })
+    });
+    assert.equal(humanAccountabilityDenied.status, 403);
 
     const approvalDenied = await fetch(`${baseUrl}/api/boards/${board.id}/work-items/${createdCard.id}`, {
       method: "PATCH",
@@ -223,6 +236,114 @@ test("scoped agent tokens are one-time, hashed, revocable, and board-agent limit
 
     const afterRevoke = await fetch(`${baseUrl}/api/agent/session`, { headers: agentHeaders });
     assert.equal(afterRevoke.status, 401);
+    } finally {
+      await closeServer(server);
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+test("agent session aliases support create, list, update, revoke, and provenance without token leakage", async () => {
+  await withPlatformAuthEnv(async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-cards-agent-session-"));
+    const dataPath = path.join(tempDir, "state.json");
+    const tokenDataPath = path.join(tempDir, "agent-tokens.json");
+    const adminToken = "admin-token";
+    const server = await listen(createApp({
+      dataPath,
+      tokenDataPath,
+      requireAuth: true,
+      apiToken: adminToken
+    }));
+    const baseUrl = `http://127.0.0.1:${serverPort(server)}`;
+
+    try {
+      const board = await writeJson(`${baseUrl}/api/boards`, bearerHeaders(adminToken), {
+        name: "Session board",
+        lanes: [
+          lane("Todo", "Ready for work.", "agent-a", "reviewer-a"),
+          lane("Review", "Ready for review.", "reviewer-a", "agent-a")
+        ],
+        agentSpecs: [
+          agent("agent-a", "Agent A", "Owner", ["todo"]),
+          agent("reviewer-a", "Reviewer A", "Reviewer", ["review"])
+        ]
+      });
+
+      const created = await writeJson(`${baseUrl}/api/boards/${board.id}/agent-sessions`, bearerHeaders(adminToken), {
+        agentId: "agent-a",
+        label: "Agent A managed session",
+        capabilities: ["view", "create"],
+        expiresAt: null,
+        reason: "Initial board delegation."
+      });
+      assert.match(created.token, /^kcagt_/);
+      assert.equal(created.session.label, "Agent A managed session");
+      assert.equal(created.session.expiresAt, null);
+      assert.deepEqual(created.session.capabilities, ["view", "create"]);
+      assert.equal(Object.hasOwn(created.session, "token"), false);
+      assert.equal(Object.hasOwn(created.session, "tokenHash"), false);
+
+      const sessions = await getJson(`${baseUrl}/api/boards/${board.id}/agent-sessions`, bearerHeaders(adminToken));
+      assert.equal(sessions.sessions.length, 1);
+      assert.equal(sessions.sessions[0].sessionId, created.session.sessionId);
+      assert.equal(Object.hasOwn(sessions.sessions[0], "token"), false);
+      assert.equal(Object.hasOwn(sessions.sessions[0], "tokenHash"), false);
+
+      const invalidUpdate = await fetch(`${baseUrl}/api/boards/${board.id}/agent-sessions/${created.session.sessionId}`, {
+        method: "PATCH",
+        headers: { ...bearerHeaders(adminToken), "Content-Type": "application/json" },
+        body: JSON.stringify({ capabilities: [] })
+      });
+      assert.equal(invalidUpdate.status, 400);
+
+      const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+      const updated = await writeJson(`${baseUrl}/api/boards/${board.id}/agent-sessions/${created.session.sessionId}`, bearerHeaders(adminToken), {
+        label: "View-only managed session",
+        capabilities: ["view"],
+        expiresAt,
+        reason: "Limit to board visibility."
+      }, "PATCH");
+      assert.equal(updated.session.label, "View-only managed session");
+      assert.deepEqual(updated.session.capabilities, ["view"]);
+      assert.equal(updated.session.reason, "Limit to board visibility.");
+      assert.equal(Object.hasOwn(updated.session, "token"), false);
+      assert.equal(Object.hasOwn(updated.session, "tokenHash"), false);
+
+      const tokenCompatibilityList = await getJson(`${baseUrl}/api/boards/${board.id}/agent-tokens`, bearerHeaders(adminToken));
+      assert.equal(tokenCompatibilityList.tokens[0].sessionId, created.session.sessionId);
+      assert.deepEqual(tokenCompatibilityList.tokens[0].capabilities, ["view"]);
+
+      const agentHeaders = bearerHeaders(created.token);
+      const visibleBoard = await getJson(`${baseUrl}/api/boards/${board.id}`, agentHeaders);
+      assert.equal(visibleBoard.id, board.id);
+      const createDenied = await fetch(`${baseUrl}/api/boards/${board.id}/work-items`, {
+        method: "POST",
+        headers: { ...agentHeaders, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: "Denied after capability update",
+          laneId: board.lanes[0].id
+        })
+      });
+      assert.equal(createDenied.status, 403);
+
+      const events = await getJson(`${baseUrl}/api/boards/${board.id}/events?limit=10`, bearerHeaders(adminToken));
+      const createdEvent = events.events.find((event: any) => event.payload.reason === "agent_session_created");
+      const updatedEvent = events.events.find((event: any) => event.payload.reason === "agent_session_updated");
+      assert.equal(createdEvent.payload.resource.type, "agent_session");
+      assert.equal(createdEvent.payload.sessionId, created.session.sessionId);
+      assert.equal(createdEvent.payload.projectId, board.projectId);
+      assert.equal(createdEvent.payload.sessionReason, "Initial board delegation.");
+      assert.equal(updatedEvent.payload.resource.type, "agent_session");
+      assert.deepEqual(updatedEvent.payload.capabilityChanges.before, ["view", "create"]);
+      assert.deepEqual(updatedEvent.payload.capabilityChanges.after, ["view"]);
+      assert.equal(JSON.stringify(events).includes(hashAgentToken(created.token)), false);
+      assert.equal(JSON.stringify(events).includes(created.token), false);
+
+      const revoked = await writeJson(`${baseUrl}/api/boards/${board.id}/agent-sessions/${created.session.sessionId}`, bearerHeaders(adminToken), {}, "DELETE");
+      assert.equal(revoked.session.revokedAt.length > 0, true);
+      const afterRevoke = await fetch(`${baseUrl}/api/agent/session`, { headers: agentHeaders });
+      assert.equal(afterRevoke.status, 401);
     } finally {
       await closeServer(server);
       await fs.rm(tempDir, { recursive: true, force: true });

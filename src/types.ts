@@ -44,6 +44,9 @@ export interface WorkItem {
   title: string;
   summary: string;
   laneId: string;
+  requesterMemberId: Nullable<string>;
+  ownerMemberId: Nullable<string>;
+  reviewerMemberId: Nullable<string>;
   ownerAgentId: Nullable<string>;
   reviewerAgentId: Nullable<string>;
   blockers: unknown[];
@@ -154,6 +157,9 @@ export interface AgentInstruction {
   workItemId: string;
   workItemTitle: string;
   laneId: string;
+  requesterMemberId: Nullable<string>;
+  ownerMemberId: Nullable<string>;
+  reviewerMemberId: Nullable<string>;
   ownerAgentId: Nullable<string>;
   reviewerAgentId: Nullable<string>;
   comment: WorkItemComment;
@@ -196,6 +202,13 @@ export interface AgentTokenCreateInput {
   projectId?: Nullable<string>;
   sessionId?: unknown;
   delegatedBy?: Nullable<string>;
+  capabilities?: unknown;
+  expiresAt?: Nullable<string>;
+  reason?: unknown;
+}
+
+export interface AgentTokenUpdateInput {
+  label?: unknown;
   capabilities?: unknown;
   expiresAt?: Nullable<string>;
   reason?: unknown;
@@ -280,8 +293,10 @@ export interface AgentTokenStore {
   ensureReady(): Promise<void>;
   list(boardId: string): Promise<PublicTokenRecord[]>;
   create(input: AgentTokenCreateInput): Promise<CreatedAgentToken>;
+  update(boardId: string, sessionId: string, input: AgentTokenUpdateInput): Promise<PublicTokenRecord | null>;
   verify(rawToken: string): Promise<PublicTokenRecord | null>;
   revoke(boardId: string, tokenId: string): Promise<PublicTokenRecord | null>;
+  revokeSession(boardId: string, sessionId: string): Promise<PublicTokenRecord | null>;
 }
 
 export interface EventStore {

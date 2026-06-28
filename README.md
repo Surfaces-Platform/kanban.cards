@@ -36,6 +36,13 @@ Optional Auth0/OIDC settings:
 - `OIDC_SURFACE_ACCESS_CLAIM`: override for the surface access claim key
 - `SESSION_TTL_SECONDS`: session cookie lifetime, default `604800`
 
+Optional local flow AI settings:
+
+- `LM_STUDIO_BASE_URL`: OpenAI-compatible LM Studio base URL, default `http://127.0.0.1:1234/v1`
+- `LM_STUDIO_MODEL`: model ID to use for flow drafts; when omitted, kanban.cards uses the first model from `/v1/models`
+- `LM_STUDIO_API_KEY`: bearer value for LM Studio-compatible requests, default `lm-studio`
+- `FLOW_AI_TIMEOUT_MS`: flow draft timeout, default `45000`
+
 Auth0 must allow these callback URLs:
 
 - `https://kanban.cards/auth/callback`
@@ -55,6 +62,22 @@ Local aliases from the earlier Instruct prototype are still accepted temporarily
 - `INSTRUCT_API_BASE_URL`
 - `INSTRUCT_API_TOKEN`
 - `INSTRUCT_DATA_PATH`
+
+## Local Flow AI
+
+The board flow editor can draft lane, gate, and agent changes through a local LM Studio server. Drafts are preview-only until a project manager applies them, and applying a flow remaps existing cards instead of deleting them.
+
+1. Start LM Studio's local server from the Developer tab or with `lms server start`.
+2. Load a model that supports structured output.
+3. Confirm the server responds:
+
+```bash
+curl http://127.0.0.1:1234/v1/models
+```
+
+4. Start kanban.cards with the default `LM_STUDIO_BASE_URL` or point it at another OpenAI-compatible local endpoint.
+
+kanban.cards calls `POST /v1/chat/completions` with a JSON schema response format and parses `choices[0].message.content`. See LM Studio's [OpenAI compatibility](https://lmstudio.ai/docs/developer/openai-compat) and [structured output](https://lmstudio.ai/docs/developer/openai-compat/structured-output) docs.
 
 ## Deployment
 

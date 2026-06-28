@@ -18,9 +18,9 @@ test("legacy workspace state normalizes into Team, Project, and board ownership"
       {
         id: "board-legacy",
         name: "Legacy board",
-        lanes: [],
+        lanes: [{ id: "todo", title: "To do", description: "", defaultOwnerAgentId: null, defaultReviewerAgentId: null, gate: { title: "To do gate", checks: ["Ready"] } }],
         agentSpecs: [],
-        workItems: [],
+        workItems: [{ id: "legacy-card", title: "Legacy card", laneId: "todo", comments: [] }],
         selectedId: null
       }
     ],
@@ -33,8 +33,94 @@ test("legacy workspace state normalizes into Team, Project, and board ownership"
   assert.equal(state.projects[0].id, DEFAULT_PROJECT_ID);
   assert.equal(state.activeProjectId, DEFAULT_PROJECT_ID);
   assert.equal(state.boards[0].projectId, DEFAULT_PROJECT_ID);
+  assert.equal(state.boards[0].workItems[0].requesterMemberId, null);
+  assert.equal(state.boards[0].workItems[0].ownerMemberId, null);
+  assert.equal(state.boards[0].workItems[0].reviewerMemberId, null);
   assert.deepEqual(state.members, []);
   assert.deepEqual(state.invites, []);
+});
+
+test("legacy lane and agent aliases preserve card placement and defaults", () => {
+  const state = normalizeWorkspace({
+    boards: [
+      {
+        id: "board-aliases",
+        name: "Alias board",
+        lanes: [
+          {
+            id: "Plan Lane",
+            title: "Plan",
+            description: "",
+            defaultOwnerAgentId: "Owner Agent",
+            defaultReviewerAgentId: "Review Agent",
+            gate: { title: "Plan gate", checks: ["Ready"] }
+          },
+          {
+            id: "Review Lane",
+            title: "Review",
+            description: "",
+            defaultOwnerAgentId: "Review Agent",
+            defaultReviewerAgentId: "Owner Agent",
+            gate: { title: "Review gate", checks: ["Checked"] }
+          }
+        ],
+        agentSpecs: [
+          { id: "Owner Agent", name: "Owner Agent", role: "Owner", laneIds: ["Plan Lane"], instructions: "", skillNotes: "" },
+          { id: "Review Agent", name: "Review Agent", role: "Reviewer", laneIds: ["Review Lane"], instructions: "", skillNotes: "" }
+        ],
+        workItems: [
+          {
+            id: "legacy-card",
+            title: "Legacy card",
+            laneId: "Review Lane",
+            ownerAgentId: "Owner Agent",
+            reviewerAgentId: "Review Agent",
+            comments: []
+          }
+        ],
+        selectedId: null
+      }
+    ],
+    activeBoardId: "board-aliases",
+    templates: []
+  });
+
+  const board = state.boards[0];
+  assert.equal(board.lanes[0].id, "plan-lane");
+  assert.equal(board.lanes[0].defaultOwnerAgentId, "owner-agent");
+  assert.deepEqual(board.agentSpecs[0].laneIds, ["plan-lane"]);
+  assert.equal(board.workItems[0].laneId, "review-lane");
+  assert.equal(board.workItems[0].ownerAgentId, "owner-agent");
+  assert.equal(board.workItems[0].reviewerAgentId, "review-agent");
+});
+
+test("empty agent specs clear stale lane default agent references", () => {
+  const state = normalizeWorkspace({
+    boards: [
+      {
+        id: "board-stale-agent-defaults",
+        name: "Stale defaults board",
+        lanes: [
+          {
+            id: "todo",
+            title: "Todo",
+            description: "",
+            defaultOwnerAgentId: "missing-owner",
+            defaultReviewerAgentId: "missing-reviewer",
+            gate: { title: "Todo gate", checks: ["Ready"] }
+          }
+        ],
+        agentSpecs: [],
+        workItems: [],
+        selectedId: null
+      }
+    ],
+    activeBoardId: "board-stale-agent-defaults",
+    templates: []
+  });
+
+  assert.equal(state.boards[0].lanes[0].defaultOwnerAgentId, null);
+  assert.equal(state.boards[0].lanes[0].defaultReviewerAgentId, null);
 });
 
 test("project APIs create, rename, activate, and scope board listing", async () => {
@@ -105,6 +191,10 @@ test("session users can use project APIs with Auth0 workspace as team seed", asy
       assert.equal(session.role, "owner");
       assert.equal(session.isTeamMember, true);
       assert.deepEqual(session.projectIds, ["*"]);
+
+      const publicState = await getJson(`${baseUrl}/api/state`, cookieHeaders(sessionCookie));
+      assert.equal(publicState.members.length, 1);
+      assert.equal(publicState.members[0].email, "project@example.com");
     } finally {
       await closeServer(server);
       await fs.rm(tempDir, { recursive: true, force: true });
@@ -163,6 +253,13 @@ test("team invite acceptance hashes one-time tokens and grants member-scoped car
       assert.equal(memberSession.role, "member");
       assert.equal(memberSession.isTeamMember, true);
 
+      const ownerStateAfterAccept = await getJson(`${baseUrl}/api/state`, cookieHeaders(ownerCookie));
+      assert.equal(ownerStateAfterAccept.members.length, 2);
+
+      const memberStateAfterAccept = await getJson(`${baseUrl}/api/state`, cookieHeaders(memberCookie));
+      assert.equal(memberStateAfterAccept.members.length, 1);
+      assert.equal(memberStateAfterAccept.members[0].email, "member@example.com");
+
       const secondAccept = await fetch(`${baseUrl}/api/invites/accept`, {
         method: "POST",
         headers: { ...cookieHeaders(memberCookie), "Content-Type": "application/json" },
@@ -192,6 +289,101 @@ test("team invite acceptance hashes one-time tokens and grants member-scoped car
         laneId: "todo"
       });
       assert.equal(card.title, "Member card");
+    } finally {
+      await closeServer(server);
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+test("card and state writes validate member references against board project access", async () => {
+  await withPlatformAuthEnv(async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-member-reference-validation-"));
+    const dataPath = path.join(tempDir, "state.json");
+    const server = await listen(createApp({ dataPath, requireAuth: true, apiToken: "admin-token" }));
+    const baseUrl = `http://127.0.0.1:${serverPort(server)}`;
+    const ownerCookie = await sessionCookie("auth0|member-ref-owner", "owner-ref@example.com", "Owner Ref", "ws_member_refs");
+    const scopedCookie = await sessionCookie("auth0|member-ref-scoped", "scoped-ref@example.com", "Scoped Ref", "ws_member_refs");
+
+    try {
+      await getJson(`${baseUrl}/auth/session`, cookieHeaders(ownerCookie));
+      const project = await writeJson(`${baseUrl}/api/projects`, cookieHeaders(ownerCookie), { name: "Validated member refs", active: true });
+      const otherProject = await writeJson(`${baseUrl}/api/projects`, cookieHeaders(ownerCookie), { name: "Other member refs", active: false });
+      const board = await writeJson(`${baseUrl}/api/boards`, cookieHeaders(ownerCookie), {
+        name: "Member reference board",
+        projectId: project.id,
+        lanes: [
+          {
+            id: "todo",
+            title: "To do",
+            description: "",
+            defaultOwnerAgentId: null,
+            defaultReviewerAgentId: null,
+            gate: { title: "To do gate", checks: ["Ready"] }
+          }
+        ],
+        agentSpecs: []
+      });
+
+      const ownerTeam = await getJson(`${baseUrl}/api/team`, cookieHeaders(ownerCookie));
+      const ownerMember = ownerTeam.currentMember;
+      assert.ok(ownerMember);
+
+      const invitePayload = await writeJson(`${baseUrl}/api/team/invites`, cookieHeaders(ownerCookie), {
+        email: "scoped-ref@example.com",
+        role: "member",
+        projectIds: [otherProject.id]
+      });
+      const inviteToken = new URL(invitePayload.acceptUrl).searchParams.get("token") || "";
+      await writeJson(`${baseUrl}/api/invites/accept`, cookieHeaders(scopedCookie), { token: inviteToken });
+      const teamAfterInvite = await getJson(`${baseUrl}/api/team`, cookieHeaders(ownerCookie));
+      const scopedMember = teamAfterInvite.members.find((member: any) => member.email === "scoped-ref@example.com");
+      assert.ok(scopedMember);
+
+      const invalidCreate = await fetch(`${baseUrl}/api/boards/${board.id}/work-items`, {
+        method: "POST",
+        headers: { ...cookieHeaders(ownerCookie), "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: "Invalid requester",
+          laneId: "todo",
+          requesterMemberId: "missing-member"
+        })
+      });
+      assert.equal(invalidCreate.status, 400);
+
+      const card = await writeJson(`${baseUrl}/api/boards/${board.id}/work-items`, cookieHeaders(ownerCookie), {
+        title: "Valid member references",
+        laneId: "todo",
+        requesterMemberId: ownerMember.id,
+        ownerMemberId: ownerMember.id,
+        reviewerMemberId: null
+      });
+      assert.equal(card.requesterMemberId, ownerMember.id);
+      assert.equal(card.ownerMemberId, ownerMember.id);
+      assert.equal(card.reviewerMemberId, null);
+
+      const invalidPatch = await fetch(`${baseUrl}/api/boards/${board.id}/work-items/${card.id}`, {
+        method: "PATCH",
+        headers: { ...cookieHeaders(ownerCookie), "Content-Type": "application/json" },
+        body: JSON.stringify({ reviewerMemberId: scopedMember.id })
+      });
+      assert.equal(invalidPatch.status, 400);
+
+      const cleared = await writeJson(`${baseUrl}/api/boards/${board.id}/work-items/${card.id}`, cookieHeaders(ownerCookie), {
+        ownerMemberId: ""
+      }, "PATCH");
+      assert.equal(cleared.ownerMemberId, null);
+
+      const state = await getJson(`${baseUrl}/api/state`, cookieHeaders(ownerCookie));
+      const stateBoard = state.boards.find((candidate: any) => candidate.id === board.id);
+      const stateCard = stateBoard.workItems.find((candidate: any) => candidate.id === card.id);
+      stateCard.reviewerMemberId = "missing-member";
+      const invalidStateWrite = await fetch(`${baseUrl}/api/state`, {
+        method: "PUT",
+        headers: { ...cookieHeaders(ownerCookie), "Content-Type": "application/json" },
+        body: JSON.stringify(state)
+      });
+      assert.equal(invalidStateWrite.status, 400);
     } finally {
       await closeServer(server);
       await fs.rm(tempDir, { recursive: true, force: true });
@@ -254,6 +446,7 @@ test("agent tokens normalize legacy sessions and reject expired sessions", async
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-agent-session-store-"));
   const tokenPath = path.join(tempDir, "tokens.json");
   const legacyToken = "kcagt_legacy_token";
+  const corruptCapabilitiesToken = "kcagt_corrupt_caps";
   const store = createFileAgentTokenStore(tokenPath);
 
   try {
@@ -269,6 +462,18 @@ test("agent tokens normalize legacy sessions and reject expired sessions", async
           createdAt: new Date().toISOString(),
           lastUsedAt: null,
           revokedAt: null
+        },
+        {
+          id: "agtok_corrupt_caps",
+          boardId: "board-1",
+          agentId: "agent-a",
+          label: "Corrupt capabilities",
+          tokenHash: hashAgentToken(corruptCapabilitiesToken),
+          last4: corruptCapabilitiesToken.slice(-4),
+          capabilities: ["view", "delete-everything"],
+          createdAt: new Date().toISOString(),
+          lastUsedAt: null,
+          revokedAt: null
         }
       ]
     }));
@@ -276,6 +481,9 @@ test("agent tokens normalize legacy sessions and reject expired sessions", async
     const legacy = await store.verify(legacyToken);
     assert.equal(legacy?.sessionId, "legacy:agtok_legacy");
     assert.deepEqual(legacy?.capabilities, ["view", "create", "update", "comment", "move"]);
+
+    const corruptCapabilities = await store.verify(corruptCapabilitiesToken);
+    assert.deepEqual(corruptCapabilities?.capabilities, ["view"]);
 
     const expired = await store.create({
       boardId: "board-1",
