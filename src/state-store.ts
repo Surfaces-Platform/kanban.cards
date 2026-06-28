@@ -586,8 +586,8 @@ function normalizeAgentSpec(rawAgent: unknown, laneIds: Set<string> = new Set(),
 }
 
 function normalizeLaneAgentDefaults(lane: Lane, agentIds: Set<string> = new Set(), agentAliases: AliasMap = new Map()): Lane {
-  const ownerAgentId = normalizeLinkedAgentId(lane.defaultOwnerAgentId, agentIds, agentAliases);
-  const reviewerAgentId = normalizeLinkedAgentId(lane.defaultReviewerAgentId, agentIds, agentAliases);
+  const ownerAgentId = normalizeLinkedAgentId(lane.defaultOwnerAgentId, agentIds, agentAliases, true);
+  const reviewerAgentId = normalizeLinkedAgentId(lane.defaultReviewerAgentId, agentIds, agentAliases, true);
   return {
     ...lane,
     defaultOwnerAgentId: ownerAgentId,
@@ -685,11 +685,12 @@ function resolveAlias(value: unknown, aliases: AliasMap): string | null {
   return aliases.get(raw) || aliases.get(slugify(raw)) || null;
 }
 
-function normalizeLinkedAgentId(value: unknown, agentIds: Set<string>, agentAliases: AliasMap): string | null {
+function normalizeLinkedAgentId(value: unknown, agentIds: Set<string>, agentAliases: AliasMap, requireKnownAgent = false): string | null {
   const raw = nullableString(value);
   if (!raw) return null;
   const resolved = resolveAlias(raw, agentAliases) || raw;
-  return !agentIds.size || agentIds.has(resolved) ? resolved : null;
+  if (!agentIds.size) return requireKnownAgent ? null : resolved;
+  return agentIds.has(resolved) ? resolved : null;
 }
 
 function normalizeComment(rawComment: unknown): WorkItemComment | null {

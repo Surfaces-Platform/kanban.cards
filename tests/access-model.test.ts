@@ -94,6 +94,35 @@ test("legacy lane and agent aliases preserve card placement and defaults", () =>
   assert.equal(board.workItems[0].reviewerAgentId, "review-agent");
 });
 
+test("empty agent specs clear stale lane default agent references", () => {
+  const state = normalizeWorkspace({
+    boards: [
+      {
+        id: "board-stale-agent-defaults",
+        name: "Stale defaults board",
+        lanes: [
+          {
+            id: "todo",
+            title: "Todo",
+            description: "",
+            defaultOwnerAgentId: "missing-owner",
+            defaultReviewerAgentId: "missing-reviewer",
+            gate: { title: "Todo gate", checks: ["Ready"] }
+          }
+        ],
+        agentSpecs: [],
+        workItems: [],
+        selectedId: null
+      }
+    ],
+    activeBoardId: "board-stale-agent-defaults",
+    templates: []
+  });
+
+  assert.equal(state.boards[0].lanes[0].defaultOwnerAgentId, null);
+  assert.equal(state.boards[0].lanes[0].defaultReviewerAgentId, null);
+});
+
 test("project APIs create, rename, activate, and scope board listing", async () => {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-project-api-"));
   const dataPath = path.join(tempDir, "state.json");

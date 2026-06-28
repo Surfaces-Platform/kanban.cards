@@ -115,6 +115,11 @@ interface FlowAiRequestScope {
   contextKey: string;
 }
 
+interface FlowApplyRequestScope {
+  requestId: number;
+  boardId: string;
+}
+
 interface AgentConnectRequestScope {
   epoch: number;
   boardId: string;
@@ -986,6 +991,19 @@ function getCurrentFlowAiBoard(scope: FlowAiRequestScope): Board | null {
 function isLatestFlowAiRequestForBoard(scope: FlowAiRequestScope): boolean {
   if (scope.requestId !== flowAiRequestId) return false;
   return getActiveBoardOrNull()?.id === scope.boardId;
+}
+
+function makeFlowApplyRequestScope(boardId: string): FlowApplyRequestScope {
+  const scope = {
+    requestId: flowAiRequestId + 1,
+    boardId
+  };
+  flowAiRequestId = scope.requestId;
+  return scope;
+}
+
+function isCurrentFlowApplyRequest(scope: FlowApplyRequestScope): boolean {
+  return scope.requestId === flowAiRequestId && getActiveBoardOrNull()?.id === scope.boardId;
 }
 
 function makeAgentConnectRequestScope(boardId: string, agentId: string | null | undefined = agentConnectAgentId): AgentConnectRequestScope {
@@ -3905,6 +3923,7 @@ async function applyBoard(): Promise<void> {
     return;
   }
 
+  const requestScope = makeFlowApplyRequestScope(board.id);
   flowApplyInFlight = true;
   flowAiError = "";
   render();
@@ -3918,7 +3937,9 @@ async function applyBoard(): Promise<void> {
         source: "ai"
       })
     });
+    if (!isCurrentFlowApplyRequest(requestScope)) return;
     await reloadWorkspaceStateFromApi();
+    if (!isCurrentFlowApplyRequest(requestScope)) return;
     state.activeBoardId = payload.board.id;
     templateFormOpen = false;
     flowAdvancedOpen = false;
@@ -3935,6 +3956,7 @@ async function applyBoard(): Promise<void> {
       tone: "success"
     });
   } catch (error) {
+    if (!isCurrentFlowApplyRequest(requestScope)) return;
     const message = error instanceof Error ? error.message : "Could not apply flow.";
     flowAiError = "";
     flowMessage = "";
@@ -3945,8 +3967,10 @@ async function applyBoard(): Promise<void> {
       tone: "warning"
     });
   } finally {
-    flowApplyInFlight = false;
-    render();
+    if (isCurrentFlowApplyRequest(requestScope)) {
+      flowApplyInFlight = false;
+      render();
+    }
   }
 }
 
