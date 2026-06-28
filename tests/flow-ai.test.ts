@@ -297,12 +297,15 @@ test("flow apply uses Postgres stores and reconciles cards, agent sessions, and 
     assert.ok(revokedEvent);
     assert.equal(revokedEvent.payload.agentId, "agent-removed");
     assert.equal(revokedEvent.payload.revocationReason, "agent_removed_from_flow");
-    const eventJson = JSON.stringify(event);
-    assert.equal(eventJson.includes(keptSession.token), false);
-    assert.equal(eventJson.includes(removedSession.token), false);
-    assert.equal(eventJson.includes(hashAgentToken(keptSession.token)), false);
-    assert.equal(eventJson.includes(hashAgentToken(removedSession.token)), false);
-    assert.equal(eventJson.includes("tokenHash"), false);
+    const leakCheckJson = JSON.stringify({
+      events: events.events,
+      revokedAgentSessions: result.revokedAgentSessions
+    });
+    assert.equal(leakCheckJson.includes(keptSession.token), false);
+    assert.equal(leakCheckJson.includes(removedSession.token), false);
+    assert.equal(leakCheckJson.includes(hashAgentToken(keptSession.token)), false);
+    assert.equal(leakCheckJson.includes(hashAgentToken(removedSession.token)), false);
+    assert.equal(leakCheckJson.includes("tokenHash"), false);
 
     const keptAfterApply = await fetch(`${baseUrl}/api/agent/session`, { headers: bearerHeaders(keptSession.token) });
     const removedAfterApply = await fetch(`${baseUrl}/api/agent/session`, { headers: bearerHeaders(removedSession.token) });

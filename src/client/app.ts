@@ -4011,14 +4011,7 @@ function deleteCurrentBoardFromDialog(action: HTMLElement): void {
   const nextIndex = Math.min(boardIndex, projectBoards.length - 1);
   state.activeBoardId = projectBoards[nextIndex]?.id || "";
 
-  deleteBoardDialogOpen = false;
-  flowActionsMenuOpen = false;
-  resetAgentConnectDialog();
-  resetInspectorActivity();
-  templateFormOpen = false;
-  editingTemplateId = null;
-  flowMessage = "";
-  flowMessageTone = "neutral";
+  resetBoardScopedUi();
   saveState();
   showToast(`${deletedName} deleted.`);
   render();
