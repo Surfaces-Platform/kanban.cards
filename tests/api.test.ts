@@ -126,6 +126,15 @@ test("one resource API supports idempotent plans, concurrency, comments, activit
     const replay = unwrap(await replayResponse.json(), "project");
     assert.equal(replay.id, project.id);
 
+    const defaultColumnsResponse = await fetch(`${baseUrl}/api/projects`, {
+      method: "POST",
+      headers: { ...headers, "Content-Type": "application/json", "Idempotency-Key": "project:default-columns" },
+      body: JSON.stringify({ name: "Default columns" })
+    });
+    assert.equal(defaultColumnsResponse.status, 201);
+    const defaultColumnsProject = unwrap(await defaultColumnsResponse.json(), "project");
+    assert.deepEqual(defaultColumnsProject.columns.map((column: any) => column.name), ["Next", "Doing", "Done"]);
+
     const keyConflict = await fetch(`${baseUrl}/api/projects`, {
       method: "POST",
       headers: { ...headers, "Content-Type": "application/json", "Idempotency-Key": "project:v2" },
@@ -133,20 +142,30 @@ test("one resource API supports idempotent plans, concurrency, comments, activit
     });
     assert.equal(keyConflict.status, 409);
 
+    const cardBody = {
+      title: "Simplify authentication",
+      body: "Use the owner credential.",
+      columnId: "inbox",
+      externalKey: "recommendation:simplify-auth"
+    };
     const cardResponse = await fetch(`${baseUrl}/api/projects/${project.id}/cards`, {
       method: "POST",
       headers: { ...headers, "Content-Type": "application/json", "Idempotency-Key": "card:simplify-auth" },
-      body: JSON.stringify({
-        title: "Simplify authentication",
-        body: "Use the owner credential.",
-        columnId: "inbox",
-        externalKey: "recommendation:simplify-auth"
-      })
+      body: JSON.stringify(cardBody)
     });
     assert.equal(cardResponse.status, 201);
     const cardPayload = await cardResponse.json() as any;
     const card = unwrap(cardPayload, "card");
     assert.equal(card.version, 1);
+
+    const cardReplayResponse = await fetch(`${baseUrl}/api/projects/${project.id}/cards`, {
+      method: "POST",
+      headers: { ...headers, "Content-Type": "application/json", "Idempotency-Key": "card:simplify-auth" },
+      body: JSON.stringify(cardBody)
+    });
+    assert.equal(cardReplayResponse.status, 201);
+    assert.equal(cardReplayResponse.headers.get("idempotency-replayed"), "true");
+    assert.deepEqual(await cardReplayResponse.json(), cardPayload);
 
     const deduplicatedResponse = await fetch(`${baseUrl}/api/projects/${project.id}/cards`, {
       method: "POST",
@@ -216,6 +235,27 @@ test("one resource API supports idempotent plans, concurrency, comments, activit
     const storedState = JSON.parse(await fs.readFile(dataPath, "utf8"));
     const commentRecord = storedState.idempotencyRecords.find((record: any) => record.key === "comment:implemented");
     assert.deepEqual(commentRecord.response.card, { id: card.id, version: 3 });
+
+    const archivedResponse = await fetch(`${baseUrl}/api/projects/${project.id}/cards/${card.id}`, {
+      method: "PATCH",
+      headers: { ...headers, "Content-Type": "application/json", "X-Kanban-Version": String(commentPayload.card.version) },
+      body: JSON.stringify({ archivedAt: new Date().toISOString() })
+    });
+    assert.equal(archivedResponse.status, 200);
+    const archived = unwrap(await archivedResponse.json(), "card");
+    assert.ok(archived.archivedAt);
+
+    const restoredResponse = await fetch(`${baseUrl}/api/projects/${project.id}/cards/${card.id}`, {
+      method: "PATCH",
+      headers: { ...headers, "Content-Type": "application/json", "X-Kanban-Version": String(archived.version) },
+      body: JSON.stringify({ archivedAt: null })
+    });
+    assert.equal(restoredResponse.status, 200);
+    const restored = unwrap(await restoredResponse.json(), "card");
+    assert.equal(restored.archivedAt, null);
+
+    const projectListAfterUndo = await fetchJson(`${baseUrl}/api/projects`, { headers });
+    assert.equal(projectListAfterUndo.projects.find((candidate: any) => candidate.id === project.id).cardCount, 1);
 
     const activityPayload = await fetchJson(`${baseUrl}/api/projects/${project.id}/activity`, { headers });
     assert.ok(activityPayload.activity.length >= 4);

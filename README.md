@@ -111,9 +111,10 @@ npm run typecheck
 npm run build
 npm run check
 npm test
+npm run test:browser
 ```
 
-`npm run check` verifies compilation plus the primary UI contract. `npm test` verifies authentication, authorization, idempotency, optimistic version conflicts, file persistence, the Postgres adapter through an isolated fake, and CLI configuration. A passing automated suite means the implementation contract holds; it does not prove connectivity to the production database or replace rendered browser verification before deployment.
+`npm run check` verifies compilation plus the primary UI contract. `npm test` verifies authentication, authorization, idempotency, optimistic version conflicts, file persistence, the Postgres adapter through an isolated fake, and CLI configuration. `npm run test:browser` builds the production client and exercises the Context Dock against a temporary real server and store in Chromium at desktop and narrow-screen sizes; install its browser once with `npx playwright install chromium` if needed. A passing automated suite means the implementation contract holds; it does not prove connectivity to the production database or replace candidate-deployment verification before promotion.
 
 ## Deployment
 

@@ -66,7 +66,7 @@ const SESSION_COOKIE = "kanban_cards_session";
 const DEFAULT_SESSION_TTL_SECONDS = 60 * 60 * 24 * 7;
 const MAX_ACTIVITY = 1_000;
 const MAX_IDEMPOTENCY_RECORDS = 1_000;
-const DEFAULT_COLUMNS = ["Inbox", "Next", "Doing", "Done"];
+const DEFAULT_COLUMNS = ["Next", "Doing", "Done"];
 const FALLBACK_INDEX_HTML = `<!doctype html>
 <html lang="en">
 <head>
@@ -74,6 +74,7 @@ const FALLBACK_INDEX_HTML = `<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex,nofollow">
   <title>kanban.cards</title>
+  <link rel="stylesheet" href="judgmentkit.css">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -161,6 +162,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
   app.get("/", serveIndex(staticDir));
   app.get("/index.html", serveIndex(staticDir));
   app.get("/app.js", sendStaticFile(staticDir, "public/app.js", "application/javascript; charset=utf-8"));
+  app.get("/judgmentkit.css", sendStaticFile(staticDir, "public/judgmentkit.css", "text/css; charset=utf-8"));
   app.get("/styles.css", sendStaticFile(staticDir, "public/styles.css", "text/css; charset=utf-8"));
   app.get("/robots.txt", sendStaticFile(staticDir, "public/robots.txt", "text/plain; charset=utf-8"));
   app.get("/favicon.ico", (_req, res) => res.status(204).end());
