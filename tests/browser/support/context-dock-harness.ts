@@ -18,6 +18,8 @@ export type SeedCardName =
   | "desktopColumnContext"
   | "desktopDraft"
   | "mobileAutosave"
+  | "moveArchived"
+  | "moveConflict"
   | "overflow"
   | "privacy"
   | "staleDiscard"
@@ -52,6 +54,10 @@ export interface BrowserHarness {
   stop(): Promise<void>;
 }
 
+export interface BrowserHarnessOptions {
+  sessionTtlSeconds?: number;
+}
+
 export interface BrowserError {
   kind: "console" | "page" | "request" | "server";
   text: string;
@@ -74,7 +80,7 @@ export async function assertChromiumInstalled(): Promise<void> {
   }
 }
 
-export async function startBrowserHarness(): Promise<BrowserHarness> {
+export async function startBrowserHarness(options: BrowserHarnessOptions = {}): Promise<BrowserHarness> {
   const temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-context-dock-browser-"));
   const dataPath = path.join(temporaryDirectory, "workspace.json");
   const repositoryRoot = path.resolve(__dirname, "../../..");
@@ -84,6 +90,7 @@ export async function startBrowserHarness(): Promise<BrowserHarness> {
     host: "127.0.0.1",
     ownerLabel: "Browser QA Owner",
     requireDatabase: false,
+    sessionTtlSeconds: options.sessionTtlSeconds,
     staticDir: repositoryRoot
   }));
 
@@ -127,6 +134,8 @@ export async function seedBrowserWorkspace(harness: BrowserHarness): Promise<See
     ["desktopDraft", "Preserve desktop draft focus", "Stored desktop body"],
     ["desktopColumnContext", "Review a Doing Card", "Desktop creation must still target the first Column.", "doing"],
     ["mobileAutosave", "Autosave on mobile", "Stored mobile body"],
+    ["moveArchived", "Archive during a move", "Stored concurrent-archive body"],
+    ["moveConflict", "Recover a stale move", "Stored move-conflict body"],
     ["staleDiscard", "Discard a stale draft", "Stored discard body"],
     ["staleRetry", "Retry a stale draft", "Stored retry body"],
     ["archive", "Archive and undo", "Stored archive body"],
@@ -145,11 +154,19 @@ export async function seedBrowserWorkspace(harness: BrowserHarness): Promise<See
   return { projectId, cards, overflowTitle };
 }
 
-export async function authenticate(page: Page, harness: BrowserHarness): Promise<void> {
+export async function signInToWorkspace(page: Page, harness: BrowserHarness): Promise<void> {
   await page.goto(harness.baseUrl);
   await expect(page.getByRole("heading", { name: "Open your workspace" })).toBeVisible();
   await page.getByLabel("Owner key").fill(harness.ownerKey);
   await page.getByRole("button", { name: "Open workspace" }).click();
+  await expect(page.locator("body")).toHaveAttribute(
+    "data-state",
+    /^(empty-workspace|empty-project|populated|selected|archived)$/
+  );
+}
+
+export async function authenticate(page: Page, harness: BrowserHarness): Promise<void> {
+  await signInToWorkspace(page, harness);
   await expect(page.getByRole("heading", { name: "Context Dock regression" })).toBeVisible();
   await expect(page.locator("body")).toHaveAttribute("data-state", "populated");
 }
