@@ -200,19 +200,55 @@ The design should not introduce:
 - dashboards or metrics that do not help the user execute or reconcile work
 - reconstructed historical screens, components, tokens, or layouts
 
-## Decisions still open
+## Accepted interface direction
 
-The following choices should be made through new working screens and rendered review:
+The structural direction is **Context Dock**. The ordered Columns use the whole Kanban surface until a Card is opened. On desktop, Card detail then enters as a nonmodal, full-height work surface from the right while the Project remains available for context. On narrow screens, the Project shows one explicit Column at a time and the Card surface fills the screen.
 
-- visual identity, palette, typography, and geometry
-- Project navigation and application chrome
-- Column behavior and Card density
-- placement and treatment of creation actions
-- Card detail presentation
-- the prominence of Comments and Activity
-- narrow-screen workspace behavior
+The alternative **Focus Workspace** remains comparison evidence, not a second product mode. Live design review superseded its persistent `Displayed state` treatment: routine synchronization copy must not occupy the working surface.
 
-Open decisions should remain open until a current user job and a representative state provide enough evidence to choose.
+### Visual system
+
+- Use JudgmentKit's `judgmentkit_default` source with the `workbench` surface pattern.
+- Use the exact `--jk-*` token roles, system typography, and component and pattern contracts; do not recreate the appearance with local lookalike tokens.
+- Lucide is the icon authority when an icon materially improves comprehension. Text controls remain valid when an icon would add noise.
+- Keep the surface calm, compact, and low-elevation. Selection, focus, validation, stale state, action progress, and receipts are the justified sources of salience.
+
+### Application chrome and Project context
+
+- Place the compact Project selector immediately after the product name in the header. Do not repeat the active Project name, description, or recency in a second context bar.
+- Represent the owner with a simple avatar button. Its plain panel contains the username and Sign out; do not expose environment or QA labels in the chrome.
+- Put New Project, New Card, Edit Project, and Refresh in one Actions panel at the top right of the Kanban surface. Keep routine success copy off the surface; show persistent status only when the user must act on it.
+- New Projects start with exactly three ordered Columns: Next, Doing, and Done. Project editing covers name, description, and every stored Column without truncating additional API-created Columns. Conflicting navigation stays unavailable until Save or Cancel.
+
+### Columns, Cards, and creation
+
+- Desktop uses an ordered Column grid with compact, consistently structured Card summaries: title, a short body-derived summary when present, Comment count, and recency.
+- Column placement communicates Card state; do not repeat state decoration without a separate need.
+- New Project and New Card actions remain near their resource context and stay reachable in empty, populated, desktop, and narrow-screen states.
+- This reviewed slice does not introduce a replacement browser move control after removing the inspector Column selector. Skill/API moves remain visible after Refresh. A browser-originated move pattern and a more explicit desktop destination for newly created Cards require a separate rendered decision.
+- A successful create, edit, move, or Comment updates the visible resource and its Card-specific Activity before showing a secondary receipt.
+
+### Card detail, Comments, and Activity
+
+- Card detail is absent until a Card is selected. It opens from the right as a full-height, wide, nonmodal surface with an X close control; no empty inspector, context eyebrow, detail heading, or inspector Refresh is rendered.
+- Title and Body are surface-integrated controls. Body is the dominant object. Existing Cards save title and Body on field blur, without a Save action or an inspector Column selector; new Card creation retains an explicit Create action.
+- Comments are primary Card context and follow the editor without a count, conversation eyebrow, empty-state sentence, or caller-attribution disclaimer.
+- Activity is Card-specific and appears as a top-level inspector tab. It shows the change and time without channel or caller-label explanation.
+- Drafts remain retained until a blur save is confirmed or the user explicitly discards them. A stale conflict exposes the complete draft and newer stored state with Retry and Discard; Archive cannot bypass that recovery.
+- Archive remains non-destructive. The Card leaves the active board, and the named receipt and Undo remain available across Project navigation until recovery.
+
+### Narrow screens
+
+- Show one named Column at a time through an explicit selector with its Card count; do not rely on horizontal-swipe discovery.
+- A selected Card becomes a dedicated full-screen surface. The visible close control is an X, with an accessible name that identifies the return Column.
+- Closing returns to the originating Column and restores the prior Card, scroll, selection, and keyboard focus context.
+- Long fields reflow in one dimension, primary actions remain reachable, and sticky actions may not obscure focused controls.
+
+### Decision evidence and implementation boundary
+
+The original direction was selected from matched, interactive desktop and `390 × 844` prototypes. A live interface review on 2026-08-09 then refined the accepted Context Dock: compact header menus, no routine explanatory chrome, an on-demand full-height Card surface, blur autosave, and Activity as a tab. Those direct review decisions supersede contradictory prototype details.
+
+The prototypes are design evidence, not production implementation. The implementation change must update `UI_CONTRACT.md` and its automated checks to this accepted direction before the production UI can be called complete.
 
 ## Acceptance criteria
 

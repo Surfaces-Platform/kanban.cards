@@ -1,6 +1,7 @@
 node_modules/
 dist/
 public/app.js
+public/judgmentkit.css
 public/styles.css
 public/robots.txt
 .DS_Store
@@ -13,6 +14,7 @@ data/*.jsonl
 coverage/
 .playwright-cli/
 output/playwright/
+output/design-review-phone/
 .demo/
 npm-debug.log*
 .env*.local
