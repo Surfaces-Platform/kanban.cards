@@ -225,7 +225,11 @@ The alternative **Focus Workspace** remains comparison evidence, not a second pr
 - Desktop uses an ordered Column grid with compact, consistently structured Card summaries: title, a short body-derived summary when present, Comment count, and recency.
 - Column placement communicates Card state; do not repeat state decoration without a separate need.
 - New Project and New Card actions remain near their resource context and stay reachable in empty, populated, desktop, and narrow-screen states.
-- This reviewed slice does not introduce a replacement browser move control after removing the inspector Column selector. Skill/API moves remain visible after Refresh. A browser-originated move pattern and a more explicit desktop destination for newly created Cards require a separate rendered decision.
+- An existing Card has one canonical browser movement path: a visible `Move…` command in the selected-Card toolbar. It opens a named `Move Card` disclosure that states the current Column and presents every other Column as an explicit `Move to <Column>` action.
+- The Move disclosure uses ordinary buttons, not menu semantics. It remains the same command on desktop and narrow screens and is the keyboard, touch, and assistive-technology path. This slice does not add drag-and-drop, a board-Card overflow action, or a persistent selected-Card Column field.
+- New Card creation shows a labeled `Create in` choice before the Create action. Desktop defaults to the first ordered Column; narrow and Column-local entry default to the visible or launch Column. The choice is creation context, not an editable state field on an existing Card.
+- Movement waits for pending title and Body saves, locks conflicting mutations, changes only the destination against the latest Card version, and keeps the Card open. The board, Card Activity, narrow-screen Column, close label, and completion receipt then agree on the destination.
+- A move-time version conflict retains only the requested destination. The latest stored Card remains authoritative, and recovery offers an explicit destination-specific Retry or Cancel without replaying title or Body changes.
 - A successful create, edit, move, or Comment updates the visible resource and its Card-specific Activity before showing a secondary receipt.
 
 ### Card detail, Comments, and Activity
@@ -241,12 +245,16 @@ The alternative **Focus Workspace** remains comparison evidence, not a second pr
 
 - Show one named Column at a time through an explicit selector with its Card count; do not rely on horizontal-swipe discovery.
 - A selected Card becomes a dedicated full-screen surface. The visible close control is an X, with an accessible name that identifies the return Column.
-- Closing returns to the originating Column and restores the prior Card, scroll, selection, and keyboard focus context.
+- Closing returns to the originating Column unless the Card moved while open; after movement it returns to the destination Column and restores the moved Card, selection, and keyboard focus context.
 - Long fields reflow in one dimension, primary actions remain reachable, and sticky actions may not obscure focused controls.
 
 ### Decision evidence and implementation boundary
 
 The original direction was selected from matched, interactive desktop and `390 × 844` prototypes. A live interface review on 2026-08-09 then refined the accepted Context Dock: compact header menus, no routine explanatory chrome, an on-demand full-height Card surface, blur autosave, and Activity as a tab. Those direct review decisions supersede contradictory prototype details.
+
+The Card-placement slice was reviewed against actual desktop and `390 × 844` renders of the current Context Dock plus matched renders of three candidates. Desktop keeps the ordered Columns beside the selected Card; narrow screens remove the board while Card detail is open. The visible Card-local `Move…` command was the only candidate that kept one interaction model across both states. A board-Card overflow action hid a core job and crowded summaries, while drag-and-drop still required the same explicit narrow-screen and assistive-technology fallback.
+
+JudgmentKit's Workbench review accepted a `workspace` topology that keeps Card selection, destination choice, and completion evidence adjacent. The implementation contract requires visible decision options, disabled reasons, completion receipts, keyboard/focus evidence, and matched desktop and narrow browser QA. NN/g evidence supports the same boundary: [contextual menus should remain secondary](https://www.nngroup.com/articles/contextual-menus-guidelines/), [accessible drag-and-drop requires a complete keyboard and screen-reader model](https://www.nngroup.com/articles/drag-drop/), [an ellipsis signals that more information is required](https://www.nngroup.com/articles/ui-copy/), and [small bounded option sets benefit from visible comparison](https://www.nngroup.com/articles/dropdown-list/).
 
 The prototypes are design evidence, not production implementation. The implementation change must update `UI_CONTRACT.md` and its automated checks to this accepted direction before the production UI can be called complete.
 

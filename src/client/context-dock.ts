@@ -7,7 +7,7 @@ declare global {
 type Revision = string | number;
 type ProjectEditorMode = "create" | "edit" | null;
 type InspectorTab = "card" | "activity";
-type MutationKind = "sign-in" | "refresh" | "project" | "card" | "comment" | "archive" | "undo" | null;
+type MutationKind = "sign-in" | "refresh" | "project" | "card" | "move" | "comment" | "archive" | "undo" | null;
 type StatusTone = "neutral" | "success" | "warning" | "error" | "receipt";
 
 interface Session {
@@ -113,6 +113,10 @@ interface CardConflict {
   latestLoaded: boolean;
 }
 
+interface MoveConflict extends CardConflict {
+  destinationColumnId: string;
+}
+
 interface FocusTarget {
   action: string;
   cardId?: string;
@@ -181,6 +185,9 @@ let commentFieldError = "";
 let projectStatus: StatusMessage | null = null;
 let cardStatus: StatusMessage | null = null;
 let cardConflict: CardConflict | null = null;
+let moveConflict: MoveConflict | null = null;
+let movePanelOpen = false;
+let moveDestinationId = "";
 let cardReturnFocus: FocusTarget | null = null;
 let projectEditorReturnFocus: FocusTarget | null = null;
 let pendingFocusRestore: FocusTarget | null = null;
@@ -482,6 +489,12 @@ function workspaceLocked(): boolean {
   return mutationInFlight || projectEditorMode !== null;
 }
 
+function resetMoveContext(): void {
+  moveConflict = null;
+  movePanelOpen = false;
+  moveDestinationId = "";
+}
+
 function setWorkspaceMutationsDisabled(disabled: boolean, kind: MutationKind = null): void {
   mutationInFlight = disabled;
   mutationKind = disabled ? kind : null;
@@ -533,7 +546,7 @@ function renderButton(
 
 function renderStatus(message: StatusMessage | null, id: string): string {
   if (!message) return `<div id="${escapeHtml(id)}" class="status-slot" role="status" aria-live="polite" aria-atomic="true"></div>`;
-  return `<div id="${escapeHtml(id)}" class="jk-status" data-kind="${escapeHtml(message.tone)}" role="status" aria-live="polite" aria-atomic="true"><span class="jk-status-marker" aria-hidden="true">${message.tone === "error" || message.tone === "warning" ? "!" : "✓"}</span><div><strong>${escapeHtml(message.title)}</strong><p>${escapeHtml(message.message)}</p></div></div>`;
+  return `<div id="${escapeHtml(id)}" class="jk-status" data-kind="${escapeHtml(message.tone)}" role="status" aria-live="polite" aria-atomic="true" tabindex="-1"><span class="jk-status-marker" aria-hidden="true">${message.tone === "error" || message.tone === "warning" ? "!" : "✓"}</span><div><strong>${escapeHtml(message.title)}</strong><p>${escapeHtml(message.message)}</p></div></div>`;
 }
 
 function renderLoading(): string {
@@ -768,14 +781,75 @@ function renderActivity(card: ProjectCard): string {
   return `<section id="activity-panel" class="activity-panel" role="tabpanel" aria-labelledby="activity-tab" tabindex="0"><ol class="activity-list">${activity.map((item) => `<li><span>${escapeHtml(item.summary)}</span><time class="jk-meta" datetime="${escapeHtml(item.createdAt)}">${escapeHtml(formatDate(item.createdAt))}</time></li>`).join("")}</ol></section>`;
 }
 
+function renderCreateDestination(project: Project, draft: CardDraft): string {
+  return renderField({
+    id: "card-create-column",
+    label: "Create in",
+    control: renderSelect({
+      id: "card-create-column",
+      name: "columnId",
+      value: draft.columnId,
+      choices: project.columns.map((column) => ({ value: column.id, label: column.name })),
+      ariaDescribedBy: "card-create-column-help"
+    }),
+    hint: "Choose the Column where this new Card will begin."
+  }).replace('<p class="jk-help">', '<p class="jk-help" id="card-create-column-help">');
+}
+
+function renderMoveDisclosure(project: Project, card: ProjectCard, conflict: boolean): string {
+  const currentColumn = project.columns.find((column) => column.id === card.columnId);
+  const destinations = project.columns.filter((column) => column.id !== card.columnId);
+  const blockedByMoveConflict = Boolean(moveConflict?.projectId === project.id && moveConflict.cardId === card.id);
+  const unavailableReason = conflict
+    ? "Resolve the stored Card change before moving it."
+    : blockedByMoveConflict
+      ? "Resolve the pending move below."
+      : destinations.length
+        ? ""
+        : "This Project has no other Column.";
+  const describedBy = conflict ? "stale-heading" : blockedByMoveConflict ? "move-conflict-heading" : unavailableReason ? "move-card-unavailable" : "";
+  const destinationActions = destinations.map((column) => {
+    const retrying = moveDestinationId === column.id && Boolean(cardStatus?.title.includes("Move"));
+    return renderButton(`${retrying ? "Retry move" : "Move"} to ${column.name}`, "move-card", {
+      priority: retrying ? "primary" : undefined,
+      data: `id="move-to-${safeId(column.id)}" data-column-id="${escapeHtml(column.id)}"`
+    });
+  }).join("");
+  const panel = movePanelOpen && !unavailableReason
+    ? `<section id="move-card-panel" class="move-card-panel jk-panel" aria-labelledby="move-card-heading"><h2 id="move-card-heading">Move Card</h2><p>Current Column: <strong>${escapeHtml(currentColumn?.name || "Unknown Column")}</strong></p><div class="jk-actions" aria-label="Destination Columns">${destinationActions}${renderButton("Cancel", "cancel-move")}</div></section>`
+    : "";
+  const disabledReason = unavailableReason && !describedBy.startsWith("stale") && !describedBy.startsWith("move-conflict")
+    ? `<span id="move-card-unavailable" class="move-disabled-reason">${escapeHtml(unavailableReason)}</span>`
+    : "";
+  return `<div class="move-card-disclosure"><button id="move-card-trigger" class="jk-button move-card-trigger" type="button" data-action="toggle-move-panel" aria-expanded="${movePanelOpen && !unavailableReason ? "true" : "false"}" aria-controls="move-card-panel"${describedBy ? ` aria-describedby="${escapeHtml(describedBy)}"` : ""}${disabledAttribute(Boolean(unavailableReason))}>Move…</button>${disabledReason}${panel}</div>`;
+}
+
+function renderMoveConflict(project: Project, card: ProjectCard): string {
+  const conflict = moveConflict;
+  if (!conflict || conflict.projectId !== project.id || conflict.cardId !== card.id) return "";
+  const destination = project.columns.find((column) => column.id === conflict.destinationColumnId);
+  const guidance = !conflict.latestLoaded
+    ? "The requested destination is retained, but the latest stored Card could not be loaded. Refresh before retrying."
+    : destination
+      ? `The requested destination, ${destination.name}, is retained. Retry the move against the latest stored Card or cancel it.`
+      : "The requested destination is no longer in this Project. Cancel this move and choose another Column.";
+  const retry = conflict.latestLoaded && destination
+    ? renderButton(`Retry move to ${destination.name}`, "retry-move", { priority: "primary", data: `data-column-id="${escapeHtml(destination.id)}"` })
+    : conflict.latestLoaded
+      ? ""
+      : renderButton("Refresh latest", "refresh-project", { priority: "primary" });
+  return `<section class="move-conflict jk-status" data-kind="warning" aria-labelledby="move-conflict-heading"><span class="jk-status-marker" aria-hidden="true">!</span><div><h3 id="move-conflict-heading" tabindex="-1">The stored Card moved or changed</h3><p>${escapeHtml(guidance)}</p><div class="jk-actions">${retry}${renderButton("Cancel move", "cancel-move")}</div></div></section>`;
+}
+
 function renderCardInspector(project: Project): string {
   const card = selectedCardId ? project.cards.find((candidate) => candidate.id === selectedCardId) || null : null;
   if (!card && !creatingCard) return "";
   const draft = currentCardDraft(project, card);
   const draftColumn = project.columns.find((candidate) => candidate.id === draft.columnId) || project.columns[0];
+  const launchColumn = project.columns.find((candidate) => candidate.id === creatingColumnId) || draftColumn;
   const contextColumn = card
     ? project.columns.find((candidate) => candidate.id === card.columnId) || draftColumn
-    : draftColumn;
+    : launchColumn;
   const conflict = Boolean(card && cardConflict?.projectId === project.id && cardConflict.cardId === card.id);
   const latestConflictLoaded = cardConflict?.latestLoaded !== false;
   const titleError = cardFieldErrors.get("title") || "";
@@ -789,8 +863,10 @@ function renderCardInspector(project: Project): string {
     : "Your complete draft is still in the fields below, but the latest stored Card could not be loaded. Refresh before retrying, or discard the draft.";
   const storedLabel = latestConflictLoaded ? "Stored" : "Last displayed";
   const staleMarkup = conflict && card ? `<section class="stale-review jk-status" data-kind="warning" aria-labelledby="stale-heading"><span class="jk-status-marker" aria-hidden="true">!</span><div><h3 id="stale-heading" tabindex="-1">${staleHeading}</h3><p>${staleGuidance}</p><dl class="stored-change"><div><dt>${storedLabel} state</dt><dd>${card.archivedAt ? "Archived" : "Active"}</dd></div><div><dt>${storedLabel} title</dt><dd>${escapeHtml(card.title)}</dd></div><div><dt>${storedLabel} Column</dt><dd>${escapeHtml(project.columns.find((candidate) => candidate.id === card.columnId)?.name || "Unknown Column")}</dd></div><div><dt>${storedLabel} body</dt><dd>${escapeHtml(card.body || "No body")}</dd></div></dl><div class="jk-actions">${latestConflictLoaded ? renderButton(retryLabel, "retry-save", { priority: "primary" }) : renderButton("Refresh latest", "refresh-project", { priority: "primary" })}${renderButton("Discard draft", "discard-draft")}</div></div></section>` : "";
+  const moveConflictMarkup = card ? renderMoveConflict(project, card) : "";
+  const recoveryActive = conflict || Boolean(moveConflictMarkup);
   const cardSelected = inspectorTab === "card" || !card;
-  const tabs = `<div class="inspector-tabs" role="tablist" aria-label="Card views"><button id="card-tab" class="inspector-tab" type="button" role="tab" data-action="show-card-tab" aria-selected="${cardSelected ? "true" : "false"}" aria-controls="card-panel" tabindex="${cardSelected ? "0" : "-1"}">Card</button>${card ? `<button id="activity-tab" class="inspector-tab" type="button" role="tab" data-action="show-activity-tab" aria-selected="${cardSelected ? "false" : "true"}" aria-controls="activity-panel" tabindex="${cardSelected ? "-1" : "0"}">Activity</button>` : ""}</div>`;
+  const tabs = `<div class="inspector-tabs" role="tablist" aria-label="Card views"><button id="card-tab" class="inspector-tab" type="button" role="tab" data-action="show-card-tab" aria-selected="${cardSelected ? "true" : "false"}" aria-controls="card-panel" tabindex="${cardSelected ? "0" : "-1"}"${disabledAttribute()}>Card</button>${card ? `<button id="activity-tab" class="inspector-tab" type="button" role="tab" data-action="show-activity-tab" aria-selected="${cardSelected ? "false" : "true"}" aria-controls="activity-panel" tabindex="${cardSelected ? "-1" : "0"}"${disabledAttribute(recoveryActive)}>Activity</button>` : ""}</div>`;
   const closeLabel = `Close Card and return to ${contextColumn?.name || "Column"}`;
   const titleControl = renderTextInput({
     id: "card-title-input",
@@ -812,9 +888,11 @@ function renderCardInspector(project: Project): string {
     className: "surface-control card-body-control",
     ariaLabel: "Body"
   });
-  const editor = `<form class="card-form surface-card-form" data-form="card" data-autosave="${card ? "true" : "false"}" data-card-id="${escapeHtml(card?.id || "")}" novalidate><div class="jk-field surface-field"><label class="jk-visually-hidden" for="card-title-input">Title</label>${titleControl}${titleError ? `<p class="jk-error" id="card-title-error">${escapeHtml(titleError)}</p>` : ""}</div><div class="jk-field surface-field card-body-field"><label class="jk-visually-hidden" for="card-body-input">Body</label>${bodyControl}</div>${conflict ? "" : card ? `<div class="inspector-actions">${renderButton("Archive", "archive-card", { priority: "risk", data: `data-card-id="${escapeHtml(card.id)}"` })}</div>` : `<div class="inspector-actions"><button class="jk-button" data-priority="primary" type="submit"${disabledAttribute()}>${mutationKind === "card" ? "Creating…" : "Create Card"}</button></div>`}</form>`;
-  const cardPanel = `<div id="card-panel" class="inspector-panel" role="tabpanel" aria-labelledby="card-tab">${status ? `<div class="card-status">${renderStatus(status, "card-status")}</div>` : renderStatus(null, "card-status")}${staleMarkup}${pendingCardCreate}${editor}${card ? renderComments(card) : ""}</div>`;
-  return `<aside class="card-inspector jk-panel" aria-labelledby="card-tab"><div class="inspector-content"><header class="inspector-toolbar">${tabs}<button class="close-button inspector-close" type="button" data-action="close-card" aria-label="${escapeHtml(closeLabel)}"><span aria-hidden="true">×</span></button></header><div id="card-autosave-status" class="jk-visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div>${cardSelected ? cardPanel : card ? renderActivity(card) : cardPanel}</div></aside>`;
+  const createDestination = card ? "" : renderCreateDestination(project, draft);
+  const editor = `<form class="card-form surface-card-form" data-form="card" data-autosave="${card ? "true" : "false"}" data-card-id="${escapeHtml(card?.id || "")}" novalidate><div class="jk-field surface-field"><label class="jk-visually-hidden" for="card-title-input">Title</label>${titleControl}${titleError ? `<p class="jk-error" id="card-title-error">${escapeHtml(titleError)}</p>` : ""}</div><div class="jk-field surface-field card-body-field"><label class="jk-visually-hidden" for="card-body-input">Body</label>${bodyControl}</div>${createDestination}${conflict || moveConflictMarkup ? "" : card ? `<div class="inspector-actions">${renderButton("Archive", "archive-card", { priority: "risk", data: `data-card-id="${escapeHtml(card.id)}"` })}</div>` : `<div class="inspector-actions"><button class="jk-button" data-priority="primary" type="submit"${disabledAttribute()}>${mutationKind === "card" ? "Creating…" : "Create Card"}</button></div>`}</form>`;
+  const cardPanel = `<div id="card-panel" class="inspector-panel" role="tabpanel" aria-labelledby="card-tab">${status ? `<div class="card-status">${renderStatus(status, "card-status")}</div>` : renderStatus(null, "card-status")}${staleMarkup}${moveConflictMarkup}${pendingCardCreate}${editor}${card ? renderComments(card) : ""}</div>`;
+  const toolbarActions = `<div class="inspector-toolbar-actions">${card ? renderMoveDisclosure(project, card, conflict) : ""}<button class="close-button inspector-close" type="button" data-action="close-card" aria-label="${escapeHtml(closeLabel)}"${disabledAttribute()}><span aria-hidden="true">×</span></button></div>`;
+  return `<aside class="card-inspector jk-panel" aria-labelledby="card-tab"><div class="inspector-content"><header class="inspector-toolbar">${tabs}${toolbarActions}</header><div id="card-autosave-status" class="jk-visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div>${cardSelected ? cardPanel : card ? renderActivity(card) : cardPanel}</div></aside>`;
 }
 
 function renderWorkspace(): string {
@@ -841,7 +919,7 @@ function currentUiState(): string {
   }
   if (mutationKind === "refresh") return "refreshing";
   if (mutationInFlight) return "saving";
-  if (cardConflict) return "stale";
+  if (cardConflict || moveConflict) return "stale";
   if (projectFieldErrors.size || cardFieldErrors.size || commentFieldError) return "validation-error";
   if (!projects.length) return "empty-workspace";
   if (currentArchiveReceipt(activeProject?.id || "")) return "archived";
@@ -988,6 +1066,7 @@ function clearPrivateState(notice: AuthNotice): void {
   projectStatus = null;
   cardStatus = null;
   cardConflict = null;
+  resetMoveContext();
   retainedDrafts.clear();
   commentDrafts.clear();
   displayedAt.clear();
@@ -1042,6 +1121,7 @@ function reconcileProjectContext(project: Project): void {
     if (!selected) {
       selectedCardId = null;
       creatingCard = false;
+      resetMoveContext();
       cardStatus = { tone: "warning", title: "Card no longer active", message: "The selected Card is no longer on this active Project." };
     } else {
       mobileColumns.set(project.id, selected.columnId);
@@ -1059,6 +1139,7 @@ function reconcileProjectContext(project: Project): void {
       } else if (selected.archivedAt && !draft) {
         selectedCardId = null;
         creatingCard = false;
+        resetMoveContext();
         cardStatus = { tone: "warning", title: "Card no longer active", message: "The selected Card is archived and no longer appears on the active board." };
       }
     }
@@ -1280,6 +1361,7 @@ function openCard(cardId: string, trigger: HTMLElement, allowArchived = false): 
     ? { tone: "warning", title: "Stored Card changed", message: "Your complete draft is retained. Retry it against the latest version or discard it." }
     : null;
   cardConflict = hasStoredConflict ? { projectId: project.id, cardId: card.id, latestLoaded: true } : null;
+  resetMoveContext();
   inspectorTab = "card";
   accountPanelOpen = false;
   projectActionsOpen = false;
@@ -1302,6 +1384,7 @@ function openNewCard(columnId: string, trigger: HTMLElement): void {
   cardFieldErrors.clear();
   cardStatus = null;
   cardConflict = null;
+  resetMoveContext();
   inspectorTab = "card";
   accountPanelOpen = false;
   projectActionsOpen = false;
@@ -1323,6 +1406,7 @@ function closeCard(): void {
   creatingColumnId = "";
   cardStatus = null;
   cardConflict = null;
+  resetMoveContext();
   inspectorTab = "card";
   pendingFocusRestore = cardReturnFocus || (cardId ? { action: "open-card", cardId, occurrence: 0 } : null);
   pendingScrollRestore = boardScrollPositions.get(project.id) ?? null;
@@ -1461,6 +1545,178 @@ async function flushCardAutosaves(): Promise<void> {
   }
 }
 
+function toggleMovePanel(): void {
+  const project = activeProject;
+  const card = selectedCardId ? project?.cards.find((candidate) => candidate.id === selectedCardId) : null;
+  if (!project || !card || cardConflict || moveConflict) return;
+  const destinations = project.columns.filter((column) => column.id !== card.columnId);
+  if (!destinations.length) return;
+  movePanelOpen = !movePanelOpen;
+  if (movePanelOpen && !destinations.some((column) => column.id === moveDestinationId)) {
+    moveDestinationId = destinations[0].id;
+  }
+  pendingFocusId = movePanelOpen ? `move-to-${safeId(moveDestinationId)}` : "move-card-trigger";
+  render();
+}
+
+function cancelMove(): void {
+  const hadConflict = Boolean(moveConflict);
+  resetMoveContext();
+  if (hadConflict) {
+    cardStatus = { tone: "neutral", title: "Move canceled", message: "The Card remains in its latest stored Column." };
+  }
+  pendingFocusId = "move-card-trigger";
+  render();
+}
+
+async function moveCard(destinationColumnId: string, explicitRetry = false): Promise<void> {
+  const initialProject = activeProject;
+  const initialCard = selectedCardId ? initialProject?.cards.find((candidate) => candidate.id === selectedCardId) : null;
+  const initialDestination = initialProject?.columns.find((column) => column.id === destinationColumnId);
+  if (!initialProject || !initialCard || !initialDestination || cardConflict) return;
+  if (moveConflict && (!explicitRetry || moveConflict.destinationColumnId !== initialDestination.id)) return;
+  if (initialCard.columnId === initialDestination.id) {
+    mobileColumns.set(initialProject.id, initialDestination.id);
+    resetMoveContext();
+    cardStatus = { tone: "success", title: "Card already moved", message: `${initialCard.title} is already in ${initialDestination.name}.` };
+    pendingFocusId = "move-card-trigger";
+    render();
+    return;
+  }
+
+  let project = initialProject;
+  let card = initialCard;
+  let destination = initialDestination;
+  const retryingConflict = Boolean(moveConflict);
+  moveDestinationId = destination.id;
+  if (!retryingConflict) movePanelOpen = true;
+  setWorkspaceMutationsDisabled(true, "move");
+  cardStatus = { tone: "neutral", title: "Preparing move", message: `Finishing pending Card changes before moving ${card.title} to ${destination.name}.` };
+  pendingFocusId = "card-status";
+  render();
+  try {
+    await flushCardAutosaves();
+    if (!session) return;
+    const latestProject = activeProject;
+    const latestCard = selectedCardId ? latestProject?.cards.find((candidate) => candidate.id === selectedCardId) : null;
+    const latestDestination = latestProject?.columns.find((column) => column.id === destinationColumnId);
+    if (!latestProject || !latestCard || !latestDestination) {
+      resetMoveContext();
+      cardStatus = null;
+      projectStatus = { tone: "warning", title: "Move not completed", message: "The Card or destination is no longer active. Refresh the Project before choosing another move." };
+      pendingFocusId = "project-status";
+      return;
+    }
+    if (cardConflict) {
+      movePanelOpen = false;
+      moveDestinationId = destinationColumnId;
+      return;
+    }
+    const latestDraftKey = draftKey(latestProject.id, latestCard.id);
+    if (retainedDrafts.has(latestDraftKey)) {
+      movePanelOpen = false;
+      moveDestinationId = destinationColumnId;
+      if (!cardStatus) {
+        cardStatus = {
+          tone: "warning",
+          title: "Move paused",
+          message: "The Card still has unsaved changes. Correct or retry that save before moving it."
+        };
+        pendingFocusId = "card-status";
+      } else {
+        pendingFocusId = "card-title-input";
+      }
+      return;
+    }
+    project = latestProject;
+    card = latestCard;
+    destination = latestDestination;
+    if (card.columnId === destination.id) {
+      mobileColumns.set(project.id, destination.id);
+      resetMoveContext();
+      cardStatus = { tone: "success", title: "Card already moved", message: `${card.title} is already in ${destination.name}.` };
+      pendingFocusId = "move-card-trigger";
+      return;
+    }
+
+    moveConflict = null;
+    movePanelOpen = true;
+    cardStatus = { tone: "neutral", title: "Moving Card", message: `Moving ${card.title} to ${destination.name}. Conflicting actions are unavailable until the move finishes.` };
+    pendingFocusId = "card-status";
+    render();
+    const response = await api(`/projects/${safeId(project.id)}/cards/${safeId(card.id)}`, {
+      method: "PATCH",
+      revision: card.version,
+      body: { columnId: destination.id }
+    });
+    const movedCard = applyCardMutationResponse(project.id, response);
+    recordBrowserActivity(project, `Moved ${movedCard.title} to ${destination.name}.`, movedCard.id);
+    mobileColumns.set(project.id, destination.id);
+    movePanelOpen = false;
+    moveDestinationId = "";
+    const refreshError = await refreshCommittedProject(project.id);
+    if (session) {
+      cardStatus = refreshError
+        ? { tone: "warning", title: "Card moved; refresh needed", message: `${movedCard.title} is stored in ${destination.name} and remains visible from the write response. Refresh failed: ${refreshError}` }
+        : { tone: "success", title: "Card moved", message: `${movedCard.title} moved to ${destination.name}.` };
+      projectStatus = refreshError
+        ? { tone: "warning", title: "Project refresh needed", message: "The move committed; use Refresh to reconcile the latest Project Activity." }
+        : null;
+      pendingFocusId = "move-card-trigger";
+    }
+  } catch (error) {
+    if (handlePrivateError(error)) return;
+    if (error instanceof ApiError && (error.status === 409 || error.status === 412)) {
+      let latestLoaded = false;
+      try {
+        await loadProject(project.id);
+        latestLoaded = true;
+      } catch (refreshError) {
+        if (handlePrivateError(refreshError)) return;
+      }
+      const latestCard = activeProject?.id === project.id
+        ? activeProject.cards.find((candidate) => candidate.id === card.id)
+        : null;
+      if (latestLoaded && (!latestCard || latestCard.archivedAt || selectedCardId !== card.id)) {
+        resetMoveContext();
+        cardStatus = null;
+        projectStatus = {
+          tone: "warning",
+          title: "Move not completed",
+          message: latestCard?.archivedAt
+            ? `${latestCard.title} is archived and no longer appears on the active board.`
+            : "The Card is no longer active in this Project."
+        };
+        pendingFocusId = "project-status";
+      } else if (latestLoaded && latestCard?.columnId === destination.id) {
+        mobileColumns.set(project.id, destination.id);
+        resetMoveContext();
+        cardStatus = { tone: "success", title: "Card moved", message: `${latestCard.title} is now in ${destination.name}.` };
+        pendingFocusId = "move-card-trigger";
+      } else {
+        moveConflict = { projectId: project.id, cardId: card.id, destinationColumnId: destination.id, latestLoaded };
+        movePanelOpen = false;
+        moveDestinationId = destination.id;
+        inspectorTab = "card";
+        cardStatus = latestLoaded
+          ? { tone: "warning", title: "Move needs review", message: `The stored Card changed. The requested destination, ${destination.name}, is retained for an explicit retry or cancel.` }
+          : { tone: "warning", title: "Latest Card unavailable", message: `The requested destination, ${destination.name}, is retained. Refresh the latest stored Card before retrying.` };
+        pendingFocusId = "move-conflict-heading";
+      }
+    } else {
+      movePanelOpen = true;
+      moveDestinationId = destination.id;
+      cardStatus = outcomeIsUnconfirmed(error)
+        ? { tone: "warning", title: "Move outcome unconfirmed", message: `The requested destination, ${destination.name}, is retained. Refresh before retrying. ${error instanceof Error ? error.message : "The response was unavailable."}` }
+        : { tone: "error", title: "Card was not moved", message: `The requested destination, ${destination.name}, is retained. ${error instanceof Error ? error.message : "Try again."}` };
+      pendingFocusId = `move-to-${safeId(destination.id)}`;
+    }
+  } finally {
+    setWorkspaceMutationsDisabled(false);
+    render();
+  }
+}
+
 async function saveCard(form: HTMLFormElement | null, explicitRetry = false): Promise<void> {
   const project = activeProject;
   if (!project) return;
@@ -1505,6 +1761,7 @@ async function saveCard(form: HTMLFormElement | null, explicitRetry = false): Pr
     }
     retainedDrafts.delete(key);
     cardConflict = null;
+    resetMoveContext();
     selectedCardId = storedCard.id;
     mobileColumns.set(project.id, storedCard.columnId);
     const refreshError = await refreshCommittedProject(project.id);
@@ -1562,6 +1819,7 @@ function discardDraft(): void {
   cardFieldErrors.clear();
   if (card?.archivedAt) {
     selectedCardId = null;
+    resetMoveContext();
     cardStatus = null;
     projectStatus = { tone: "neutral", title: "Draft discarded", message: `${card.title} remains archived and is no longer on the active board.` };
     pendingFocusId = "project-status";
@@ -1668,6 +1926,7 @@ async function archiveCard(cardId: string): Promise<void> {
     selectedCardId = null;
     creatingCard = false;
     cardConflict = null;
+    resetMoveContext();
     const refreshError = await refreshCommittedProject(project.id);
     if (session) {
       projectStatus = refreshError
@@ -1731,6 +1990,19 @@ async function refreshProject(): Promise<void> {
   try {
     await loadProjects(project.id);
     projectStatus = { tone: "success", title: "Refresh complete", message: "The displayed state now reflects the latest stored Project." };
+    if (moveConflict && activeProject?.id === moveConflict.projectId) {
+      const latestCard = activeProject.cards.find((candidate) => candidate.id === moveConflict?.cardId);
+      const destination = activeProject.columns.find((column) => column.id === moveConflict?.destinationColumnId);
+      if (latestCard && destination && latestCard.columnId === destination.id) {
+        mobileColumns.set(activeProject.id, destination.id);
+        resetMoveContext();
+        cardStatus = { tone: "success", title: "Card moved", message: `${latestCard.title} is now in ${destination.name}.` };
+        pendingFocusId = "move-card-trigger";
+      } else {
+        moveConflict.latestLoaded = true;
+        pendingFocusId = "move-conflict-heading";
+      }
+    }
   } catch (error) {
     if (handlePrivateError(error)) return;
     projectStatus = { tone: "error", title: "Refresh failed", message: `The previous displayed state remains visible. ${error instanceof Error ? error.message : "Try again."}` };
@@ -1749,6 +2021,7 @@ async function switchProject(projectId: string): Promise<void> {
   creatingColumnId = "";
   cardStatus = null;
   cardConflict = null;
+  resetMoveContext();
   inspectorTab = "card";
   accountPanelOpen = false;
   projectActionsOpen = false;
@@ -1802,11 +2075,16 @@ async function handleAction(button: HTMLElement): Promise<void> {
     return;
   }
   if (action === "show-card-tab" || action === "show-activity-tab") {
+    if (action === "show-activity-tab" && (cardConflict || moveConflict)) return;
     inspectorTab = action === "show-activity-tab" ? "activity" : "card";
     pendingFocusId = inspectorTab === "activity" ? "activity-tab" : "card-tab";
     render();
     return;
   }
+  if (action === "toggle-move-panel") return toggleMovePanel();
+  if (action === "cancel-move") return cancelMove();
+  if (action === "move-card") return moveCard(button.dataset.columnId || "");
+  if (action === "retry-move") return moveCard(button.dataset.columnId || "", true);
   accountPanelOpen = false;
   projectActionsOpen = false;
   if (action === "new-project") return openProjectEditor("create", button);
@@ -1923,12 +2201,18 @@ root.addEventListener("keydown", (event) => {
     event.preventDefault();
     const showActivity = event.key === "ArrowRight" || event.key === "End";
     if (showActivity && !document.querySelector("#activity-tab")) return;
+    if (showActivity && (cardConflict || moveConflict)) return;
     inspectorTab = showActivity ? "activity" : "card";
     pendingFocusId = inspectorTab === "activity" ? "activity-tab" : "card-tab";
     render();
     return;
   }
   if (event.key !== "Escape") return;
+  if (movePanelOpen || moveConflict) {
+    event.preventDefault();
+    cancelMove();
+    return;
+  }
   if (accountPanelOpen || projectActionsOpen) {
     event.preventDefault();
     pendingFocusRestore = accountPanelOpen

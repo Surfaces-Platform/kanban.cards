@@ -1444,6 +1444,61 @@ h3 {
   z-index: 2;
 }
 
+.inspector-toolbar-actions {
+  align-items: center;
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--jk-space-2);
+}
+
+.move-card-disclosure {
+  position: relative;
+}
+
+.move-card-trigger {
+  white-space: nowrap;
+}
+
+.move-disabled-reason {
+  color: var(--jk-color-muted);
+  display: block;
+  font-size: 0.76rem;
+  max-inline-size: 10rem;
+  padding-block-start: var(--jk-space-2);
+}
+
+.move-card-panel {
+  background: var(--jk-color-surface);
+  border: 1px solid var(--jk-color-border);
+  border-radius: var(--jk-radius-panel);
+  display: grid;
+  gap: var(--jk-space-3);
+  inline-size: min(22rem, calc(100vw - calc(var(--jk-space-4) * 2)));
+  inset-block-start: calc(100% + var(--jk-space-2));
+  inset-inline-end: 0;
+  max-block-size: calc(100dvh - 6rem);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--jk-space-4);
+  position: absolute;
+  z-index: 5;
+}
+
+.move-card-panel h2,
+.move-card-panel p {
+  margin-block-end: 0;
+}
+
+.move-card-panel .jk-actions {
+  align-items: stretch;
+  display: grid;
+}
+
+.move-card-panel .jk-button {
+  inline-size: 100%;
+  justify-content: flex-start;
+}
+
 .inspector-tabs {
   align-items: stretch;
   display: flex;
@@ -1552,6 +1607,10 @@ h3 {
   padding-block: var(--jk-space-3);
 }
 
+.move-conflict {
+  margin: var(--jk-space-4) var(--jk-space-4) 0;
+}
+
 @media (max-width: 56rem) and (min-width: 48.001rem) {
   .workspace[data-card-open="true"] .app-header,
   .workspace[data-card-open="true"] .project-status-wrap,
@@ -1633,6 +1692,17 @@ h3 {
     padding-inline: var(--jk-space-3);
   }
 
+  .move-card-panel {
+    border-inline: 0;
+    border-radius: 0;
+    inline-size: 100%;
+    inset-block-start: calc(4rem + env(safe-area-inset-top));
+    inset-inline: 0;
+    max-block-size: calc(100dvh - 4rem - env(safe-area-inset-top));
+    overflow-y: auto;
+    position: fixed;
+  }
+
   .card-inspector .surface-card-form,
   .comments,
   .activity-panel {
@@ -1651,6 +1721,10 @@ h3 {
 
   .header-project-switcher {
     max-inline-size: 11rem;
+  }
+
+  .inspector-toolbar-actions {
+    gap: 0;
   }
 }
 

@@ -42,6 +42,9 @@ const requiredRenderFunctions = [
   "renderProjectActions",
   "renderColumnGrid",
   "renderCardInspector",
+  "renderCreateDestination",
+  "renderMoveDisclosure",
+  "renderMoveConflict",
   "renderProjectEditor",
   "renderMobileColumnSelector",
   "renderComments",
@@ -103,6 +106,9 @@ const requiredActions: Array<{ capability: string; actions: string[] }> = [
   { capability: "explicit Project Refresh", actions: ["refresh-project"] },
   { capability: "Card creation", actions: ["new-card"] },
   { capability: "Card selection", actions: ["open-card"] },
+  { capability: "Card movement disclosure", actions: ["toggle-move-panel"] },
+  { capability: "Card movement commit", actions: ["move-card"] },
+  { capability: "Card movement recovery", actions: ["retry-move", "cancel-move"] },
   { capability: "nonmodal Card Close", actions: ["close-card", "close-inspector"] },
   { capability: "stale retry", actions: ["retry-stale", "retry-save"] },
   { capability: "stale discard", actions: ["discard-stale", "discard-draft"] },
@@ -350,8 +356,17 @@ function checkApplicationSource(app: SourceFile, violations: Violation[]): void 
   if (inspector && !/if\s*\(\s*!card\s*&&\s*!creatingCard\s*\)\s*return\s*["']{2}/.test(inspector)) {
     addViolation(violations, app.file, app.source, app.source.indexOf(inspector), "Card inspector must render only when a Card is selected or being created");
   }
-  if (inspector && /Save Card|card-column-input/.test(inspector)) {
-    addViolation(violations, app.file, app.source, app.source.indexOf(inspector), "selected Card detail must use blur autosave without Save or Column controls");
+  if (inspector && /Save Card/.test(inspector)) {
+    addViolation(violations, app.file, app.source, app.source.indexOf(inspector), "selected Card detail must use blur autosave without a Save control");
+  }
+  if (inspector && /renderSelect\s*\(/.test(inspector)) {
+    addViolation(violations, app.file, app.source, app.source.indexOf(inspector), "selected Card detail must not render a persistent Column selector");
+  }
+  if (inspector && !/const\s+createDestination\s*=\s*card\s*\?\s*["']{2}\s*:\s*renderCreateDestination\s*\(/.test(inspector)) {
+    addViolation(violations, app.file, app.source, app.source.indexOf(inspector), "new Card detail must expose a create-only destination choice");
+  }
+  if (inspector && !/card\s*\?\s*renderMoveDisclosure\s*\(/.test(inspector)) {
+    addViolation(violations, app.file, app.source, app.source.indexOf(inspector), "selected Card detail must expose the canonical Move disclosure");
   }
   firstMatchViolation(
     violations,
@@ -390,6 +405,41 @@ function checkApplicationSource(app: SourceFile, violations: Violation[]): void 
       app.source,
       app.source.indexOf(mobileSelector),
       "narrow screens must use an explicit native Column selector"
+    );
+  }
+  const createDestination = functionSection(app.source, "renderCreateDestination");
+  if (createDestination && (!/renderSelect\s*\(/.test(createDestination) || !/label:\s*["']Create in["']/.test(createDestination) || !/name:\s*["']columnId["']/.test(createDestination))) {
+    addViolation(
+      violations,
+      app.file,
+      app.source,
+      app.source.indexOf(createDestination),
+      "new Card destination must use a labeled create-only SelectField bound to columnId"
+    );
+  }
+  const boardCard = functionSection(app.source, "renderBoardCard");
+  if (boardCard && /move-card|move-to|overflow/i.test(boardCard)) {
+    addViolation(violations, app.file, app.source, app.source.indexOf(boardCard), "Card movement must not be hidden in a board-card overflow action");
+  }
+  firstMatchViolation(
+    violations,
+    app,
+    /draggable\s*=|addEventListener\(["'](?:dragstart|dragover|drop)["']/i,
+    "drag-and-drop is outside the reviewed bounded Card movement slice"
+  );
+  const moveCard = functionSection(app.source, "moveCard");
+  if (moveCard && (
+    !/await\s+flushCardAutosaves\s*\(\s*\)/.test(moveCard)
+    || !/setWorkspaceMutationsDisabled\s*\(\s*true\s*,\s*["']move["']\s*\)/.test(moveCard)
+    || !/revision:\s*card\.version/.test(moveCard)
+    || !/body:\s*\{\s*columnId:\s*destination\.id\s*\}/.test(moveCard)
+  )) {
+    addViolation(
+      violations,
+      app.file,
+      app.source,
+      app.source.indexOf(moveCard),
+      "Card movement must reserve the global lock, flush blur autosaves, use the latest version, and PATCH only columnId"
     );
   }
   const activity = functionSection(app.source, "renderActivity");

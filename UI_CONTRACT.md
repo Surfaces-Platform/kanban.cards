@@ -12,7 +12,7 @@ Context Dock is the only production interface direction.
 - Card detail must not use dialog or `aria-modal` semantics, inert the board, or hide Project context.
 - On narrow screens, the Project shows one explicitly named Column at a time through a selector that includes its Card count.
 - A selected Card becomes a dedicated narrow-screen task view with an X whose accessible name identifies the return Column.
-- Closing returns to the originating Column and restores Card position, scroll position, selection, and keyboard focus.
+- Closing returns to the originating Column unless the Card moved while open. After a move, it returns to the destination Column and restores the moved Card, selection, and keyboard focus.
 - Focus Workspace remains comparison evidence. It must not ship as a second product mode.
 
 The client still has four primary surfaces: access-key sign-in, Project selection and empty state, the Project workspace, and Card detail and editing. Their structure must follow this accepted direction without introducing a second product model.
@@ -46,7 +46,11 @@ The client still has four primary surfaces: access-key sign-in, Project selectio
 - Column placement communicates Card state; the Card does not repeat state decoration without a separate need.
 - Card detail is not rendered until a Card is selected or created. The open inspector is full height, closes with an X, and contains no visible context eyebrow, Card-detail heading, inspector Refresh, or empty selection prompt.
 - Existing Card Title and Body are surface-integrated controls that autosave serially on blur. The inspector has no selected-Card Save action and no Column selector; new Cards retain an explicit Create action.
-- The reviewed slice does not invent a replacement browser move control after removing the inspector Column selector. Skill/API moves reconcile visibly through Refresh. New Cards created from the top-level Actions panel enter the current narrow-screen Column, or the first ordered Column on desktop. A reviewed browser move pattern and a more explicit desktop creation destination remain follow-up design work.
+- Existing Cards expose a visible `Move…` disclosure in the sticky selected-Card toolbar from both Card and Activity tabs. Its trigger has `aria-expanded` and `aria-controls`; the disclosed region names the current Column and uses native buttons named `Move to <Column>` for every other Column.
+- The Move disclosure is the canonical desktop, narrow-screen, keyboard, touch, and assistive-technology path. The client must not add drag-and-drop, a board-Card overflow move action, a custom menu role, or a persistent selected-Card Column selector.
+- Escape or Cancel closes an open Move disclosure and restores focus to `Move…`. The destination list scrolls within the viewport when a stored Project has many Columns. A successful move keeps Card detail open, moves the board Card from the write response, changes the narrow-screen active Column and close label to the destination, refreshes Activity, announces a destination-specific receipt, and returns Close focus to the moved board Card.
+- New Card forms expose a labeled, create-only `Create in` select before the Create action. Desktop entry defaults visibly to the first ordered Column; narrow and Column-local entry default to the visible or launch Column. Validation preserves the chosen destination while Close continues to name and restore the launch Column until creation commits.
+- Movement reserves the global mutation lock, waits for serialized blur autosaves, and proceeds only after pending Card changes save successfully. It sends only `columnId` with the latest Card version. A failed or invalid autosave keeps the draft visible and blocks movement; a move-time `409` or `412` retains the requested destination and offers destination-specific Retry or Cancel after loading the latest Card. Conflict recovery stays on the Card tab and the retry must not overwrite title or Body.
 - Comments are the primary Card context immediately after the editor. Their heading has no count or eyebrow, and an empty list adds no explanatory sentence or attribution disclaimer.
 - Activity is a separate top-level tab filtered to the selected Card. Entries show the change and time without channel or caller-label explanation.
 - Successful create, edit, move, or Comment updates the visible Card, its board summary or placement, counts, and Card-specific Activity before a secondary receipt appears.
@@ -87,7 +91,7 @@ Every control uses `.form-control`; selects also use `.select-control`. Fallback
 - Application styles must not introduce literal colors, literal shadows, local or remote fonts, external assets, or unknown `--jk-*` roles. System and forced-color keywords remain valid where the platform requires them.
 - Dynamic loading, Refresh, create progress, failure, stale recovery, archive, Undo, and Sign out are programmatic status messages. Routine blur-save success is announced without adding persistent explanatory chrome.
 - Visible controls have accessible names. Fields have programmatic labels, and validation errors use `aria-invalid` plus referenced error text.
-- Keyboard focus follows visible task order, remains visible, restores after Close, Back, or Cancel, and is not covered by sticky actions.
+- Keyboard focus follows visible task order, remains visible, restores after Close, Back, Move Cancel, or Escape, and is not covered by sticky actions or the responsive Move disclosure.
 - Long Project names, Column names, Card titles, bodies, Comments, and Activity wrap without covering controls or creating document-width overflow.
 
 ## Simplicity boundary
@@ -96,7 +100,7 @@ The primary client must not introduce teams, memberships, roles, agent identitie
 
 ## Required states
 
-Production behavior accounts for Opening, Signed out, Invalid key, Empty workspace, Empty Project, Populated Project, on-demand Card detail, blur autosave, Activity tab, Refresh progress, Refresh success, Refresh failure, create Saving, Validation error, Version conflict, Session expired, Service unavailable, Archived, and Sign out success. The automated browser gate covers the deterministic subset listed below; the remaining states must not be represented as browser-automated until matching scenarios exist.
+Production behavior accounts for Opening, Signed out, Invalid key, Empty workspace, Empty Project, Populated Project, on-demand Card detail, blur autosave, Activity tab, Refresh progress, Refresh success, Refresh failure, create Saving, Validation error, Version conflict, Session expired, Service unavailable, Archived, and Sign out success. The browser gate reaches these states through isolated real client/API flows or narrowly scoped deterministic test-server responses.
 
 Prototype `?state=` shortcuts are design evidence only. Production verification must reach these states through the real client state and API boundary or through deterministic test-server responses.
 
@@ -106,7 +110,7 @@ Client completion requires all three layers:
 
 1. **Static contract:** `npx tsx scripts/check-ui-contract.ts` checks source, token provenance, security, action-handler, resource-header, and semantic-structure boundaries.
 2. **Runtime contract:** Node tests cover API/resource behavior, including version concurrency, exact new-Project defaults, and archive/Undo resource recovery.
-3. **Browser contract:** automated real-browser verification exercises on-demand Card detail, serialized blur autosave, stale Retry and Discard, archive and Undo, Project create/edit/switch focus, deterministic desktop new-Card placement, Sign out clearing, desktop dock reflow, tablet task-view transformation, and narrow-screen transformation against a temporary server and store at `1440 × 1000` and `390 × 844`, with `1024 × 800` dock coverage, `800 × 900` tablet coverage, and `320 × 720` reflow coverage.
+3. **Browser contract:** automated real-browser verification exercises on-demand Card detail; serialized blur autosave; the explicit desktop and narrow-screen Move disclosure; delayed-autosave mutation reservation and focus; many-Column destination reachability; destination-specific move conflict recovery; concurrent archive handling; committed-move Refresh failure; visible create-only destination selection and launch-context return; stale Retry and Discard; archive and Undo; Project create/edit/switch focus; invalid access; empty workspace and Project; create validation and duplicate locks; Refresh failure retention; real session expiry; boot unavailability; Sign out clearing; and the isolated skill/browser reconciliation loop. Responsive coverage includes `1440 × 1000`, `1440 × 600`, `1024 × 800`, `800 × 900`, `390 × 844`, and `320 × 720` against temporary servers and stores.
 
 For client changes, run at minimum:
 
@@ -116,4 +120,4 @@ For client changes, run at minimum:
 - the client runtime tests
 - the production browser suite
 
-The current browser contract verifies rendered structure, on-demand inspector behavior, serialized blur autosave, stale recovery without overwriting a concurrent Column move, durable archive and Undo, Project save/switch focus, Sign out clearing, responsive transformation, private-content absence, document-width overflow, and console errors in those scenarios. A reviewed browser-originated move interaction, a more explicit desktop new-Card destination, and invalid-key, empty-state, Refresh-failure, create-validation/lock, session-expiry, and service-unavailable browser scenarios remain explicit follow-up work; their source and API behavior must not be described as browser-automated. Prototype control counts and pixel matching are not production acceptance criteria.
+The current browser contract verifies rendered structure, movement and creation placement, committed-resource recovery, lifecycle states, mutation locks, reconciliation, responsive transformation, private-content absence, document-width overflow, focus, accessible names and states, and console errors in those scenarios. Automated semantics and keyboard evidence do not substitute for spoken assistive-technology verification. On 2026-08-09 the initial VoiceOver attachment reported a locked Mac; final direct attempts against the installed `com.apple.VoiceOver` app timed out. Exact spoken VoiceOver output therefore remains explicitly unverified. Prototype control counts and pixel matching are not production acceptance criteria.
