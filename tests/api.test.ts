@@ -7,7 +7,12 @@ import path from "node:path";
 import test from "node:test";
 import type { Express } from "express";
 
-import { createApp } from "../src/server";
+import defaultApp, { createApp } from "../src/server";
+
+test("the server entry exports an Express app for Vercel framework discovery", () => {
+  assert.equal(typeof defaultApp, "function");
+  assert.equal(typeof defaultApp.listen, "function");
+});
 
 test("missing owner and external-bind configuration fail closed", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-cards-v2-fail-closed-"));
