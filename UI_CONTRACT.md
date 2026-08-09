@@ -21,8 +21,8 @@ Navigation and Card-detail presentation may change through the design process. T
 - Projects contain ordered columns and cards.
 - Cards contain comments. Projects have Activity, and an Activity entry may reference a Card.
 - The browser and skill use the same `/api/projects` resources.
-- Project updates send `If-Match` with the project revision.
-- Card updates send `If-Match` with the card version.
+- Project updates send `X-Kanban-Version` with the project revision.
+- Card updates send `X-Kanban-Version` with the card version.
 - Resource creates send an `Idempotency-Key`.
 - Removing a card means setting `archivedAt`; the UI does not issue destructive deletes.
 

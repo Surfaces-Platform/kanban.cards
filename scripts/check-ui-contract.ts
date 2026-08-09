@@ -100,6 +100,22 @@ async function main(): Promise<void> {
   if (/<(?:input|select|textarea)\b/i.test(htmlSource)) {
     violations.push({ file: "index.html", line: 1, reason: "static shell must not collect credentials or project data", code: "" });
   }
+  if (!appSource.includes('headers.set("X-Kanban-Version", String(options.revision))')) {
+    violations.push({
+      file: "src/client/app.ts",
+      line: 1,
+      reason: "resource edits must send the app-specific concurrency header",
+      code: "expected X-Kanban-Version request header"
+    });
+  }
+  if (/headers\.set\(["']If-Match["']/.test(appSource)) {
+    violations.push({
+      file: "src/client/app.ts",
+      line: 1,
+      reason: "If-Match conflicts with hosted response precondition handling",
+      code: "remove the If-Match request header"
+    });
+  }
 
   if (violations.length) report(violations);
   console.log("V2 UI contract check passed.");

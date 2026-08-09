@@ -21,7 +21,17 @@ test("the skill helper keeps credentials user-scoped and reconciles a bound proj
   await fs.mkdir(home, { recursive: true });
 
   const app = createApp({ dataPath, apiToken: token, requireDatabase: false });
-  const server = createServer(app);
+  const observedVersionHeaders: string[] = [];
+  const server = createServer((req, res) => {
+    if (req.headers["if-match"] !== undefined) {
+      res.statusCode = 412;
+      res.end("A platform boundary rejected If-Match.");
+      return;
+    }
+    const version = req.headers["x-kanban-version"];
+    if (typeof version === "string") observedVersionHeaders.push(version);
+    app(req, res);
+  });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     server.listen(0, "127.0.0.1", resolve);
@@ -86,6 +96,7 @@ test("the skill helper keeps credentials user-scoped and reconciles a bound proj
     await runCli([
       "move-card", "--card", firstCard.id, "--column", "doing", "--version", "2"
     ], { cwd: repository, env });
+    assert.deepEqual(observedVersionHeaders, ["2"]);
 
     const cards = JSON.parse((await runCli(["cards"], { cwd: repository, env })).stdout);
     assert.equal(cards.cards.length, 1);

@@ -62,7 +62,7 @@ async function run(action, opts, context) {
     return request(projectPath, {
       method: "PATCH",
       body,
-      ifMatch: stringOption(opts, "version")
+      expectedVersion: stringOption(opts, "version")
     }, context);
   }
   if (action === "cards") {
@@ -97,7 +97,7 @@ async function run(action, opts, context) {
     return request(`${projectPath}/cards/${encodeURIComponent(cardId)}`, {
       method: "PATCH",
       body,
-      ifMatch: stringOption(opts, "version")
+      expectedVersion: stringOption(opts, "version")
     }, context);
   }
   if (action === "move-card") {
@@ -107,7 +107,7 @@ async function run(action, opts, context) {
     return request(`${projectPath}/cards/${encodeURIComponent(cardId)}`, {
       method: "PATCH",
       body,
-      ifMatch: stringOption(opts, "version")
+      expectedVersion: stringOption(opts, "version")
     }, context);
   }
   if (action === "archive-card") {
@@ -115,7 +115,7 @@ async function run(action, opts, context) {
     return request(`${projectPath}/cards/${encodeURIComponent(cardId)}`, {
       method: "PATCH",
       body: { archivedAt: (/* @__PURE__ */ new Date()).toISOString() },
-      ifMatch: stringOption(opts, "version")
+      expectedVersion: stringOption(opts, "version")
     }, context);
   }
   if (action === "comment") {
@@ -160,7 +160,7 @@ async function request(pathname, options, context) {
   };
   if (options.body) headers["Content-Type"] = "application/json";
   if (options.idempotencyKey) headers["Idempotency-Key"] = options.idempotencyKey;
-  if (options.ifMatch) headers["If-Match"] = options.ifMatch;
+  if (options.expectedVersion) headers["X-Kanban-Version"] = options.expectedVersion;
   const endpoint = `${context.baseUrl}${pathname}`;
   let response;
   try {

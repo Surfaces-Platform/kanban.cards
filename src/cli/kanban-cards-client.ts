@@ -29,7 +29,7 @@ interface RequestOptions {
   method?: string;
   body?: Record<string, unknown>;
   idempotencyKey?: string;
-  ifMatch?: string;
+  expectedVersion?: string;
 }
 
 try {
@@ -93,7 +93,7 @@ async function run(action: string | undefined, opts: CliOptions, context: Runtim
     return request(projectPath, {
       method: "PATCH",
       body,
-      ifMatch: stringOption(opts, "version")
+      expectedVersion: stringOption(opts, "version")
     }, context);
   }
 
@@ -131,7 +131,7 @@ async function run(action: string | undefined, opts: CliOptions, context: Runtim
     return request(`${projectPath}/cards/${encodeURIComponent(cardId)}`, {
       method: "PATCH",
       body,
-      ifMatch: stringOption(opts, "version")
+      expectedVersion: stringOption(opts, "version")
     }, context);
   }
 
@@ -142,7 +142,7 @@ async function run(action: string | undefined, opts: CliOptions, context: Runtim
     return request(`${projectPath}/cards/${encodeURIComponent(cardId)}`, {
       method: "PATCH",
       body,
-      ifMatch: stringOption(opts, "version")
+      expectedVersion: stringOption(opts, "version")
     }, context);
   }
 
@@ -151,7 +151,7 @@ async function run(action: string | undefined, opts: CliOptions, context: Runtim
     return request(`${projectPath}/cards/${encodeURIComponent(cardId)}`, {
       method: "PATCH",
       body: { archivedAt: new Date().toISOString() },
-      ifMatch: stringOption(opts, "version")
+      expectedVersion: stringOption(opts, "version")
     }, context);
   }
 
@@ -204,7 +204,7 @@ async function request(pathname: string, options: RequestOptions, context: Runti
   };
   if (options.body) headers["Content-Type"] = "application/json";
   if (options.idempotencyKey) headers["Idempotency-Key"] = options.idempotencyKey;
-  if (options.ifMatch) headers["If-Match"] = options.ifMatch;
+  if (options.expectedVersion) headers["X-Kanban-Version"] = options.expectedVersion;
 
   const endpoint = `${context.baseUrl}${pathname}`;
   let response: Response;
