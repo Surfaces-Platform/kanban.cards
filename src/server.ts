@@ -790,3 +790,6 @@ if (require.main === module) {
     console.log(`${PRODUCT_NAME} server listening at http://${host}:${port}`);
   });
 }
+
+const defaultApp = createApp();
+export default defaultApp;
