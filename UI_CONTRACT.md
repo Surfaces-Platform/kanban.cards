@@ -1,36 +1,58 @@
-# kanban.cards UI Contract
+# kanban.cards V2 UI Contract
 
-This app uses two gates for generated UI work:
+[`DESIGN.md`](DESIGN.md) governs visual, interaction, responsive, accessibility, and content-design decisions. This file records testable constraints in the current client. It must follow the governing design rather than preserve an implementation choice after the design changes.
 
-1. JudgmentKit validates the activity, workflow, and disclosure boundary before UI generation.
-2. kanban.cards UI primitives validate component execution so generated screens cannot bypass approved controls.
+The browser is a visual surface over the same project API used by `$kanban-cards`. It does not maintain a separate workspace document or model agents inside the product.
 
-## Approved Form Primitives
+## Product surfaces
 
-Feature UI in `src/client/app.ts` must render form controls through these helpers. The build emits the browser bundle at `public/app.js`.
+The client has four primary surfaces:
 
-- `renderFormField`
-- `renderTextField`
-- `renderTextAreaField`
-- `renderSelectField`
-- `renderFieldGrid`
-- `renderCheckboxGroup`
-- `renderCheckboxOption`
+1. Access-key sign-in
+2. Project list and clean empty state
+3. Kanban board
+4. Card detail and editing
 
-Raw `input`, `select`, and `textarea` markup is allowed only inside the primitive helpers. Fallback markup in `index.html` may use raw controls because it renders before JavaScript is available.
+Navigation and Card-detail presentation may change through the design process. They must keep the active Project, selected Card, primary action, and account boundary clear without introducing a second product model.
 
-## Control Rules
+## Resource model
 
-- Text inputs, textareas, and selects use `.form-control`.
-- Selects also use `.select-control`.
-- Checkbox groups use `.checkbox-group`, `.checkbox-grid`, `.checkbox-option`, and `.checkbox-control`.
-- Checkbox boxes are 16px square, top-aligned with wrapped labels, and separated from labels by 8px.
-- Long checkbox labels must wrap inside a responsive grid without changing checkbox size or creating oversized label gaps.
+- A project is the board.
+- Projects contain ordered columns and cards.
+- Cards contain comments. Projects have Activity, and an Activity entry may reference a Card.
+- The browser and skill use the same `/api/projects` resources.
+- Project updates send `If-Match` with the project revision.
+- Card updates send `If-Match` with the card version.
+- Resource creates send an `Idempotency-Key`.
+- Removing a card means setting `archivedAt`; the UI does not issue destructive deletes.
+
+## Authentication boundary
+
+- The static shell and sign-in surface render without authenticated project data.
+- The access key is submitted once to `POST /api/session`.
+- The browser relies on the resulting secure, HttpOnly cookie.
+- The access key must never be stored in local storage, session storage, markup, logs, or a client global.
+- Logging out calls `DELETE /api/session` and clears local project state.
+
+## Form primitives
+
+Raw `input`, `select`, and `textarea` markup in `src/client/app.ts` is allowed only inside:
+
+- `renderTextInput`
+- `renderTextArea`
+- `renderSelect`
+
+Every control uses `.form-control`; selects also use `.select-control`. Fallback markup in `index.html` must not collect credentials or authenticated data.
+
+## Simplicity boundary
+
+The primary client must not introduce teams, memberships, roles, agent identities, delegated sessions, capabilities, gates, approvals, delivery state, AI flow generation, or templates. Those concepts are intentionally outside V2.
 
 ## Verification
 
-Every UI generation pass must run:
+For client changes, run:
 
-- JudgmentKit before implementation.
-- `npm run check`, including the UI contract check.
-- Browser QA on desktop and mobile when form/control surfaces change, verifying sizing, spacing, wrapping, focus states, and overflow.
+- `npm run build:client`
+- `npx tsc -p tsconfig.client.json --noEmit`
+- `npx tsx scripts/check-ui-contract.ts`
+- Browser QA at desktop and mobile widths when the server can be run safely

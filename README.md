@@ -1,160 +1,110 @@
 # kanban.cards
 
-kanban.cards is a private-beta Kanban board for human and agent-controlled cards. Humans use the browser UI to describe or choose a workflow, create cards, and review activity. Agents use the API to create cards, move cards, and post progress or reviewer-facing comments.
+kanban.cards is a small, skill-first Kanban system. An agent uses the same resource API as the browser and acts with the owner's credential. The website is the visual oversight surface; it is not a second workflow engine.
 
-For the product thesis and the "why Kanban / why agents using Kanban" framing, see [Product Vision](docs/product-vision.md). For the target user, team, project, and agent governance model, see [AI-Native Access Model](docs/ai-native-access-model.md). For the Auth0 dashboard contract, see [Auth0 Setup](docs/auth0-setup.md). For production rollout operations, see [Runbook](docs/runbook.md).
+The product model is deliberately narrow:
 
-## Local Development
+```text
+Owner
+└── Projects
+    ├── Columns
+    ├── Cards
+    │   └── Comments
+    └── Activity
+```
+
+A Project is the board. There are no teams, board sub-resources, modeled agents, delegated sessions, roles, reviewers, approval gates, workflow generators, or legacy-board migration.
+
+## Design authority
+
+- [`docs/product-vision.md`](docs/product-vision.md) defines the product purpose, model, and trust boundary.
+- [`DESIGN.md`](DESIGN.md) governs the current experience and design.
+- [`UI_CONTRACT.md`](UI_CONTRACT.md) records testable constraints in the current browser implementation.
+- [`docs/design-language.md`](docs/design-language.md) preserves historical research and is not an implementation source.
+
+## First local run
+
+Prerequisites: Node.js 20 or newer and npm.
 
 ```bash
 npm install
+export KANBAN_CARDS_API_TOKEN='choose-a-local-owner-key'
 npm run dev
 ```
 
-The local server defaults to `http://127.0.0.1:4317` and stores state in `data/kanban-cards-state.json` unless a database URL is configured.
+Open `http://127.0.0.1:4317` and enter the same owner key. Static assets and the sign-in screen remain public; project data requires either the signed browser cookie or bearer token.
 
-Runtime source lives in TypeScript under `src/`. `src/client/app.ts` builds to `public/app.js`, and `src/cli/kanban-cards-client.ts` builds to the existing local-agent helper command path. Generated JavaScript and copied static assets are build output, not committed source.
-
-## Environment
-
-Production requires:
-
-- `KANBAN_CARDS_API_TOKEN`: admin compatibility bearer token for emergencies and tests
-- `OIDC_ISSUER`: Auth0/OIDC issuer URL
-- `OIDC_CLIENT_ID`: Auth0/OIDC client ID
-- `OIDC_REDIRECT_URI`: callback URL, usually `https://kanban.cards/auth/callback`
-- `SESSION_SECRET`: unique secret for signing session cookies
-- `PLATFORM_SURFACE_ID`: `kanban.cards`
-- `KANBAN_CARDS_DATABASE_URL`, `POSTGRES_URL`, or `DATABASE_URL`: Postgres connection string
-
-Optional Auth0/OIDC settings:
-
-- `OIDC_CLIENT_SECRET`: client secret when required by the Auth0 application
-- `OIDC_LOGOUT_URL`: Auth0 v2 logout URL, for example `https://<tenant>.auth0.com/v2/logout`
-- `OIDC_POST_LOGOUT_REDIRECT_URI`: post-logout return URL, usually `https://kanban.cards/auth/logout/complete`
-- `OIDC_WORKSPACE_CLAIM`: override for the workspace claim key
-- `OIDC_SURFACE_ACCESS_CLAIM`: override for the surface access claim key
-- `SESSION_TTL_SECONDS`: session cookie lifetime, default `604800`
-
-Optional local flow AI settings:
-
-- `LM_STUDIO_BASE_URL`: OpenAI-compatible LM Studio base URL, default `http://127.0.0.1:1234/v1`
-- `LM_STUDIO_MODEL`: model ID to use for flow drafts; when omitted, kanban.cards uses the first model from `/v1/models`
-- `LM_STUDIO_API_KEY`: bearer value for LM Studio-compatible requests, default `lm-studio`
-- `FLOW_AI_TIMEOUT_MS`: flow draft timeout, default `45000`
-
-Auth0 must allow these callback URLs:
-
-- `https://kanban.cards/auth/callback`
-- `http://127.0.0.1:4317/auth/callback`
-
-Auth0 must allow these logout URLs:
-
-- `https://kanban.cards/`
-- `https://kanban.cards/auth/logout/complete`
-- `http://127.0.0.1:4317/`
-- `http://127.0.0.1:4317/auth/logout/complete`
-
-The Auth0 Post Login Action should emit `https://surfaces.systems/workspace_id` and include `kanban.cards` in `https://surfaces.systems/surface_access`.
-
-Local aliases from the earlier Instruct prototype are still accepted temporarily:
-
-- `INSTRUCT_API_BASE_URL`
-- `INSTRUCT_API_TOKEN`
-- `INSTRUCT_DATA_PATH`
-
-## Local Flow AI
-
-The board flow editor can draft lane, gate, and agent changes through a local LM Studio server. Drafts are preview-only until a project manager applies them, and applying a flow remaps existing cards instead of deleting them.
-
-1. Start LM Studio's local server from the Developer tab or with `lms server start`.
-2. Load a model that supports structured output.
-3. Confirm the server responds:
+The runnable helper is included with the skill. Connect it to the local server:
 
 ```bash
-curl http://127.0.0.1:1234/v1/models
+printf '%s\n' "$KANBAN_CARDS_API_TOKEN" | \
+  node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs \
+  setup --url http://127.0.0.1:4317/api --token-stdin
+
+node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs \
+  create-project --name "My project"
 ```
 
-4. Start kanban.cards with the default `LM_STUDIO_BASE_URL` or point it at another OpenAI-compatible local endpoint.
-
-kanban.cards calls `POST /v1/chat/completions` with a JSON schema response format and parses `choices[0].message.content`. See LM Studio's [OpenAI compatibility](https://lmstudio.ai/docs/developer/openai-compat) and [structured output](https://lmstudio.ai/docs/developer/openai-compat/structured-output) docs.
-
-## Deployment
-
-This repo is designed to deploy to Vercel as a Node function through `api/index.ts`. The intended production project is `kanban.cards` under the `surfaces-platform` Vercel team, connected to `Surfaces-Platform/kanban.cards`.
-
-Initialize the workspace table after the Postgres env vars are available:
+Bind the returned project ID to the current repository:
 
 ```bash
-npm run db:init
+node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs \
+  bind --project <project-id>
 ```
 
-`db:init` initializes both the workspace table and the `agent_access_tokens` table.
+The user-level configuration at `~/.kanban-cards/config.json` contains the API origin and credential and is written with mode `0600`. The repository file `.kanban-cards.json` contains only `projectId`; a repository cannot redirect the credential to another origin.
 
-Seed or update the access rollout roadmap board from an authenticated production session:
+## Agent workflow
 
-1. Sign in to `https://kanban.cards`.
-2. Open `https://kanban.cards/admin/roadmap-seed`.
-3. Run `Dry run`, then `Seed roadmap`.
+Invoke `$kanban-cards` from a project to:
 
-For automation or break-glass operations, the CLI can still use the admin compatibility bearer:
+1. Create or bind a kanban.cards Project.
+2. Turn recommendations or a plan into cards with stable external keys.
+3. Read current status before beginning work.
+4. Comment on and move cards as execution progresses.
+5. Reconcile the board after repository changes.
 
-```bash
-KANBAN_CARDS_API_BASE_URL=https://kanban.cards/api \
-KANBAN_CARDS_API_TOKEN=<token> \
-npm run roadmap:seed -- --dry-run
+Create operations accept `Idempotency-Key`, card imports can use `externalKey`, and writes use project revisions or card versions to prevent silent overwrites.
 
-KANBAN_CARDS_API_BASE_URL=https://kanban.cards/api \
-KANBAN_CARDS_API_TOKEN=<token> \
-npm run roadmap:seed
+## Runtime and storage
+
+Runtime source is TypeScript under `src/`:
+
+- `src/server.ts`: public shell, owner authentication, and resource API
+- `src/state-store.ts`: local JSON and Postgres persistence
+- `src/client/app.ts`: sign-in, project list, Kanban board, and Card detail and editing
+- `src/cli/kanban-cards-client.ts`: skill helper
+
+The TypeScript CLI source builds to the tracked `.agents/skills/kanban-cards/scripts/kanban-cards-client.mjs` executable. After changing the CLI source, run `npm run build:cli` and include the regenerated helper in the same change so a clean checkout remains runnable.
+
+Local development stores state in `data/kanban-cards-v2-state.json` unless a database URL is configured. Production uses the independent `kanban_v2_workspaces` table. Old workspace rows are not imported or read.
+
+Environment variables:
+
+- `KANBAN_CARDS_API_TOKEN`: required owner key in production
+- `KANBAN_CARDS_OWNER_LABEL`: optional activity label, default `Owner`
+- `KANBAN_CARDS_SESSION_TTL_SECONDS`: optional browser-cookie lifetime, default seven days
+- `KANBAN_CARDS_DATABASE_URL`, `POSTGRES_URL`, or `DATABASE_URL`: Postgres connection
+
+Every environment requires the owner key. A non-loopback bind is treated as production: cookies are Secure and a database URL is required. Missing authentication or storage configuration fails closed while the public shell remains available.
+
+## API
+
+The browser and helper use the same endpoints:
+
+```text
+GET/POST/DELETE /api/session
+GET/POST        /api/projects
+GET/PATCH       /api/projects/:projectId
+POST            /api/projects/:projectId/cards
+PATCH           /api/projects/:projectId/cards/:cardId
+POST            /api/projects/:projectId/cards/:cardId/comments
+GET             /api/projects/:projectId/activity
 ```
 
-## Local Agent Access
+See [the skill API reference](.agents/skills/kanban-cards/references/api.md) for request details.
 
-Normal local agents should use scoped tokens generated from the private UI instead of the admin bearer token. In Edit flow, open an existing board agent and choose `Connect`; kanban.cards returns a one-time setup command:
-
-```bash
-node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs setup --url https://kanban.cards/api --token <token> --board <board-id> --agent <agent-id>
-```
-
-The helper writes `~/.kanban-cards/config.json` with `0600` permissions. Runtime precedence is environment variables first, then the config file, then local defaults.
-
-## Local Private Beta Security Release Workflow
-
-Use the local workflow runner to seed a private beta security release and execute the scoped agent actions:
-
-```bash
-npm run demo:prepare
-npm run demo:server
-```
-
-Open `http://127.0.0.1:4317`, then run each visible agent action one at a time:
-
-```bash
-npm run demo:step -- coordinator-intake
-npm run demo:step -- risk-triage
-npm run demo:step -- engineer-plan
-npm run demo:step -- engineer-implementation
-npm run demo:step -- security-change-request
-npm run demo:step -- engineer-evidence
-npm run demo:step -- security-approval
-npm run demo:step -- coordinator-closeout
-npm run demo:verify
-```
-
-To generate a browser-only MP4 with narration:
-
-```bash
-KANBAN_CARDS_DEMO_RECORD_TTS_PROVIDER=elevenlabs npm run demo:record
-```
-
-The workflow state is written under `.demo/`, creates scoped per-agent configs, and uses the generated CLI helper for all agent actions. `.demo/` is ignored so generated tokens and local run artifacts are never committed.
-
-```bash
-npm run demo:reset
-```
-
-## Checks
+## Validation
 
 ```bash
 npm run typecheck
@@ -162,3 +112,18 @@ npm run build
 npm run check
 npm test
 ```
+
+`npm run check` verifies compilation plus the primary UI contract. `npm test` verifies authentication, authorization, idempotency, optimistic version conflicts, file persistence, the Postgres adapter through an isolated fake, and CLI configuration. A passing automated suite means the implementation contract holds; it does not prove connectivity to the production database or replace rendered browser verification before deployment.
+
+## Deployment
+
+The repository deploys to Vercel as an Express function through `api/index.ts`.
+
+1. Configure the owner key and Postgres URL for production.
+2. Deploy the exact validated commit to a protected production-target candidate without moving the public domain.
+3. Make an authenticated candidate read and confirm it reports the `postgres` store. That request creates the V2 table and empty workspace idempotently when they do not exist.
+4. Verify a skill-created Card, comment, movement, Activity, and rendered browser state against the candidate before promoting that exact artifact.
+
+`npm run db:init` is an optional manual initializer only when a production database URL is already present in the current process. Treat it as successful production proof only when it reports `Initialized V2 postgres workspace at kanban_v2_workspaces:default`; a `file` result initialized local storage instead. Follow [the runbook](docs/runbook.md) for the complete candidate, promotion, rotation, and rollback procedure.
+
+No V1 import, compatibility mode, or dual write is required. Git history preserves the V1 source for historical inspection; it does not retain V1 runtime board data.

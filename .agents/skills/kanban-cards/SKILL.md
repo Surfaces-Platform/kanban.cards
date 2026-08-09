@@ -1,60 +1,90 @@
 ---
 name: kanban-cards
-description: Use the kanban.cards API to read assigned cards, inspect reviewer instructions, create or move cards, and post progress/comments. Trigger when an agent is asked to update kanban.cards, check board status, report progress to a human reviewer, acknowledge instructions, or coordinate work through the Kanban board.
+description: Operate kanban.cards projects through its owner API and bundled CLI. Use when Codex needs to create or bind a project to a repository, turn recommendations or plans into idempotent cards, inspect or reconcile project status, update or move cards after work, comment on progress, archive cards, or review project activity.
 ---
 
 # kanban.cards
 
-## Overview
+Use the API as the source of truth. Treat the authenticated agent as a client acting for the owner; do not create agent identities, roles, sessions, reviewers, or approval workflows.
 
-Use the kanban.cards API as the source of truth. Do not edit local state files or database rows directly.
-
-Default connection:
-- `KANBAN_CARDS_API_BASE_URL`, default `http://127.0.0.1:4317/api`
-- `KANBAN_CARDS_API_TOKEN`, optional bearer token override for agent writes
-- `KANBAN_CARDS_BOARD_ID` and `KANBAN_CARDS_AGENT_ID`, optional board and agent defaults
-
-The preferred setup path is a scoped token created from the kanban.cards UI:
+Run the bundled helper from the repository root:
 
 ```bash
-node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs setup --url https://kanban.cards/api --token <token> --board <board-id> --agent <agent-id>
+node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs <command>
 ```
 
-The helper reads env vars first, then `~/.kanban-cards/config.json`. Legacy local aliases `INSTRUCT_API_BASE_URL` and `INSTRUCT_API_TOKEN` are accepted temporarily.
+The executable helper is versioned with the skill and must work from a clean checkout without a local build. If it is missing, stop and report an incomplete skill installation; do not edit database rows or local application state as a substitute.
 
-For endpoint details, read `references/api.md` when needed.
+Read [references/api.md](references/api.md) when exact payloads, headers, or response shapes matter.
 
-## Workflow
+## Connect
 
-1. Read your session with `GET /agent/session` or list your scoped board with the helper script.
-2. Inspect the active board's `agentSpecs` to find your stable agent `id`, role, lane responsibilities, instructions, and skill notes.
-3. Find your cards by matching `ownerAgentId` or `reviewerAgentId` to your agent spec `id`, then by title or board context.
-4. Check reviewer instructions with `GET /agent/instructions`; scoped tokens are automatically limited to their own agent and board.
-5. Post progress as a `progress` comment before or after substantive work.
-6. Acknowledge or resolve human instructions by patching the relevant comment status.
-7. Move a card only when the current lane's output is genuinely ready for the next lane.
-
-## Helper Script
-
-Use `scripts/kanban-cards-client.mjs` for common operations:
+Store the owner token only in `~/.kanban-cards/config.json`. Pipe it through standard input so it does not appear in the command line:
 
 ```bash
-node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs boards
-node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs session
-node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs instructions
-node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs create-card --title "Draft brief" --lane <lane-id>
-node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs comment --item <card-id> --kind progress --text "Draft is ready for review."
-node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs move-card --item <card-id> --lane <lane-id>
+node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs setup \
+  --url https://kanban.cards/api \
+  --actor codex \
+  --token-stdin
 ```
 
-The helper sends `Authorization: Bearer <token>` when a token is configured.
+Never place a token or API URL in the repository. Bind the repository with a `.kanban-cards.json` containing only `projectId`:
 
-## Comment Guidance
+```bash
+node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs projects
+node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs bind --project <project-id>
+node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs project
+```
 
-- Use `progress` for agent status updates.
-- Use `instruction` for human direction that should be acknowledged or resolved.
-- Use `question` when blocked on a decision.
-- Use `change_request` for reviewer-requested changes.
-- Use `note` for context that does not require action.
+`bind` verifies that the Project exists through the configured API before writing the repository file.
 
-Keep comments concise and operational. Include what changed, what remains open, and which lane or reviewer action is next.
+Pass `--project <project-id>` to override the repository binding for one command.
+
+## Turn a plan into cards
+
+1. Read `session`, then list `projects` and inspect the selected `project`.
+2. Create and bind a project only when no suitable project exists.
+3. Map durable workflow stages to columns. Prefer a small flow such as `Inbox,Next,Doing,Done`.
+4. Give every plan item a stable `externalKey` derived from its source identifier or a durable slug.
+5. Read `cards` before writing. Create missing cards, update changed cards, and leave unrelated cards alone.
+6. Pass a stable `--idempotency-key` when creating a project or retrying any POST after an uncertain response.
+7. Read the project again and report what was created, updated, unchanged, or unresolved.
+
+```bash
+node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs create-project \
+  --name "Product improvements" \
+  --columns "Inbox,Next,Doing,Done" \
+  --idempotency-key "product-improvements-v1"
+
+node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs create-card \
+  --title "Simplify authentication" \
+  --body "Replace delegated sessions with one owner credential." \
+  --external-key "recommendation:simplify-auth"
+```
+
+When `--column` is omitted, the server places the card in the first column. Read the project and use its returned column IDs for later moves. To choose stable IDs at project creation, pass JSON to `--columns`, for example `[{"id":"next","name":"Next"}]`.
+
+## Execute and reconcile
+
+Before work, read `project` or `cards` and note the card version. After substantive work:
+
+1. Update the card body when its scope or outcome changed.
+2. Add a concise comment stating what changed and what remains.
+3. Move the card only when the destination column truthfully describes its state.
+4. Pass `--version` on every project or card patch; the helper requires it. A comment returns the compact reference `card: { id, version }`; use that version or re-read before a later update, move, or archive.
+5. Re-read the project to verify the mutation. If the server reports a version conflict, inspect current state and reconcile instead of overwriting it.
+
+```bash
+node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs comment \
+  --card <card-id> \
+  --text "Implemented and verified the owner-token setup path."
+
+node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs move-card \
+  --card <card-id> \
+  --column done \
+  --version <card-version>
+
+node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs activity --limit 25
+```
+
+Use `archive-card` instead of deletion. Do not modify or archive cards outside the user's requested scope.

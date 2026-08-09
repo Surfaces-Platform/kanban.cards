@@ -1,97 +1,135 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { promisify } from "node:util";
 
-const execFileAsync = promisify(execFile);
-const CLIENT_PATH = path.join(__dirname, "..", ".agents", "skills", "kanban-cards", "scripts", "kanban-cards-client.mjs");
+import { createApp } from "../src/server";
 
-test("kanban-cards client setup writes 0600 config without echoing the token", async () => {
-  const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-cards-cli-home-"));
-  const env = cleanEnv({ HOME: tempHome });
+const CLIENT_PATH = path.join(process.cwd(), ".agents", "skills", "kanban-cards", "scripts", "kanban-cards-client.mjs");
 
-  try {
-    const { stdout } = await execFileAsync(process.execPath, [
-      CLIENT_PATH,
-      "setup",
-      "--url",
-      "https://kanban.cards/api",
-      "--token",
-      "kcagt_secret_token",
-      "--board",
-      "board-1",
-      "--agent",
-      "agent-a"
-    ], { env });
+test("the skill helper keeps credentials user-scoped and reconciles a bound project", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-cards-v2-cli-"));
+  const home = path.join(directory, "home");
+  const repository = path.join(directory, "repo");
+  const dataPath = path.join(directory, "workspace.json");
+  const token = "cli-owner-secret";
+  await fs.mkdir(path.join(repository, ".git"), { recursive: true });
+  await fs.mkdir(home, { recursive: true });
 
-    assert.doesNotMatch(stdout, /kcagt_secret_token/);
-    const result = JSON.parse(stdout);
-    assert.equal(result.apiBaseUrl, "https://kanban.cards/api");
-    assert.equal(result.boardId, "board-1");
-    assert.equal(result.agentId, "agent-a");
-    assert.equal(result.tokenConfigured, true);
-
-    const configPath = path.join(tempHome, ".kanban-cards", "config.json");
-    const config = JSON.parse(await fs.readFile(configPath, "utf8"));
-    assert.equal(config.token, "kcagt_secret_token");
-    assert.equal(config.boardId, "board-1");
-    assert.equal((await fs.stat(configPath)).mode & 0o777, 0o600);
-  } finally {
-    await fs.rm(tempHome, { recursive: true, force: true });
-  }
-});
-
-test("kanban-cards client reads config after env vars", async () => {
-  const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-cards-cli-home-"));
-  const baseEnv = cleanEnv({ HOME: tempHome });
+  const app = createApp({ dataPath, apiToken: token, requireDatabase: false });
+  const server = createServer(app);
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api`;
+  const env = cleanEnv({ HOME: home });
 
   try {
-    await execFileAsync(process.execPath, [
-      CLIENT_PATH,
-      "setup",
-      "--url",
-      "https://kanban.cards/api",
-      "--token",
-      "kcagt_config_token",
-      "--board",
-      "board-1",
-      "--agent",
-      "agent-a"
-    ], { env: baseEnv });
-
-    const configOnly = JSON.parse((await execFileAsync(process.execPath, [CLIENT_PATH, "config"], { env: baseEnv })).stdout);
-    assert.equal(configOnly.apiBaseUrl, "https://kanban.cards/api");
-    assert.equal(configOnly.boardId, "board-1");
-    assert.equal(configOnly.agentId, "agent-a");
-    assert.equal(configOnly.tokenConfigured, true);
-
-    const overrideEnv = cleanEnv({
-      HOME: tempHome,
-      KANBAN_CARDS_API_BASE_URL: "https://override.test/api",
-      KANBAN_CARDS_API_TOKEN: "kcagt_env_token",
-      KANBAN_CARDS_BOARD_ID: "board-2",
-      KANBAN_CARDS_AGENT_ID: "agent-b"
+    await assert.rejects(
+      runCli(["setup", "--url", "http://example.com/api", "--token-stdin"], {
+        cwd: repository,
+        env,
+        input: `${token}\n`
+      }),
+      /requires https:\/\//
+    );
+    const setup = await runCli(["setup", "--url", baseUrl, "--actor", "cli-test", "--token-stdin"], {
+      cwd: repository,
+      env,
+      input: `${token}\n`
     });
-    const overridden = JSON.parse((await execFileAsync(process.execPath, [CLIENT_PATH, "config"], { env: overrideEnv })).stdout);
-    assert.equal(overridden.apiBaseUrl, "https://override.test/api");
-    assert.equal(overridden.boardId, "board-2");
-    assert.equal(overridden.agentId, "agent-b");
-    assert.equal(overridden.tokenConfigured, true);
+    assert.doesNotMatch(setup.stdout, new RegExp(token));
+    assert.equal(JSON.parse(setup.stdout).tokenConfigured, true);
+
+    const userConfigPath = path.join(home, ".kanban-cards", "config.json");
+    const userConfig = JSON.parse(await fs.readFile(userConfigPath, "utf8"));
+    assert.equal(userConfig.apiBaseUrl, baseUrl);
+    assert.equal(userConfig.actor, "cli-test");
+    assert.equal(userConfig.token, token);
+    assert.equal((await fs.stat(userConfigPath)).mode & 0o777, 0o600);
+
+    const createdOutput = await runCli([
+      "create-project",
+      "--name", "CLI project",
+      "--columns", '[{"id":"inbox","name":"Inbox"},{"id":"doing","name":"Doing"},{"id":"done","name":"Done"}]',
+      "--idempotency-key", "cli-project-v1"
+    ], { cwd: repository, env });
+    const project = unwrap(JSON.parse(createdOutput.stdout), "project");
+    assert.equal(project.name, "CLI project");
+
+    await runCli(["bind", "--project", project.id], { cwd: repository, env });
+    assert.deepEqual(JSON.parse(await fs.readFile(path.join(repository, ".kanban-cards.json"), "utf8")), { projectId: project.id });
+
+    const createArgs = [
+      "create-card",
+      "--title", "Execute the recommendation",
+      "--body", "Keep the board reconciled.",
+      "--column", "inbox",
+      "--external-key", "recommendation:execute"
+    ];
+    const firstCard = unwrap(JSON.parse((await runCli(createArgs, { cwd: repository, env })).stdout), "card");
+    const retriedCard = unwrap(JSON.parse((await runCli(createArgs, { cwd: repository, env })).stdout), "card");
+    assert.equal(retriedCard.id, firstCard.id);
+
+    await runCli([
+      "comment", "--card", firstCard.id, "--text", "Implemented the first execution step.", "--idempotency-key", "cli-comment-v1"
+    ], { cwd: repository, env });
+    await assert.rejects(
+      runCli(["move-card", "--card", firstCard.id, "--column", "doing"], { cwd: repository, env }),
+      /Missing --version/
+    );
+    await runCli([
+      "move-card", "--card", firstCard.id, "--column", "doing", "--version", "2"
+    ], { cwd: repository, env });
+
+    const cards = JSON.parse((await runCli(["cards"], { cwd: repository, env })).stdout);
+    assert.equal(cards.cards.length, 1);
+    assert.equal(cards.cards[0].columnId, "doing");
+
+    const activity = JSON.parse((await runCli(["activity", "--limit", "20"], { cwd: repository, env })).stdout);
+    assert.ok(activity.activity.some((entry: any) => entry.actor.label === "cli-test" && entry.actor.channel === "api"));
   } finally {
-    await fs.rm(tempHome, { recursive: true, force: true });
+    if (server.listening) await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    await fs.rm(directory, { recursive: true, force: true });
   }
 });
+
+function runCli(
+  args: string[],
+  options: { cwd: string; env: NodeJS.ProcessEnv; input?: string }
+): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [CLIENT_PATH, ...args], {
+      cwd: options.cwd,
+      env: options.env,
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
+    child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk; });
+    child.once("error", reject);
+    child.once("close", (code) => {
+      if (code === 0) resolve({ stdout, stderr });
+      else reject(new Error(`CLI exited ${code}: ${stderr || stdout}`));
+    });
+    child.stdin.end(options.input || "");
+  });
+}
 
 function cleanEnv(overrides: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const env = { ...process.env, ...overrides };
-  delete env.KANBAN_CARDS_API_BASE_URL;
+  const env = { ...process.env };
   delete env.KANBAN_CARDS_API_TOKEN;
-  delete env.KANBAN_CARDS_BOARD_ID;
-  delete env.KANBAN_CARDS_AGENT_ID;
-  delete env.INSTRUCT_API_BASE_URL;
-  delete env.INSTRUCT_API_TOKEN;
+  delete env.KANBAN_CARDS_API_BASE_URL;
+  delete env.KANBAN_CARDS_PROJECT_ID;
   return { ...env, ...overrides };
+}
+
+function unwrap(value: any, key: string): any {
+  return value?.[key] ?? value;
 }
