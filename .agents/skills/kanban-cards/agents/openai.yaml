@@ -1,4 +1,4 @@
-agent:
+interface:
   display_name: "kanban.cards"
-  short_description: "Use the kanban.cards board API"
-  default_prompt: "Use the kanban.cards API to find assigned cards, report progress, and respond to reviewer instructions."
+  short_description: "Drive projects and cards through the owner API"
+  default_prompt: "Use $kanban-cards to turn this plan into an idempotent project board and keep its cards reconciled as work progresses."

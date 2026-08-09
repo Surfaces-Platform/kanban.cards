@@ -1,112 +1,135 @@
-# kanban.cards API Reference
+# kanban.cards API
 
-Base URL defaults to `http://127.0.0.1:4317/api`.
+The base URL defaults to `http://127.0.0.1:4317/api`. The owner token authorizes the browser and skill to use the same project API.
 
-Admin compatibility writes use:
+## Headers
+
+Every helper request sends:
 
 ```http
-Authorization: Bearer $KANBAN_CARDS_API_TOKEN
-Content-Type: application/json
+Authorization: Bearer <owner-token>
+X-Kanban-Actor: <actor-label>
 ```
 
-Normal local agents should use board+agent-scoped bearer tokens generated from the private UI. Scoped tokens can read their board/session/instructions, create cards assigned to that agent, and update/move/comment on cards where that agent is the owner or reviewer.
+Resource POSTs also send `Idempotency-Key`. `create-card` derives a stable key from `projectId` plus `externalKey` unless the caller supplies `--idempotency-key`. Other resource POSTs generate a unique key unless one is supplied.
 
-Private-beta browser access may also use HTTP Basic Auth for the same-origin UI and API.
+Project and card patches accept:
 
-## Reads
+```http
+If-Match: <revision-or-version>
+```
 
-- `GET /health`
-- `GET /state` admin/full workspace only
-- `GET /boards`
-- `GET /boards/:boardId`
-- `GET /agent/instructions?agentId=<agent-id>`
-- `GET /agent/session`
-- `GET /events` admin/browser live-update stream
+Use the `revision` or `version` from the last read. The API accepts raw or quoted numeric values and returns `409` when current state no longer matches.
 
-`/agent/instructions` returns open or acknowledged `instruction`, `question`, and `change_request` comments on cards assigned to the agent as owner or reviewer. Omit `agentId` to return all open instructions.
+## Local configuration
 
-With a scoped agent token, `agentId` is ignored and the response is limited to that token's board and agent.
-
-`/events` returns a `text/event-stream` for the browser/admin surface. It emits `workspace_changed` invalidation events with an event `id`, optional `boardId`, `createdAt`, and small payload. Clients should refetch state when an event arrives. Use `Last-Event-ID` or `?since=<event-id>` to catch up after reconnecting.
-
-## Agent Token Management
-
-These endpoints require admin auth through Basic Auth or `KANBAN_CARDS_API_TOKEN`:
-
-- `POST /boards/:boardId/agent-tokens`
-- `GET /boards/:boardId/agent-tokens`
-- `DELETE /boards/:boardId/agent-tokens/:tokenId`
-
-Create payload:
+`~/.kanban-cards/config.json` is mode `0600` and contains only:
 
 ```json
 {
-  "agentId": "agent-a",
-  "label": "Agent A laptop"
+  "apiBaseUrl": "https://kanban.cards/api",
+  "token": "secret-owner-token",
+  "actor": "codex"
 }
 ```
 
-The create response returns `token` once. List and revoke responses only include metadata: `id`, `boardId`, `agentId`, `label`, `last4`, `createdAt`, `lastUsedAt`, and `revokedAt`.
-
-## Writes
-
-- `POST /boards`
-- `PATCH /boards/:boardId`
-- `POST /boards/:boardId/work-items`
-- `PATCH /boards/:boardId/work-items/:itemId`
-- `POST /boards/:boardId/work-items/:itemId/comments`
-- `PATCH /boards/:boardId/work-items/:itemId/comments/:commentId`
-
-The endpoint path keeps `work-items` for compatibility, but user-facing language is cards.
-
-## Card Fields
+The repository-level `.kanban-cards.json` contains only:
 
 ```json
 {
-  "title": "Draft outline",
-  "summary": "Prepare the first reviewer-ready outline.",
-  "laneId": "draft",
-  "ownerAgentId": "agent-a",
-  "reviewerAgentId": "reviewer-b",
-  "blockers": [],
-  "approvals": [],
-  "completed": false,
-  "delivered": false
+  "projectId": "project-id"
 }
 ```
 
-## Board Agent Specs
+The helper refuses repository configuration containing a token, API URL, or any field besides `projectId`.
 
-Boards may include `agentSpecs`, and lanes may include `defaultOwnerAgentId` and `defaultReviewerAgentId`:
+Use `https://` for every non-loopback API URL. The helper permits plaintext `http://` only for local loopback development.
+
+## Session and projects
+
+### `GET /session`
+
+Return the authenticated owner session.
+
+### `GET /projects`
+
+Return `{ "projects": ProjectSummary[] }`. A summary contains `id`, `name`, `description`, `revision`, timestamps, archive state, and `cardCount`; read `GET /projects/:projectId` for columns and cards. The browser may request archived projects with `?includeArchived=true`; the helper lists active projects.
+
+### `POST /projects`
 
 ```json
 {
-  "agentSpecs": [
-    {
-      "id": "agent-a",
-      "name": "Research Agent",
-      "role": "Context researcher",
-      "laneIds": ["research"],
-      "instructions": "Gather source context and open questions.",
-      "skillNotes": "$kanban-cards"
-    }
+  "name": "Product improvements",
+  "description": "Optional description",
+  "columns": [
+    { "id": "inbox", "name": "Inbox", "position": 0 },
+    { "id": "doing", "name": "Doing", "position": 1 },
+    { "id": "done", "name": "Done", "position": 2 }
   ]
 }
 ```
 
-Agent IDs remain plain strings on cards so older and API-created cards continue to work. Prefer IDs from `agentSpecs` when creating or claiming work.
+Columns are optional; the server supplies its defaults when omitted. The response is `201 { "project": Project }`. An idempotent replay returns the original status and body.
 
-## Comment Fields
+### `GET /projects/:projectId`
 
-Supported comment kinds are `progress`, `instruction`, `question`, `change_request`, and `note`.
+Return `{ "project": Project }` and an `ETag` containing the project revision. A project includes its columns, cards, comments, and revision.
 
-Supported statuses are `open`, `acknowledged`, and `resolved`.
+### `PATCH /projects/:projectId`
+
+Accept any of `name`, `description`, `columns`, or `archivedAt`. `If-Match` with the current project revision is required; omission returns `428`. Return `{ "project": Project }`.
+
+Replacing `columns` requires the complete desired column list. Preserve IDs for existing columns so cards retain their placement.
+
+## Cards
+
+### `POST /projects/:projectId/cards`
 
 ```json
 {
-  "kind": "progress",
-  "status": "open",
-  "author": "agent-a",
-  "text": "Research pass complete; draft is next."
+  "title": "Simplify authentication",
+  "body": "Replace delegated sessions with one owner credential.",
+  "columnId": "next",
+  "position": 0,
+  "externalKey": "recommendation:simplify-auth"
 }
 ```
+
+Only `title` is required. Return `201 { "card": Card, "projectRevision": 2 }`. Reusing an existing `externalKey` in the project returns that card with `200` and `"deduplicated": true`.
+
+### `PATCH /projects/:projectId/cards/:cardId`
+
+Accept any of `title`, `body`, `columnId`, `position`, or `archivedAt`. Moving a card is a patch with `columnId` and optional `position`. Archiving is a patch with an ISO timestamp in `archivedAt`. Return `{ "card": Card, "projectRevision": number }`.
+
+Supply the card's current `version` through required `If-Match`; omission returns `428`. Adding a comment increments the Card version returned in the comment response's compact `card` reference.
+
+### `POST /projects/:projectId/cards/:cardId/comments`
+
+```json
+{
+  "body": "Implemented and verified the setup path."
+}
+```
+
+Return `201 { "comment": Comment, "card": { "id": string, "version": number }, "projectRevision": number }`.
+
+## Activity
+
+### `GET /projects/:projectId/activity?limit=25`
+
+Return `{ "activity": Activity[], "projectRevision": number }`. Activity actors come from the server-validated `X-Kanban-Actor` label and channel metadata.
+
+## Helper command mapping
+
+| Command | Request |
+| --- | --- |
+| `session` | `GET /session` |
+| `projects` | `GET /projects` |
+| `create-project` | `POST /projects` |
+| `project` | `GET /projects/:projectId` |
+| `update-project` | `PATCH /projects/:projectId` |
+| `cards` | Read cards from `GET /projects/:projectId` |
+| `create-card` | `POST /projects/:projectId/cards` |
+| `update-card`, `move-card`, `archive-card` | `PATCH /projects/:projectId/cards/:cardId` |
+| `comment` | `POST /projects/:projectId/cards/:cardId/comments` |
+| `activity` | `GET /projects/:projectId/activity` |

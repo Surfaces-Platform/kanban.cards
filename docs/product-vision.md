@@ -1,66 +1,64 @@
 # Product Vision
 
-kanban.cards is a shared operating surface for agentic work. It gives humans and agents the same visible workflow: cards, lanes, owners, reviewers, comments, and review gates.
+kanban.cards is a durable, visible execution surface for a person and the agents acting on that person's behalf.
 
 ## Thesis
 
-Agent work needs a durable place to live. A chat can start the work, and a tool call can do part of it, but the work itself needs a visible object with state, ownership, evidence, and review.
+Recommendations and plans are easy to generate and hard to carry through. A repository needs a small shared record of what was proposed, what is happening now, what changed, and what remains.
 
-kanban.cards uses Kanban because it is already a practical grammar for work in motion. A card says what the work is. A lane says where it stands. Comments explain what changed. Reviewers can ask for changes before the work moves forward.
-
-## The Problem
-
-Agent work often disappears into chats, logs, local files, and one-off tool runs. That makes basic coordination harder than it should be:
-
-- What is the agent working on?
-- Who owns the next step?
-- Is the work blocked?
-- What changed since the last review?
-- What evidence did the agent leave behind?
-- Who approved the move to the next state?
-
-Those questions matter more when agents are doing real work for a team. The work has to be interruptible, inspectable, and recoverable.
+The agent is a client authenticated with the owner's key and acting with the owner's authority. The browser and the skill operate on the same Projects, Cards, Comments, and Activity through the same API.
 
 ## Why Kanban
 
-Kanban is useful here because it turns work into visible state.
+A Card is a bounded piece of work. A Column makes its state visible. A Comment records context or progress. Activity makes recent changes inspectable.
 
-Cards are bounded work objects. They carry the task, context, owner, reviewer, blockers, approvals, and activity in one place.
+That is enough to support an execution loop:
 
-Lanes make state visible. A card in Intake, Build, Review, or Pilot Ready tells the team what kind of attention it needs without opening a transcript.
+1. Turn a plan into Cards.
+2. Choose the next work.
+3. Perform the work.
+4. Update the Card.
+5. Reconcile the Project with reality.
 
-Owners and reviewers make responsibility explicit. An agent can own the work, a human or another agent can review it, and the board can show who needs to act next.
+## Product boundary
 
-Comments create the audit trail. Progress updates, questions, instructions, change requests, and approvals stay attached to the work object they affect.
+kanban.cards has one implicit owner and many Projects. A Project is the board and contains Columns and Cards. Cards contain Comments. Project Activity records changes made with the owner's authority.
 
-Review gates make movement meaningful. Cards should move when the next state is earned, not because an agent finished a hidden run.
+The skill is the primary operating client. The browser provides sign-in, project selection, a visual board, and Card detail and editing. The product vision does not prescribe a drawer, inspector, or other specific UI construction.
 
-## Why Agents Use Cards
+[`DESIGN.md`](../DESIGN.md) governs visual and interaction decisions for the new interface.
 
-Agents become easier to trust when they work through visible objects. A card gives an agent a bounded assignment, a scoped place to report progress, and a clear path for review.
+## Trust boundary
 
-In kanban.cards, agents can create cards, update summaries, post comments, respond to reviewer instructions, resolve change requests, and move work across lanes. Scoped access keeps each agent tied to the board and work it is allowed to touch.
+One owner key grants read and write access to the entire workspace. This version has no per-Project permissions, delegated grants, or separate agent identities.
 
-That makes the agent less like an opaque chat session and more like a participant in a workflow. The agent still does the work, but the team can see what it did, what remains open, and why the card moved.
+The browser exchanges the owner key for a signed, expiring, HttpOnly cookie. The skill stores the key in user-scoped configuration and sends it as a bearer token. A repository's `.kanban-cards.json` contains only a Project ID. That ID selects context; it does not limit the key's authority.
 
-## Access and Governance
+Activity records whether a change came through the browser or API and may include a caller-supplied actor label. The label provides context. It is not a separately authenticated identity.
 
-Reviewable agent work needs scoped authority. The target access model treats users, teams, projects, boards, cards, and agent sessions as explicit parts of the workflow.
+Rotating the owner key requires a new deployment and skill configuration. Deployments using the new key reject browser sessions signed with the old one. Older immutable deployment URLs retain their original environment snapshot and must be protected or retired separately.
 
-An agent should act through delegated access: a bounded grant for a project, board, card, action set, and review requirement. That keeps the board useful as a shared operating surface because the same place shows the work, the authority behind the work, and the evidence left for review.
+## Agentic safety
 
-The current Auth0 session auth, break-glass admin token, and board-scoped agent tokens are early infrastructure for that direction. The fuller model is described in [AI-Native Access Model](ai-native-access-model.md).
+Safety comes from mechanics that help an agent act reliably:
 
-## What Good Looks Like
+- stable resource IDs and optional external keys
+- bounded idempotent retry support and durable Card deduplication through external keys
+- optimistic concurrency on edits
+- non-destructive archiving
+- server-recorded activity with bounded retention
+- a credential stored outside the repository
 
-A good workflow is visible while it is happening.
+These mechanics do not require teams, modeled agents, capability grants, delegated sessions, reviewers, approval objects, or workflow-generation controls in this version.
 
-Named agents create the right cards, leave progress evidence, ask or answer questions, respond to change requests, and move work only when the next lane is justified. Reviewers can inspect the card, see the comments, approve the work, or send it back with a concrete request.
+## What good looks like
 
-The board becomes the shared record. It shows the current state, the decision trail, and the next action without asking someone to reconstruct the work from a chat transcript.
+Starting from an empty workspace, an agent can create a Project, populate recommendations without duplicates, read status, move and comment on Cards during execution, and reconcile the Project after repository work.
 
-## What This Is Not
+The browser and skill read the same stored state. After the skill makes a change, the browser shows it on the next refresh or Project load.
 
-kanban.cards is not trying to replace every team chat, issue tracker, or project management suite.
+The user never has to configure an agent, team, separate Board, reviewer, gate, or flow before useful work appears. A new Project receives default Columns unless the caller supplies its own.
 
-It is a lightweight surface for reviewable human-agent workflows: the place where agent work gets assigned, inspected, moved, and approved.
+## What this is not
+
+kanban.cards is not a team directory, identity platform, autonomous-agent runtime, workflow generator, immutable audit ledger, or full project-management suite. It is the smallest durable bridge between a plan and visible execution.
