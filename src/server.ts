@@ -542,8 +542,11 @@ function nextCardPosition(project: Project, columnId: string, exceptCardId?: str
 }
 
 function requiredMatch(req: Request, label: string): number {
-  const value = req.get("if-match");
-  if (!value) throw httpError(428, `${label} is required in If-Match.`);
+  if (req.headers["if-match"] !== undefined) {
+    throw httpError(400, "If-Match is not supported for writes. Use X-Kanban-Version.");
+  }
+  const value = req.get("x-kanban-version");
+  if (!value) throw httpError(428, `${label} is required in X-Kanban-Version.`);
   const normalized = value.trim().replace(/^W\//, "").replace(/^"|"$/g, "");
   const result = Number(normalized);
   if (!Number.isSafeInteger(result) || result < 1) throw httpError(400, `Invalid ${label.toLowerCase()}.`);

@@ -381,7 +381,8 @@ Do not log either key during comparison. Never use an old-key deployment as a ro
 - `409` for an idempotency-key mismatch: reuse the original request body or choose a new stable key for the changed request.
 - `409` for an archived Project: stop writing to it or restore it deliberately through the resource API.
 - `409` while changing Columns: move or archive every Card that would be stranded before removing its Column.
-- `428`: the caller omitted the required `If-Match` revision or version on an edit.
+- `400` naming `If-Match`: replace the legacy helper or caller; writes require `X-Kanban-Version` so a hosted response cannot be rewritten after the mutation commits.
+- `428`: the caller omitted the required `X-Kanban-Version` revision or version on an edit.
 - `503`: required owner-key or database configuration is missing.
 - `/api/health` succeeds but authenticated reads fail: configuration is present, but storage may be unavailable or the caller may be using the wrong credential or origin.
 - Duplicate Card creation: the caller omitted a stable external key and did not reuse the same idempotency key, or server deduplication regressed.

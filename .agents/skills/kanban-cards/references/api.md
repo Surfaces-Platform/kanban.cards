@@ -16,10 +16,12 @@ Resource POSTs also send `Idempotency-Key`. `create-card` derives a stable key f
 Project and card patches accept:
 
 ```http
-If-Match: <revision-or-version>
+X-Kanban-Version: <revision-or-version>
 ```
 
 Use the `revision` or `version` from the last read. The API accepts raw or quoted numeric values and returns `409` when current state no longer matches.
+
+The API rejects `If-Match` on writes. Standard HTTP precondition handling can replace a successful mutation response with `412` after the application has committed the write, so every caller must use `X-Kanban-Version`.
 
 ## Local configuration
 
@@ -77,7 +79,7 @@ Return `{ "project": Project }` and an `ETag` containing the project revision. A
 
 ### `PATCH /projects/:projectId`
 
-Accept any of `name`, `description`, `columns`, or `archivedAt`. `If-Match` with the current project revision is required; omission returns `428`. Return `{ "project": Project }`.
+Accept any of `name`, `description`, `columns`, or `archivedAt`. `X-Kanban-Version` with the current project revision is required; omission returns `428`. Return `{ "project": Project }`.
 
 Replacing `columns` requires the complete desired column list. Preserve IDs for existing columns so cards retain their placement.
 
@@ -101,7 +103,7 @@ Only `title` is required. Return `201 { "card": Card, "projectRevision": 2 }`. R
 
 Accept any of `title`, `body`, `columnId`, `position`, or `archivedAt`. Moving a card is a patch with `columnId` and optional `position`. Archiving is a patch with an ISO timestamp in `archivedAt`. Return `{ "card": Card, "projectRevision": number }`.
 
-Supply the card's current `version` through required `If-Match`; omission returns `428`. Adding a comment increments the Card version returned in the comment response's compact `card` reference.
+Supply the card's current `version` through required `X-Kanban-Version`; omission returns `428`. Adding a comment increments the Card version returned in the comment response's compact `card` reference.
 
 ### `POST /projects/:projectId/cards/:cardId/comments`
 

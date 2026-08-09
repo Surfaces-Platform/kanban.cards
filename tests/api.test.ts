@@ -164,7 +164,7 @@ test("one resource API supports idempotent plans, concurrency, comments, activit
 
     const movedResponse = await fetch(`${baseUrl}/api/projects/${project.id}/cards/${card.id}`, {
       method: "PATCH",
-      headers: { ...headers, "Content-Type": "application/json", "If-Match": String(card.version) },
+      headers: { ...headers, "Content-Type": "application/json", "X-Kanban-Version": String(card.version) },
       body: JSON.stringify({ columnId: "doing" })
     });
     assert.equal(movedResponse.status, 200);
@@ -174,10 +174,25 @@ test("one resource API supports idempotent plans, concurrency, comments, activit
 
     const staleResponse = await fetch(`${baseUrl}/api/projects/${project.id}/cards/${card.id}`, {
       method: "PATCH",
-      headers: { ...headers, "Content-Type": "application/json", "If-Match": "1" },
+      headers: { ...headers, "Content-Type": "application/json", "X-Kanban-Version": "1" },
       body: JSON.stringify({ title: "Overwrite stale state" })
     });
     assert.equal(staleResponse.status, 409);
+
+    const legacyHeaderResponse = await fetch(`${baseUrl}/api/projects/${project.id}/cards/${card.id}`, {
+      method: "PATCH",
+      headers: { ...headers, "Content-Type": "application/json", "If-Match": String(moved.version) },
+      body: JSON.stringify({ title: "Do not commit through a legacy precondition" })
+    });
+    assert.equal(legacyHeaderResponse.status, 400);
+    assert.match((await legacyHeaderResponse.json() as any).error, /X-Kanban-Version/);
+
+    const emptyLegacyHeaderResponse = await fetch(`${baseUrl}/api/projects/${project.id}/cards/${card.id}`, {
+      method: "PATCH",
+      headers: { ...headers, "Content-Type": "application/json", "If-Match": "" },
+      body: JSON.stringify({ title: "Do not accept an empty legacy precondition" })
+    });
+    assert.equal(emptyLegacyHeaderResponse.status, 400);
 
     const commentResponse = await fetch(`${baseUrl}/api/projects/${project.id}/cards/${card.id}/comments`, {
       method: "POST",

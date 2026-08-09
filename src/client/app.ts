@@ -284,7 +284,7 @@ function normalizeSession(value: unknown): Session | null {
 async function api<T = unknown>(path: string, options: RequestOptions = {}): Promise<T> {
   const headers = new Headers({ Accept: "application/json" });
   if (options.body !== undefined) headers.set("Content-Type", "application/json");
-  if (options.revision !== undefined && options.revision !== null) headers.set("If-Match", String(options.revision));
+  if (options.revision !== undefined && options.revision !== null) headers.set("X-Kanban-Version", String(options.revision));
   if (options.idempotent) headers.set("Idempotency-Key", uniqueKey());
 
   const response = await fetch(`${API_BASE_URL}${path}`, {
