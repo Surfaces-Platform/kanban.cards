@@ -136,7 +136,7 @@ The design must account for the full workflow, including states that are easy to
 | Populated Project | Column state and Card identity are easy to scan. |
 | Card detail | One Card can be understood and changed without losing Project context. |
 | Loading or saving | The affected surface shows progress and prevents duplicate action. |
-| Success | The changed resource becomes the primary confirmation. |
+| Success | The changed resource becomes the primary confirmation; routine completion feedback is secondary and transient. |
 | Validation error | The affected field and required correction are clear. |
 | Version conflict | Stored state changed elsewhere; the latest version and recovery path are clear. |
 | Refresh | The Project can reload without losing valid Project or Card context, and completion is clear. |
@@ -174,7 +174,7 @@ The complete workflow must work with keyboard, pointer, touch, and assistive tec
 - Controls have clear names and comfortably usable targets.
 - Selection, status, and errors do not rely on color alone.
 - Dialogs and overlays, when used, manage focus and expose clear close behavior.
-- Dynamic loading, saving, success, and failure states are announced programmatically. Validation errors are associated with the affected controls, and a temporary toast is never the only accessible record of an important result.
+- Dynamic loading, saving, success, and failure states are announced programmatically. Routine successful confirmations may use one polite, non-focus-stealing transient notice because the changed resource remains the primary record. Validation errors are associated with the affected controls, and a temporary notice is never the only accessible record of an important result.
 - Board navigation remains understandable at narrow widths without hiding the active Project or Card context.
 - Long titles, bodies, comments, and Column names wrap without covering controls.
 - Motion respects user preference and never carries required meaning by itself.
@@ -230,7 +230,7 @@ The alternative **Focus Workspace** remains comparison evidence, not a second pr
 - New Card creation shows a labeled `Create in` choice before the Create action. Desktop defaults to the first ordered Column; narrow and Column-local entry default to the visible or launch Column. The choice is creation context, not an editable state field on an existing Card.
 - Movement waits for pending title and Body saves, locks conflicting mutations, changes only the destination against the latest Card version, and keeps the Card open. The board, Card Activity, narrow-screen Column, close label, and completion receipt then agree on the destination.
 - A move-time version conflict retains only the requested destination. The latest stored Card remains authoritative, and recovery offers an explicit destination-specific Retry or Cancel without replaying title or Body changes.
-- A successful create, edit, move, or Comment updates the visible resource and its Card-specific Activity before showing a secondary receipt.
+- A successful create, edit, move, or Comment updates the visible resource and its Card-specific Activity before showing one secondary transient confirmation. The latest confirmation replaces the prior one and leaves without moving focus. Retaining an unsaved Card draft uses the same transient acknowledgement while the affected board Card and reopened editor carry the durable recovery cue instead of a workspace banner.
 
 ### Card detail, Comments, and Activity
 

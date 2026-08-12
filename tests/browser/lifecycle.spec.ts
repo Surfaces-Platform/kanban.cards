@@ -101,7 +101,7 @@ test("empty workspace and Project expose validated, duplicate-locked creation", 
       await page.locator('form[data-form="project"]').dispatchEvent("submit");
       expect(projectCreateRequests).toBe(1);
       projectGate.continue();
-      await expect(page.getByText("Project created", { exact: true })).toBeVisible();
+      await expect(page.locator("#toast-region").getByText("Project created", { exact: true })).toBeVisible();
     } finally {
       await projectGate.dispose();
     }
@@ -145,7 +145,7 @@ test("empty workspace and Project expose validated, duplicate-locked creation", 
       await inspector.locator('form[data-form="card"]').dispatchEvent("submit");
       expect(cardCreateRequests).toBe(1);
       cardGate.continue();
-      await expect(page.getByText("Card created", { exact: true })).toBeVisible();
+      await expect(page.locator("#toast-region").getByText("Card created", { exact: true })).toBeVisible();
     } finally {
       await cardGate.dispose();
     }

@@ -103,6 +103,12 @@ interface StatusMessage {
   message: string;
 }
 
+interface ConfirmationMessage {
+  title: string;
+  message: string;
+  uiState?: "refresh-success";
+}
+
 interface ArchiveReceipt {
   key: string;
   projectId: string;
@@ -159,6 +165,7 @@ class ApiError extends Error {
 
 const API_BASE_URL = (window.KANBAN_CARDS_API_BASE_URL || "/api").replace(/\/$/, "");
 const DEFAULT_COLUMNS = ["Next", "Doing", "Done"];
+const CONFIRMATION_DURATION_MS = 5_000;
 const UI_CONTRACT_STATES = [
   "opening", "signed-out", "invalid-key", "empty-workspace", "empty-project", "populated", "selected",
   "refreshing", "refresh-success", "refresh-failure", "saving", "validation-error", "stale",
@@ -187,6 +194,8 @@ let cardFieldErrors = new Map<string, string>();
 let commentFieldError = "";
 let projectStatus: StatusMessage | null = null;
 let cardStatus: StatusMessage | null = null;
+let confirmation: ConfirmationMessage | null = null;
+let confirmationTimer: number | null = null;
 let cardConflict: CardConflict | null = null;
 let moveConflict: MoveConflict | null = null;
 let movePanelOpen = false;
@@ -528,6 +537,7 @@ function restoreDescriptionSelection(): void {
 }
 
 function setWorkspaceMutationsDisabled(disabled: boolean, kind: MutationKind = null): void {
+  if (disabled) clearConfirmation();
   mutationInFlight = disabled;
   mutationKind = disabled ? kind : null;
 }
@@ -579,6 +589,45 @@ function renderButton(
 function renderStatus(message: StatusMessage | null, id: string): string {
   if (!message) return `<div id="${escapeHtml(id)}" class="status-slot" role="status" aria-live="polite" aria-atomic="true"></div>`;
   return `<div id="${escapeHtml(id)}" class="jk-status" data-kind="${escapeHtml(message.tone)}" role="status" aria-live="polite" aria-atomic="true" tabindex="-1"><span class="jk-status-marker" aria-hidden="true">${message.tone === "error" || message.tone === "warning" ? "!" : "✓"}</span><div><strong>${escapeHtml(message.title)}</strong><p>${escapeHtml(message.message)}</p></div></div>`;
+}
+
+function clearConfirmation(): void {
+  if (confirmationTimer !== null) {
+    window.clearTimeout(confirmationTimer);
+    confirmationTimer = null;
+  }
+  confirmation = null;
+  document.querySelector<HTMLElement>("#toast-region")?.replaceChildren();
+}
+
+function showConfirmation(title: string, message: string, uiState?: ConfirmationMessage["uiState"]): void {
+  clearConfirmation();
+  confirmation = { title, message, ...(uiState ? { uiState } : {}) };
+  const region = document.querySelector<HTMLElement>("#toast-region");
+  if (region) {
+    const toast = document.createElement("div");
+    toast.className = "toast jk-status";
+    toast.dataset.kind = "receipt";
+    const marker = document.createElement("span");
+    marker.className = "jk-status-marker";
+    marker.setAttribute("aria-hidden", "true");
+    marker.textContent = "✓";
+    const content = document.createElement("div");
+    const heading = document.createElement("strong");
+    heading.textContent = title;
+    const detail = document.createElement("p");
+    detail.textContent = message;
+    content.append(heading, detail);
+    toast.append(marker, content);
+    region.replaceChildren(toast);
+  }
+  document.body.dataset.state = currentUiState();
+  confirmationTimer = window.setTimeout(() => {
+    confirmationTimer = null;
+    confirmation = null;
+    region?.replaceChildren();
+    document.body.dataset.state = currentUiState();
+  }, CONFIRMATION_DURATION_MS);
 }
 
 function renderLoading(): string {
@@ -744,7 +793,8 @@ function renderMobileColumnSelector(project: Project): string {
 
 function renderBoardCard(card: ProjectCard): string {
   const summary = bodySummary(card.body);
-  return `<button class="board-card jk-card" type="button" data-action="open-card" data-card-id="${escapeHtml(card.id)}" aria-current="${card.id === selectedCardId ? "true" : "false"}"${disabledAttribute()}><span class="card-title">${escapeHtml(card.title)}</span>${summary ? `<span class="card-summary">${escapeHtml(summary)}</span>` : ""}<span class="card-meta"><span>${card.comments.length} ${card.comments.length === 1 ? "Comment" : "Comments"}</span><span>${escapeHtml(formatRecency(card.updatedAt || card.createdAt))}</span></span></button>`;
+  const hasRetainedDraft = Boolean(activeProject && retainedDrafts.has(draftKey(activeProject.id, card.id)));
+  return `<button class="board-card jk-card" type="button" data-action="open-card" data-card-id="${escapeHtml(card.id)}" aria-current="${card.id === selectedCardId ? "true" : "false"}"${disabledAttribute()}><span class="card-title">${escapeHtml(card.title)}</span>${summary ? `<span class="card-summary">${escapeHtml(summary)}</span>` : ""}<span class="card-meta">${hasRetainedDraft ? `<span class="card-draft-state jk-meta">Draft retained</span>` : ""}<span>${card.comments.length} ${card.comments.length === 1 ? "Comment" : "Comments"}</span><span>${escapeHtml(formatRecency(card.updatedAt || card.createdAt))}</span></span></button>`;
 }
 
 function renderColumnGrid(project: Project): string {
@@ -886,7 +936,10 @@ function renderCardInspector(project: Project): string {
   const latestConflictLoaded = cardConflict?.latestLoaded !== false;
   const titleError = cardFieldErrors.get("title") || "";
   const hasRetainedDraft = retainedDrafts.has(draftKey(project.id, card?.id || null));
-  const status = cardStatus || (hasRetainedDraft ? { tone: "receipt" as const, title: "Draft retained", message: "Your unsaved Card changes are restored in the fields below." } : null);
+  const status = cardStatus;
+  const draftRetentionMarkup = hasRetainedDraft && !cardStatus
+    ? `<p class="draft-retained-note jk-help" role="status"><strong>Draft retained</strong><span>Your unsaved Card changes are restored below and remain available until they save or you discard them.</span></p>`
+    : "";
   const pendingCardCreate = card ? "" : renderPendingPostAction(`card:create:${project.id}`);
   const retryLabel = card?.archivedAt ? "Retry and restore Card" : "Retry with draft";
   const staleHeading = latestConflictLoaded ? "The stored Card changed" : "The latest stored Card is unavailable";
@@ -932,7 +985,7 @@ function renderCardInspector(project: Project): string {
   const previewPanel = `<div id="description-preview-panel" class="description-view-panel markdown-preview" role="tabpanel" aria-labelledby="description-preview-tab" tabindex="0"${descriptionView === "preview" ? "" : " hidden"}>${previewContent}</div>`;
   const descriptionEditor = `<div class="jk-field surface-field card-body-field"><div class="description-field-header"><label for="card-body-input">Description</label>${descriptionTabs}</div><p class="jk-help" id="card-description-help">Markdown supports headings, lists, links, quotes, and code. HTML and images aren’t supported.</p>${writePanel}${previewPanel}</div>`;
   const createDestination = card ? "" : renderCreateDestination(project, draft);
-  const editor = `<form class="card-form surface-card-form" data-form="card" data-autosave="${card ? "true" : "false"}" data-card-id="${escapeHtml(card?.id || "")}" novalidate><div class="jk-field surface-field"><label class="jk-visually-hidden" for="card-title-input">Title</label>${titleControl}${titleError ? `<p class="jk-error" id="card-title-error">${escapeHtml(titleError)}</p>` : ""}</div>${descriptionEditor}${createDestination}${conflict || moveConflictMarkup ? "" : card ? `<div class="inspector-actions">${renderButton("Archive", "archive-card", { priority: "risk", data: `data-card-id="${escapeHtml(card.id)}"` })}</div>` : `<div class="inspector-actions"><button class="jk-button" data-priority="primary" type="submit"${disabledAttribute()}>${mutationKind === "card" ? "Creating…" : "Create Card"}</button></div>`}</form>`;
+  const editor = `<form class="card-form surface-card-form" data-form="card" data-autosave="${card ? "true" : "false"}" data-card-id="${escapeHtml(card?.id || "")}" novalidate><div class="jk-field surface-field"><label class="jk-visually-hidden" for="card-title-input">Title</label>${titleControl}${titleError ? `<p class="jk-error" id="card-title-error">${escapeHtml(titleError)}</p>` : ""}</div>${draftRetentionMarkup}${descriptionEditor}${createDestination}${conflict || moveConflictMarkup ? "" : card ? `<div class="inspector-actions">${renderButton("Archive", "archive-card", { priority: "risk", data: `data-card-id="${escapeHtml(card.id)}"` })}</div>` : `<div class="inspector-actions"><button class="jk-button" data-priority="primary" type="submit"${disabledAttribute()}>${mutationKind === "card" ? "Creating…" : "Create Card"}</button></div>`}</form>`;
   const cardPanel = `<div id="card-panel" class="inspector-panel" role="tabpanel" aria-labelledby="card-tab">${status ? `<div class="card-status">${renderStatus(status, "card-status")}</div>` : renderStatus(null, "card-status")}${staleMarkup}${moveConflictMarkup}${pendingCardCreate}${editor}${card ? renderComments(card) : ""}</div>`;
   const toolbarActions = `<div class="inspector-toolbar-actions">${card ? renderMoveDisclosure(project, card, conflict) : ""}<button class="close-button inspector-close" type="button" data-action="close-card" aria-label="${escapeHtml(closeLabel)}"${disabledAttribute()}><span aria-hidden="true">×</span></button></div>`;
   return `<aside class="card-inspector jk-panel" aria-labelledby="card-tab"><div class="inspector-content"><header class="inspector-toolbar">${tabs}${toolbarActions}</header><div id="card-autosave-status" class="jk-visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div>${cardSelected ? cardPanel : card ? renderActivity(card) : cardPanel}</div></aside>`;
@@ -968,7 +1021,8 @@ function currentUiState(): string {
   if (currentArchiveReceipt(activeProject?.id || "")) return "archived";
   if (selectedCardId || creatingCard) return "selected";
   if (activeProject && !activeCards(activeProject).length) return "empty-project";
-  if (projectStatus?.title.includes("Refresh")) return projectStatus.tone === "error" ? "refresh-failure" : "refresh-success";
+  if (projectStatus?.title.includes("Refresh")) return "refresh-failure";
+  if (confirmation?.uiState === "refresh-success") return "refresh-success";
   return "populated";
 }
 
@@ -1012,6 +1066,9 @@ function restorePendingContext(): void {
 }
 
 function render(): void {
+  if (confirmation && (mutationInFlight || projectStatus || cardStatus || cardConflict || moveConflict)) {
+    clearConfirmation();
+  }
   document.body.dataset.state = currentUiState();
   root.innerHTML = initialLoading ? renderLoading() : session ? renderWorkspace() : renderSignIn();
   restoreDescriptionSelection();
@@ -1113,6 +1170,7 @@ function clearPrivateState(notice: AuthNotice): void {
   commentFieldError = "";
   projectStatus = null;
   cardStatus = null;
+  clearConfirmation();
   cardConflict = null;
   resetMoveContext();
   retainedDrafts.clear();
@@ -1295,7 +1353,8 @@ function cancelProjectEditor(): void {
   projectEditorMode = null;
   projectEditorDraft = null;
   projectFieldErrors.clear();
-  projectStatus = { tone: "neutral", title: "Project unchanged", message: "No Project changes were saved." };
+  projectStatus = null;
+  showConfirmation("Project unchanged", "No Project changes were saved.");
   pendingFocusRestore = projectEditorReturnFocus;
   projectEditorReturnFocus = null;
   render();
@@ -1344,9 +1403,12 @@ async function saveProject(form: HTMLFormElement): Promise<void> {
       applyProjectSnapshot(created);
       const refreshError = await refreshCommittedProject(created.id);
       if (session) {
-        projectStatus = refreshError
-          ? { tone: "warning", title: "Project created; refresh needed", message: `${created.name} is stored and visible from the write response. Refresh failed: ${refreshError}` }
-          : { tone: "success", title: "Project created", message: `${created.name} is ready for Cards.` };
+        if (refreshError) {
+          projectStatus = { tone: "warning", title: "Project created; refresh needed", message: `${created.name} is stored and visible from the write response. Refresh failed: ${refreshError}` };
+        } else {
+          projectStatus = null;
+          showConfirmation("Project created", `${created.name} is ready for Cards.`);
+        }
       }
     } else {
       const project = activeProject;
@@ -1367,9 +1429,12 @@ async function saveProject(form: HTMLFormElement): Promise<void> {
       applyProjectSnapshot(updated);
       const refreshError = await refreshCommittedProject(project.id);
       if (session) {
-        projectStatus = refreshError
-          ? { tone: "warning", title: "Project updated; refresh needed", message: `The update is stored and visible from the write response. Refresh failed: ${refreshError}` }
-          : { tone: "success", title: "Project updated", message: "The stored Project and ordered Columns now match these changes." };
+        if (refreshError) {
+          projectStatus = { tone: "warning", title: "Project updated; refresh needed", message: `The update is stored and visible from the write response. Refresh failed: ${refreshError}` };
+        } else {
+          projectStatus = null;
+          showConfirmation("Project updated", "The stored Project and ordered Columns now match these changes.");
+        }
       }
     }
     if (session) pendingFocusId = "project-select";
@@ -1450,7 +1515,8 @@ function closeCard(): void {
   const cardId = selectedCardId;
   const key = draftKey(project.id, cardId);
   if (retainedDrafts.has(key) && !pendingAutosaves.has(key)) {
-    projectStatus = { tone: "receipt", title: "Draft retained", message: "Your unsaved Card changes will return when you open this Card again." };
+    projectStatus = null;
+    showConfirmation("Draft retained", "Your unsaved Card changes will return when you open this Card again.");
   }
   selectedCardId = null;
   creatingCard = false;
@@ -1499,8 +1565,21 @@ function updateRenderedBoardCard(card: ProjectCard): void {
     summary.textContent = summaryText;
     summary.hidden = !summaryText;
   }
-  const meta = cardButton.querySelectorAll<HTMLElement>(".card-meta span");
-  if (meta.length) meta[meta.length - 1].textContent = formatRecency(card.updatedAt);
+  const meta = cardButton.querySelector<HTMLElement>(".card-meta");
+  if (!meta) return;
+  const hasRetainedDraft = Boolean(activeProject && retainedDrafts.has(draftKey(activeProject.id, card.id)));
+  let draftState = meta.querySelector<HTMLElement>(".card-draft-state");
+  if (hasRetainedDraft && !draftState) {
+    draftState = document.createElement("span");
+    draftState.className = "card-draft-state jk-meta";
+    draftState.textContent = "Draft retained";
+    meta.prepend(draftState);
+  } else if (!hasRetainedDraft) {
+    draftState?.remove();
+    if (selectedCardId === card.id) root.querySelector(".draft-retained-note")?.remove();
+  }
+  const recency = meta.lastElementChild;
+  if (recency instanceof HTMLElement) recency.textContent = formatRecency(card.updatedAt);
 }
 
 function inspectorHasActiveControl(): boolean {
@@ -1513,8 +1592,10 @@ async function performCardAutosave(projectId: string, cardId: string): Promise<v
   const card = project.cards.find((candidate) => candidate.id === cardId);
   const key = draftKey(projectId, cardId);
   const draft = retainedDrafts.get(key);
-  if (!card || !draft || sameDraft(draft, storedCardDraft(project, card))) {
+  if (!card || !draft) return;
+  if (sameDraft(draft, storedCardDraft(project, card))) {
     retainedDrafts.delete(key);
+    updateRenderedBoardCard(card);
     return;
   }
   if (!cleanValue(draft.title)) {
@@ -1639,7 +1720,8 @@ function cancelMove(): void {
   const hadConflict = Boolean(moveConflict);
   resetMoveContext();
   if (hadConflict) {
-    cardStatus = { tone: "neutral", title: "Move canceled", message: "The Card remains in its latest stored Column." };
+    cardStatus = null;
+    showConfirmation("Move canceled", "The Card remains in its latest stored Column.");
   }
   pendingFocusId = "move-card-trigger";
   render();
@@ -1654,7 +1736,8 @@ async function moveCard(destinationColumnId: string, explicitRetry = false): Pro
   if (initialCard.columnId === initialDestination.id) {
     mobileColumns.set(initialProject.id, initialDestination.id);
     resetMoveContext();
-    cardStatus = { tone: "success", title: "Card already moved", message: `${initialCard.title} is already in ${initialDestination.name}.` };
+    cardStatus = null;
+    showConfirmation("Card already moved", `${initialCard.title} is already in ${initialDestination.name}.`);
     pendingFocusId = "move-card-trigger";
     render();
     return;
@@ -1710,7 +1793,8 @@ async function moveCard(destinationColumnId: string, explicitRetry = false): Pro
     if (card.columnId === destination.id) {
       mobileColumns.set(project.id, destination.id);
       resetMoveContext();
-      cardStatus = { tone: "success", title: "Card already moved", message: `${card.title} is already in ${destination.name}.` };
+      cardStatus = null;
+      showConfirmation("Card already moved", `${card.title} is already in ${destination.name}.`);
       pendingFocusId = "move-card-trigger";
       return;
     }
@@ -1732,12 +1816,14 @@ async function moveCard(destinationColumnId: string, explicitRetry = false): Pro
     moveDestinationId = "";
     const refreshError = await refreshCommittedProject(project.id);
     if (session) {
-      cardStatus = refreshError
-        ? { tone: "warning", title: "Card moved; refresh needed", message: `${movedCard.title} is stored in ${destination.name} and remains visible from the write response. Refresh failed: ${refreshError}` }
-        : { tone: "success", title: "Card moved", message: `${movedCard.title} moved to ${destination.name}.` };
-      projectStatus = refreshError
-        ? { tone: "warning", title: "Project refresh needed", message: "The move committed; use Refresh to reconcile the latest Project Activity." }
-        : null;
+      if (refreshError) {
+        cardStatus = { tone: "warning", title: "Card moved; refresh needed", message: `${movedCard.title} is stored in ${destination.name} and remains visible from the write response. Refresh failed: ${refreshError}` };
+        projectStatus = { tone: "warning", title: "Project refresh needed", message: "The move committed; use Refresh to reconcile the latest Project Activity." };
+      } else {
+        cardStatus = null;
+        projectStatus = null;
+        showConfirmation("Card moved", `${movedCard.title} moved to ${destination.name}.`);
+      }
       pendingFocusId = "move-card-trigger";
     }
   } catch (error) {
@@ -1767,7 +1853,8 @@ async function moveCard(destinationColumnId: string, explicitRetry = false): Pro
       } else if (latestLoaded && latestCard?.columnId === destination.id) {
         mobileColumns.set(project.id, destination.id);
         resetMoveContext();
-        cardStatus = { tone: "success", title: "Card moved", message: `${latestCard.title} is now in ${destination.name}.` };
+        cardStatus = null;
+        showConfirmation("Card moved", `${latestCard.title} is now in ${destination.name}.`);
         pendingFocusId = "move-card-trigger";
       } else {
         moveConflict = { projectId: project.id, cardId: card.id, destinationColumnId: destination.id, latestLoaded };
@@ -1842,14 +1929,17 @@ async function saveCard(form: HTMLFormElement | null, explicitRetry = false): Pr
     mobileColumns.set(project.id, storedCard.columnId);
     const refreshError = await refreshCommittedProject(project.id);
     if (session) {
-      cardStatus = refreshError
-        ? { tone: "warning", title: `${card ? "Card updated" : "Card created"}; refresh needed`, message: `The Card is stored and visible from the write response. Refresh failed: ${refreshError}` }
-        : card
-          ? { tone: "success", title: "Card updated", message: "The visible Card and its Activity reflect the saved change." }
-          : { tone: "success", title: "Card created", message: "The new Card is visible in its Column and ready for Comments." };
-      projectStatus = refreshError
-        ? { tone: "warning", title: "Project refresh needed", message: "The Card write committed; use Refresh to reconcile the latest Project state." }
-        : null;
+      if (refreshError) {
+        cardStatus = { tone: "warning", title: `${card ? "Card updated" : "Card created"}; refresh needed`, message: `The Card is stored and visible from the write response. Refresh failed: ${refreshError}` };
+        projectStatus = { tone: "warning", title: "Project refresh needed", message: "The Card write committed; use Refresh to reconcile the latest Project state." };
+      } else {
+        cardStatus = null;
+        projectStatus = null;
+        showConfirmation(
+          card ? "Card updated" : "Card created",
+          card ? "The visible Card and its Activity reflect the saved change." : "The new Card is visible in its Column and ready for Comments."
+        );
+      }
       pendingFocusId = "card-title-input";
     }
   } catch (error) {
@@ -1898,10 +1988,12 @@ function discardDraft(): void {
     selectedCardId = null;
     resetMoveContext();
     cardStatus = null;
-    projectStatus = { tone: "neutral", title: "Draft discarded", message: `${card.title} remains archived and is no longer on the active board.` };
-    pendingFocusId = "project-status";
+    projectStatus = null;
+    showConfirmation("Draft discarded", `${card.title} remains archived and is no longer on the active board.`);
+    pendingFocusId = "main-content";
   } else {
-    cardStatus = { tone: "neutral", title: "Draft discarded", message: "The fields now show the latest stored Card." };
+    cardStatus = null;
+    showConfirmation("Draft discarded", "The fields now show the latest stored Card.");
     pendingFocusId = "card-title-input";
   }
   render();
@@ -1964,9 +2056,13 @@ async function addComment(form: HTMLFormElement): Promise<void> {
     commentDrafts.delete(draftKey(project.id, card.id));
     const refreshError = await refreshCommittedProject(project.id);
     if (session) {
-      cardStatus = refreshError
-        ? { tone: "warning", title: "Comment added; refresh needed", message: `The Comment is stored and visible. Activity could not be refreshed: ${refreshError}` }
-        : { tone: "success", title: "Comment added", message: "The Comment and Card-specific Activity are now visible." };
+      if (refreshError) {
+        cardStatus = { tone: "warning", title: "Comment added; refresh needed", message: `The Comment is stored and visible. Activity could not be refreshed: ${refreshError}` };
+      } else {
+        cardStatus = null;
+        projectStatus = null;
+        showConfirmation("Comment added", "The Comment and Card-specific Activity are now visible.");
+      }
       pendingFocusId = "comment-input";
     }
   } catch (error) {
@@ -2042,9 +2138,12 @@ async function undoArchive(): Promise<void> {
     else archiveReceipts.delete(project.id);
     const refreshError = await refreshCommittedProject(project.id);
     if (session) {
-      projectStatus = refreshError
-        ? { tone: "warning", title: "Card restored; refresh needed", message: `${receipt.cardTitle} returned to its Column from the write response. Refresh failed: ${refreshError}` }
-        : { tone: "success", title: "Card restored", message: `${receipt.cardTitle} returned to its stored Column.` };
+      if (refreshError) {
+        projectStatus = { tone: "warning", title: "Card restored; refresh needed", message: `${receipt.cardTitle} returned to its Column from the write response. Refresh failed: ${refreshError}` };
+      } else {
+        projectStatus = null;
+        showConfirmation("Card restored", `${receipt.cardTitle} returned to its stored Column.`);
+      }
       pendingFocusRestore = { action: "open-card", cardId: restoredCard.id, occurrence: 0 };
     }
   } catch (error) {
@@ -2066,20 +2165,26 @@ async function refreshProject(): Promise<void> {
   render();
   try {
     await loadProjects(project.id);
-    projectStatus = { tone: "success", title: "Refresh complete", message: "The displayed state now reflects the latest stored Project." };
+    projectStatus = null;
+    let refreshConfirmation = {
+      title: "Refresh complete",
+      message: "The displayed state now reflects the latest stored Project."
+    };
     if (moveConflict && activeProject?.id === moveConflict.projectId) {
       const latestCard = activeProject.cards.find((candidate) => candidate.id === moveConflict?.cardId);
       const destination = activeProject.columns.find((column) => column.id === moveConflict?.destinationColumnId);
       if (latestCard && destination && latestCard.columnId === destination.id) {
         mobileColumns.set(activeProject.id, destination.id);
         resetMoveContext();
-        cardStatus = { tone: "success", title: "Card moved", message: `${latestCard.title} is now in ${destination.name}.` };
+        cardStatus = null;
+        refreshConfirmation = { title: "Card moved", message: `${latestCard.title} is now in ${destination.name}.` };
         pendingFocusId = "move-card-trigger";
       } else {
         moveConflict.latestLoaded = true;
         pendingFocusId = "move-conflict-heading";
       }
     }
+    showConfirmation(refreshConfirmation.title, refreshConfirmation.message, "refresh-success");
   } catch (error) {
     if (handlePrivateError(error)) return;
     projectStatus = { tone: "error", title: "Refresh failed", message: `The previous displayed state remains visible. ${error instanceof Error ? error.message : "Try again."}` };

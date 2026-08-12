@@ -79,7 +79,7 @@ const FALLBACK_INDEX_HTML = `<!doctype html>
 </head>
 <body>
   <div id="app"><main class="centered-view"><strong>kanban.cards</strong><p>Opening your projects…</p></main></div>
-  <div class="toast-region" id="toast-region" aria-live="polite"></div>
+  <div class="toast-region" id="toast-region" role="status" aria-live="polite" aria-atomic="true"></div>
   <script src="app.js"></script>
 </body>
 </html>`;

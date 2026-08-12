@@ -191,13 +191,13 @@ test("skill and browser complete one isolated product loop from empty through ar
 
   await page.getByLabel("Add Comment", { exact: true }).fill(BROWSER_COMMENT);
   await page.locator("form[data-form='comment']").getByRole("button", { name: "Add Comment", exact: true }).click();
-  await expect(page.getByText("Comment added", { exact: true })).toBeVisible();
+  await expect(page.locator("#toast-region").getByText("Comment added", { exact: true })).toBeVisible();
   await expect(page.getByText(BROWSER_COMMENT, { exact: true })).toBeVisible();
 
   await page.getByRole("button", { name: "Move…", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Move Card", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Move to Doing", exact: true }).click();
-  await expect(page.getByText("Card moved", { exact: true })).toBeVisible();
+  await expect(page.locator("#toast-region").getByText("Card moved", { exact: true })).toBeVisible();
   await expect.poll(async () => {
     const stored = await readSeededProject(harness!, projectId);
     return stored.cards.find((card) => card.id === cardId)?.columnId;
@@ -220,7 +220,7 @@ test("skill and browser complete one isolated product loop from empty through ar
 
   await page.getByRole("button", { name: "Actions", exact: true }).click();
   await page.getByRole("button", { name: "Refresh", exact: true }).click();
-  await expect(page.getByText("Refresh complete", { exact: true })).toBeVisible();
+  await expect(page.locator("#toast-region").getByText("Refresh complete", { exact: true })).toBeVisible();
   await expect(page.getByLabel("Title", { exact: true })).toHaveValue(CARD_TITLE);
   await expect(page.getByText(SKILL_COMMENT, { exact: true })).toBeVisible();
   await page.getByRole("tab", { name: "Activity", exact: true }).click();

@@ -956,23 +956,26 @@ h3 {
 }
 
 .toast {
-  background: var(--jk-color-surface);
-  border: 1px solid var(--jk-color-border);
-  border-radius: var(--jk-radius-control);
-  color: var(--jk-color-text);
-  max-inline-size: min(24rem, calc(100vw - calc(var(--jk-space-4) * 2)));
+  max-inline-size: min(24rem, calc(100vw - 2rem));
   overflow-wrap: anywhere;
-  padding: var(--jk-space-3);
 }
 
-.toast-success {
-  border-color: var(--jk-color-success);
+.toast strong {
+  display: block;
 }
 
-.toast-error,
+.toast p {
+  margin-block: var(--jk-space-2) 0;
+}
+
 .noscript-message {
   border-color: var(--jk-color-risk);
   color: var(--jk-color-risk);
+}
+
+body[data-state="selected"] .toast-region {
+  inset-inline-end: calc(clamp(34rem, 42vw, 46rem) + 1rem);
+  inset-inline-start: 1rem;
 }
 
 .noscript-message {
@@ -1223,6 +1226,11 @@ h3 {
   .toast-region {
     inset-block-end: calc(var(--jk-space-3) + env(safe-area-inset-bottom));
     inset-inline: var(--jk-space-3);
+  }
+
+  body[data-state="selected"] .toast-region {
+    inset-block-end: auto;
+    inset-block-start: calc(4.75rem + env(safe-area-inset-top));
   }
 
   .toast {
@@ -1540,6 +1548,12 @@ h3 {
   padding: calc(var(--jk-space-4) * 1.5) var(--jk-space-4) var(--jk-space-4);
 }
 
+.draft-retained-note {
+  display: grid;
+  gap: var(--jk-space-2);
+  margin: 0;
+}
+
 .card-inspector .surface-field {
   gap: 0;
 }
@@ -1768,6 +1782,12 @@ h3 {
     border-radius: 0;
     inline-size: 100%;
     inset: 0;
+  }
+
+  body[data-state="selected"] .toast-region {
+    inset-block-end: auto;
+    inset-block-start: calc(4.75rem + env(safe-area-inset-top));
+    inset-inline: 0.75rem;
   }
 }
 
