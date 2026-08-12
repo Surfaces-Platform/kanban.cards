@@ -33,7 +33,7 @@ The client still has four primary surfaces: access-key sign-in, Project selectio
 - The header contains product identity, the compact Project selector, and an avatar trigger. The avatar opens a plain panel containing the session username and Sign out.
 - The client does not repeat the active Project name, description, recency, environment label, or routine workspace-opened receipt in a second context bar.
 - New Project, New Card, Edit Project, and Refresh live in one Actions panel at the top right of the Kanban surface.
-- Refresh preserves the active Project, selected Card, and valid draft when those resources still exist. Only an outcome that requires attention remains persistent on the surface.
+- Refresh preserves the active Project, selected Card, and valid draft when those resources still exist. Routine successful confirmations use the single transient notice region; only an outcome that requires attention remains persistent on the surface.
 - New Projects start with exactly three ordered Columns: Next, Doing, and Done.
 - Existing Projects are lossless. If the API returns additional Columns, the browser renders and edits every stored Column in order and preserves stable Column ids and Card placement. It must never silently truncate existing Columns to the three new-Project defaults.
 - Project editing covers name, description, and one individually labeled field for every stored Column.
@@ -56,9 +56,9 @@ The client still has four primary surfaces: access-key sign-in, Project selectio
 - Movement reserves the global mutation lock, waits for serialized blur autosaves, and proceeds only after pending Card changes save successfully. It sends only `columnId` with the latest Card version. A failed or invalid autosave keeps the draft visible and blocks movement; a move-time `409` or `412` retains the requested destination and offers destination-specific Retry or Cancel after loading the latest Card. Conflict recovery stays on the Card tab and the retry must not overwrite title or Body.
 - Comments are the primary Card context immediately after the editor. Their heading has no count or eyebrow, and an empty list adds no explanatory sentence or attribution disclaimer.
 - Activity is a separate top-level tab filtered to the selected Card. Entries show the change and time without channel or caller-label explanation.
-- Successful create, edit, move, or Comment updates the visible Card, its board summary or placement, counts, and Card-specific Activity before a secondary receipt appears.
+- Successful create, edit, move, or Comment updates the visible Card, its board summary or placement, counts, and Card-specific Activity before one secondary transient confirmation appears. The latest confirmation replaces the prior one, does not take focus, and clears after approximately five seconds.
 - A successful write and its follow-up Refresh are separate outcomes. If the write commits but Refresh fails, the returned resource remains visibly applied and the UI says Refresh is incomplete; it must not report that the write failed or repeat the write to reconcile.
-- Unsaved drafts are retained per Card across Card switching, Project switching, and Close until blur autosave is confirmed or the user explicitly discards the draft.
+- Unsaved drafts are retained per Card across Card switching, Project switching, and Close until blur autosave is confirmed or the user explicitly discards the draft. Close acknowledges retention in the transient notice region; the affected board Card keeps a visible `Draft retained` cue after that notice expires, and reopening places the recovery note inline with the restored fields rather than in a top-of-surface banner.
 - Returning every field to its stored value deletes an obsolete retained draft. A successful blur save or explicit Discard also clears the relevant draft.
 - Adding a Comment must not replace an unsaved title, body, or Column draft.
 - Blur saves are serialized per Card so rapid Title and Body changes use the latest returned version. Mutations that depend on Card version wait for pending blur saves.
@@ -71,7 +71,7 @@ The client still has four primary surfaces: access-key sign-in, Project selectio
 - The access key is submitted once to `POST /api/session`.
 - The browser relies on the resulting secure, HttpOnly cookie.
 - The access key must never be stored in local storage, session storage, markup, logs, or a client global.
-- Logging out calls `DELETE /api/session` and clears pending and retained drafts, Card fields, selected Card, mobile Column context, receipts, focus-return state, and pending client operations.
+- Logging out calls `DELETE /api/session` and clears pending and retained drafts, Card fields, selected Card, mobile Column context, receipts, transient-confirmation content and timers, focus-return state, and pending client operations.
 - Sign out displays a persistent textual completion status and focuses an empty owner-key field.
 - Re-authentication must not restore a pre-signout draft or selection.
 - An API `401` after authentication applies the same private-state clearing behavior as Sign out before returning to sign-in.
@@ -92,7 +92,7 @@ Every control uses `.form-control`; selects also use `.select-control`. Fallback
 - Production imports the pinned JudgmentKit `judgmentkit_default` Workbench source from `judgmentkit.css` before application styles.
 - `judgmentkit.css` is the only client stylesheet allowed to declare `--jk-*` tokens. `styles.css` consumes those canonical roles and must not redeclare them or create local lookalike tokens.
 - Application styles must not introduce literal colors, literal shadows, local or remote fonts, external assets, or unknown `--jk-*` roles. System and forced-color keywords remain valid where the platform requires them.
-- Dynamic loading, Refresh, create progress, failure, stale recovery, archive, Undo, and Sign out are programmatic status messages. Routine blur-save success is announced without adding persistent explanatory chrome.
+- Dynamic loading, Refresh, create progress, failure, stale recovery, archive, Undo, and Sign out are programmatic status messages. Routine successful Project, Card, Move, Comment, restore, discard, Refresh, and draft-retention confirmations use the single polite, atomic `#toast-region` without moving focus; each composes the JudgmentKit receipt-status anatomy and its non-color marker, the latest replaces the prior confirmation, and it clears after approximately five seconds. The changed resource remains the primary confirmation. A transient receipt must not cover Archive or sticky Card controls. Routine blur-save success is announced without adding visible persistent chrome. Errors, warnings, unconfirmed outcomes, conflicts, archived-draft recovery, archive Undo, and Sign out remain in their affected surface until resolved or superseded.
 - Visible controls have accessible names. Fields have programmatic labels, and validation errors use `aria-invalid` plus referenced error text.
 - Keyboard focus follows visible task order, remains visible, restores after Close, Back, Move Cancel, or Escape, and is not covered by sticky actions or the responsive Move disclosure.
 - Long Project names, Column names, Card titles, descriptions, Markdown prose and links, Comments, and Activity wrap without covering controls or creating document-width overflow. Fenced code scrolls within its own block.

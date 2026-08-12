@@ -247,6 +247,55 @@ function checkApplicationSource(app: SourceFile, violations: Violation[]): void 
     }
   });
 
+  const confirmation = functionSection(app.source, "showConfirmation");
+  const confirmationMarkers = [
+    "clearConfirmation()",
+    'toast.className = "toast jk-status"',
+    'toast.dataset.kind = "receipt"',
+    'marker.className = "jk-status-marker"',
+    "region.replaceChildren(toast)",
+    "window.setTimeout",
+    "CONFIRMATION_DURATION_MS"
+  ];
+  if (!confirmation) {
+    violations.push({
+      file: app.file,
+      line: 1,
+      reason: "routine success needs one compact transient confirmation boundary",
+      code: "function showConfirmation(...)"
+    });
+  } else {
+    for (const marker of confirmationMarkers) {
+      if (!confirmation.includes(marker)) {
+        addViolation(
+          violations,
+          app.file,
+          app.source,
+          app.source.indexOf(confirmation),
+          "transient confirmation must replace prior content and clear on one bounded timer",
+          marker
+        );
+      }
+    }
+    if (/\.focus\s*\(/.test(confirmation)) {
+      addViolation(
+        violations,
+        app.file,
+        app.source,
+        app.source.indexOf(confirmation),
+        "routine confirmation must not move focus"
+      );
+    }
+  }
+  if (!/const\s+CONFIRMATION_DURATION_MS\s*=\s*5_000\s*;/.test(app.source)) {
+    violations.push({
+      file: app.file,
+      line: 1,
+      reason: "routine confirmation must use the reviewed approximately five-second lifetime",
+      code: "const CONFIRMATION_DURATION_MS = 5_000;"
+    });
+  }
+
   firstMatchViolation(
     violations,
     app,
@@ -577,6 +626,26 @@ function checkMarkdownSource(markdown: SourceFile, violations: Violation[]): voi
 function checkStaticShell(html: SourceFile, violations: Violation[]): void {
   if (!html.source.includes('id="app"')) {
     violations.push({ file: html.file, line: 1, reason: "static app shell is missing", code: "" });
+  }
+  const toastRegion = /<div\b[^>]*\bid=["']toast-region["'][^>]*>/i.exec(html.source)?.[0] || "";
+  for (const attribute of ['class="toast-region"', 'role="status"', 'aria-live="polite"', 'aria-atomic="true"']) {
+    if (!toastRegion.includes(attribute)) {
+      violations.push({
+        file: html.file,
+        line: toastRegion ? lineNumber(html.source, html.source.indexOf(toastRegion)) : 1,
+        reason: "static shell must expose one reusable polite atomic transient confirmation region",
+        code: attribute
+      });
+    }
+  }
+  if (/\btabindex\s*=/.test(toastRegion)) {
+    addViolation(
+      violations,
+      html.file,
+      html.source,
+      html.source.indexOf(toastRegion),
+      "routine confirmation region must not become a focus target"
+    );
   }
   firstMatchViolation(
     violations,

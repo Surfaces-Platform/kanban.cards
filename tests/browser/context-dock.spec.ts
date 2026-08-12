@@ -1,6 +1,6 @@
 /// <reference lib="dom" />
 
-import { expect, test } from "@playwright/test";
+import { expect, test, type Locator } from "@playwright/test";
 
 import {
   assertChromiumInstalled,
@@ -21,6 +21,17 @@ import {
 
 let harness: BrowserHarness;
 let seed: SeededWorkspace;
+
+async function expectNoOverlap(toast: Locator, control: Locator, context: string): Promise<void> {
+  const [toastBox, controlBox] = await Promise.all([toast.boundingBox(), control.boundingBox()]);
+  expect(toastBox, `${context}: visible toast geometry`).not.toBeNull();
+  expect(controlBox, `${context}: visible control geometry`).not.toBeNull();
+  const overlaps = toastBox!.x < controlBox!.x + controlBox!.width
+    && toastBox!.x + toastBox!.width > controlBox!.x
+    && toastBox!.y < controlBox!.y + controlBox!.height
+    && toastBox!.y + toastBox!.height > controlBox!.y;
+  expect(overlaps, `${context}: toast must not cover ${await control.getAttribute("aria-label") || await control.textContent()}`).toBe(false);
+}
 
 test.beforeAll(async () => {
   await assertChromiumInstalled();
@@ -124,7 +135,7 @@ test("Markdown source survives Preview, Create, autosave, Card views, and API re
   await expect(page.getByRole("tabpanel", { name: "Preview", exact: true }).getByRole("heading", { name: "Lifecycle" })).toBeVisible();
   await expect(description).toHaveValue(createdSource);
   await page.getByRole("complementary").getByRole("button", { name: "Create Card", exact: true }).click();
-  await expect(page.getByText("Card created", { exact: true })).toBeVisible();
+  await expect(page.locator("#toast-region").getByText("Card created", { exact: true })).toBeVisible();
 
   let stored = await readSeededProject(harness, seed.projectId);
   const created = stored.cards.find((card) => card.title === title);
@@ -161,6 +172,60 @@ test("Markdown source survives Preview, Create, autosave, Card views, and API re
   await expect(writeTab).toHaveAttribute("aria-selected", "true");
   await page.keyboard.press("Tab");
   await expect(page.getByLabel("Description", { exact: true })).toBeFocused();
+  expectNoUnexpectedBrowserErrors(errors);
+});
+
+test("retained drafts leave Card-local recovery cues instead of a workspace banner", async ({ page }) => {
+  const title = "Retained draft confirmation proof";
+  const storedSource = "Stored source remains authoritative.";
+  await postHarnessResource(
+    harness,
+    `/projects/${seed.projectId}/cards`,
+    { title, body: storedSource, columnId: "next" },
+    "browser:retained-draft-confirmation"
+  );
+  const errors = monitorBrowserErrors(page);
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await authenticate(page, harness);
+  await page.clock.install();
+
+  await openCard(page, title);
+  const draftSource = "Unsaved source returns when this Card reopens.";
+  const description = page.getByLabel("Description", { exact: true });
+  const closeCard = page.getByRole("button", { name: "Close Card and return to Next" });
+  await closeCard.focus();
+  await description.evaluate((control, value) => {
+    (control as HTMLTextAreaElement).value = value;
+    control.dispatchEvent(new Event("input", { bubbles: true }));
+  }, draftSource);
+  await closeCard.click();
+
+  const toastRegion = page.locator("#toast-region");
+  const draftCard = cardButton(page, title);
+  await expect(toastRegion.getByText("Draft retained", { exact: true })).toBeVisible();
+  await expect(page.locator(".project-status-wrap").getByText("Draft retained", { exact: true })).toHaveCount(0);
+  await expect(draftCard.locator(".card-draft-state")).toHaveText("Draft retained");
+
+  await page.clock.fastForward(5_100);
+  await expect(toastRegion.locator(".toast")).toHaveCount(0);
+  await expect(draftCard.locator(".card-draft-state")).toHaveText("Draft retained");
+
+  await draftCard.click();
+  await expect(page.locator(".draft-retained-note").getByText("Draft retained", { exact: true })).toBeVisible();
+  await expect(page.locator(".card-status")).toHaveCount(0);
+  await expect(page.getByLabel("Description", { exact: true })).toHaveValue(draftSource);
+
+  const savedSource = "Autosaved source clears the retained-draft cue.";
+  await page.getByLabel("Description", { exact: true }).fill(savedSource);
+  const titleField = page.getByLabel("Title", { exact: true });
+  await titleField.focus();
+  await expect.poll(async () => {
+    const stored = await readSeededProject(harness, seed.projectId);
+    return stored.cards.find((card) => card.title === title)?.body;
+  }).toBe(savedSource);
+  await expect(draftCard.locator(".card-draft-state")).toHaveCount(0);
+  await expect(page.locator(".draft-retained-note")).toHaveCount(0);
+  await expect(titleField).toBeFocused();
   expectNoUnexpectedBrowserErrors(errors);
 });
 
@@ -301,8 +366,8 @@ test("desktop exposes an explicit Move chooser and a visible new-Card destinatio
   await expect(page.getByText("Moving Card", { exact: true })).toBeVisible();
   releaseMove();
 
-  await expect(page.getByText("Card moved", { exact: true })).toBeVisible();
-  await expect(page.getByText(`${seed.cards.desktopDraft.title} moved to Doing.`, { exact: true })).toBeVisible();
+  await expect(page.locator("#toast-region").getByText("Card moved", { exact: true })).toBeVisible();
+  await expect(page.locator("#toast-region").getByText(`${seed.cards.desktopDraft.title} moved to Doing.`, { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Close Card and return to Doing" })).toBeVisible();
   await expect.poll(async () => {
     const stored = await readSeededProject(harness, seed.projectId);
@@ -325,10 +390,56 @@ test("desktop exposes an explicit Move chooser and a visible new-Card destinatio
   await createIn.selectOption("done");
   await page.getByLabel("Title", { exact: true }).fill("Explicit Done destination");
   await page.getByRole("complementary").getByRole("button", { name: "Create Card", exact: true }).click();
-  await expect(page.getByText("Card created", { exact: true })).toBeVisible();
+  await expect(page.locator("#toast-region").getByText("Card created", { exact: true })).toBeVisible();
   const stored = await readSeededProject(harness, seed.projectId);
   expect(stored.cards.find((card) => card.title === "Explicit Done destination")?.columnId).toBe("done");
   expectNoUnexpectedBrowserErrors(errors);
+});
+
+test("success confirmation never covers visible Card actions at desktop or narrow widths", async ({ page }) => {
+  const geometryHarness = await startBrowserHarness();
+  const errors = monitorBrowserErrors(page);
+  try {
+    const geometrySeed = await seedBrowserWorkspace(geometryHarness);
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await authenticate(page, geometryHarness);
+    await page.clock.install();
+    await openCard(page, geometrySeed.cards.archive.title);
+
+    await page.getByRole("button", { name: "Move…", exact: true }).click();
+    await page.getByRole("button", { name: "Move to Done", exact: true }).click();
+
+    const toast = page.locator("#toast-region .toast.jk-status[data-kind='receipt']");
+    const archive = page.getByRole("button", { name: "Archive", exact: true });
+    const move = page.getByRole("button", { name: "Move…", exact: true });
+    const close = page.getByRole("button", { name: "Close Card and return to Done", exact: true });
+    await expect(page.locator("#toast-region").getByText("Card moved", { exact: true })).toBeVisible();
+
+    await archive.scrollIntoViewIfNeeded();
+    for (const control of [archive, move, close]) await expect(control).toBeVisible();
+    await expectNoOverlap(toast, archive, "desktop Archive");
+    await expectNoOverlap(toast, move, "desktop sticky Move");
+    await expectNoOverlap(toast, close, "desktop sticky Close");
+
+    await page.setViewportSize({ width: 900, height: 900 });
+    await archive.scrollIntoViewIfNeeded();
+    await expectNoHorizontalOverflow(page, "900px Card confirmation geometry");
+    for (const control of [archive, move, close]) await expect(control).toBeVisible();
+    await expectNoOverlap(toast, archive, "900px Archive");
+    await expectNoOverlap(toast, move, "900px sticky Move");
+    await expectNoOverlap(toast, close, "900px sticky Close");
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await archive.scrollIntoViewIfNeeded();
+    await expectNoHorizontalOverflow(page, "390px Card confirmation geometry");
+    for (const control of [archive, move, close]) await expect(control).toBeVisible();
+    await expectNoOverlap(toast, archive, "390px Archive");
+    await expectNoOverlap(toast, move, "390px sticky Move");
+    await expectNoOverlap(toast, close, "390px sticky Close");
+    expectNoUnexpectedBrowserErrors(errors);
+  } finally {
+    await geometryHarness.stop();
+  }
 });
 
 test("desktop Move keeps every stored destination reachable in a many-Column Project", async ({ page }) => {
@@ -382,7 +493,7 @@ test("desktop Move keeps every stored destination reachable in a many-Column Pro
     await expect(lastDestination).toBeFocused();
     await expect(lastDestination).toBeVisible();
     await lastDestination.click();
-    await expect(page.getByText("Card moved", { exact: true })).toBeVisible();
+    await expect(page.locator("#toast-region").getByText("Card moved", { exact: true })).toBeVisible();
     const stored = await readSeededProject(manyColumnHarness, projectId);
     expect(stored.cards.find((card) => card.id === createdCard.card.id)?.columnId).toBe("column-18");
     expectNoUnexpectedBrowserErrors(errors);
@@ -510,7 +621,7 @@ test("390px mobile uses the same explicit Move command and returns to the destin
   await expectNoHorizontalOverflow(page, "390px Move Card choices");
 
   await page.getByRole("button", { name: "Move to Done", exact: true }).click();
-  await expect(page.getByText("Card moved", { exact: true })).toBeVisible();
+  await expect(page.locator("#toast-region").getByText("Card moved", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Close Card and return to Done" })).toBeVisible();
   await page.getByRole("button", { name: "Close Card and return to Done" }).click();
   await expect(page.locator("#mobile-column")).toHaveValue("done");
@@ -604,7 +715,7 @@ test("a stale move preserves only the requested destination for explicit retry o
   await expect(page.getByRole("button", { name: "Archive", exact: true })).toHaveCount(0);
 
   await page.getByRole("button", { name: "Retry move to Doing", exact: true }).click();
-  await expect(page.getByText("Card moved", { exact: true })).toBeVisible();
+  await expect(page.locator("#toast-region").getByText("Card moved", { exact: true })).toBeVisible();
   const stored = await readSeededProject(harness, seed.projectId);
   const moved = stored.cards.find((card) => card.id === seed.cards.moveConflict.id);
   expect(moved?.body).toBe("Stored API body must survive move retry");
@@ -717,7 +828,7 @@ test("stale edits expose only Retry or Discard and both paths preserve explicit 
   await expect(page.getByRole("heading", { name: "The stored Card changed" })).toBeFocused();
   await expect(page.getByLabel("Title", { exact: true })).toHaveValue("Retried browser draft wins");
   await page.getByRole("button", { name: "Retry with draft" }).click();
-  await expect(page.getByText("Card updated", { exact: true })).toBeVisible();
+  await expect(page.locator("#toast-region").getByText("Card updated", { exact: true })).toBeVisible();
   await expect(page.getByLabel("Title", { exact: true })).toHaveValue("Retried browser draft wins");
 
   const stored = await readSeededProject(harness, seed.projectId);
@@ -728,23 +839,66 @@ test("stale edits expose only Retry or Discard and both paths preserve explicit 
   expectNoUnexpectedBrowserErrors(errors, [/status of 409/i, /409 \(Conflict\)/i]);
 });
 
-test("Project create, edit, and switching restore focus without persistent progress copy", async ({ page }) => {
+test("Project confirmations replace, expire, and preserve focus while resource changes remain visible", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 1000 });
   const errors = monitorBrowserErrors(page);
   await authenticate(page, harness);
+  await page.clock.install();
+  const toastRegion = page.locator("#toast-region");
+  await expect(toastRegion).toHaveAttribute("role", "status");
+  await expect(toastRegion).toHaveAttribute("aria-live", "polite");
+  await expect(toastRegion).toHaveAttribute("aria-atomic", "true");
 
   await page.getByRole("button", { name: "Actions", exact: true }).click();
   await page.getByRole("button", { name: "New Project", exact: true }).click();
   await page.getByLabel("Name", { exact: true }).fill("Browser focus Project");
   await page.getByRole("button", { name: "Save Project", exact: true }).click();
-  await expect(page.getByText("Project created", { exact: true })).toBeVisible();
+  await expect(toastRegion.getByText("Project created", { exact: true })).toBeVisible();
+  await expect(toastRegion.locator(".toast.jk-status[data-kind='receipt']")).toHaveCount(1);
+  await expect(page.getByLabel("Active Project").locator("option:checked")).toHaveText("Browser focus Project");
   await expect(page.getByLabel("Active Project")).toBeFocused();
 
   await page.getByRole("button", { name: "Actions", exact: true }).click();
   await page.getByRole("button", { name: "Edit Project", exact: true }).click();
   await page.getByLabel("Name", { exact: true }).fill("Browser focus Project updated");
   await page.getByRole("button", { name: "Save Project", exact: true }).click();
-  await expect(page.getByText("Project updated", { exact: true })).toBeVisible();
+  await expect(toastRegion.getByText("Project updated", { exact: true })).toBeVisible();
+  await expect(toastRegion.getByText("Project created", { exact: true })).toHaveCount(0);
+  await expect(toastRegion.locator(".toast.jk-status[data-kind='receipt']")).toHaveCount(1);
+  await expect(page.getByLabel("Active Project").locator("option:checked")).toHaveText("Browser focus Project updated");
+  await expect(page.getByLabel("Active Project")).toBeFocused();
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expectNoHorizontalOverflow(page, "390px transient Project confirmation");
+  const toastBox = await toastRegion.locator(".toast").boundingBox();
+  expect(toastBox).not.toBeNull();
+  expect(toastBox!.x).toBeGreaterThanOrEqual(-1);
+  expect(toastBox!.x + toastBox!.width).toBeLessThanOrEqual(391);
+  await expect(page.getByLabel("Active Project")).toBeFocused();
+
+  await page.clock.fastForward(4_900);
+  await expect(toastRegion.getByText("Project updated", { exact: true })).toBeVisible();
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.getByRole("button", { name: "Actions", exact: true }).click();
+  await page.getByRole("button", { name: "Edit Project", exact: true }).click();
+  await page.getByLabel("Name", { exact: true }).fill("");
+  await page.getByRole("button", { name: "Save Project", exact: true }).click();
+  const persistentError = page.locator("#project-editor-status");
+  await expect(persistentError.getByText("Project needs attention", { exact: true })).toBeVisible();
+  await expect(toastRegion.locator(".toast")).toHaveCount(0);
+  await expect(page.getByLabel("Name", { exact: true })).toBeFocused();
+  await page.clock.fastForward(200);
+  await page.clock.fastForward(5_000);
+  await expect(persistentError.getByText("Project needs attention", { exact: true })).toBeVisible();
+  await expect(toastRegion).toBeAttached();
+
+  await page.getByLabel("Name", { exact: true }).fill("Browser focus Project updated");
+  await page.getByRole("button", { name: "Save Project", exact: true }).click();
+  await expect(toastRegion.getByText("Project updated", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Active Project")).toBeFocused();
+  await page.clock.fastForward(5_100);
+  await expect(toastRegion.locator(".toast")).toHaveCount(0);
+  await expect(toastRegion).toBeAttached();
   await expect(page.getByLabel("Active Project")).toBeFocused();
 
   await page.getByLabel("Active Project").selectOption({ label: "Context Dock regression" });
@@ -758,7 +912,7 @@ test("Project create, edit, and switching restore focus without persistent progr
   await page.getByRole("button", { name: "New Card", exact: true }).click();
   await page.getByLabel("Title", { exact: true }).fill("Desktop defaults to first Column");
   await page.getByRole("complementary").getByRole("button", { name: "Create Card", exact: true }).click();
-  await expect(page.getByText("Card created", { exact: true })).toBeVisible();
+  await expect(toastRegion.getByText("Card created", { exact: true })).toBeVisible();
   const stored = await readSeededProject(harness, seed.projectId);
   expect(stored.cards.find((card) => card.title === "Desktop defaults to first Column")?.columnId).toBe("next");
   expectNoUnexpectedBrowserErrors(errors);
@@ -768,11 +922,15 @@ test("archive removes the active Card and Undo restores both resource and focus"
   await page.setViewportSize({ width: 1440, height: 1000 });
   const errors = monitorBrowserErrors(page);
   await authenticate(page, harness);
+  await page.clock.install();
 
   await openCard(page, seed.cards.archive.title);
   await page.getByRole("button", { name: "Archive", exact: true }).click();
   await expect(cardButton(page, seed.cards.archive.title)).toHaveCount(0);
   const undo = page.getByRole("button", { name: "Undo archive" });
+  await expect(undo).toBeVisible();
+  await expect(undo).toBeFocused();
+  await page.clock.fastForward(5_100);
   await expect(undo).toBeVisible();
   await expect(undo).toBeFocused();
 
@@ -788,6 +946,7 @@ test("sign-out clears rendered, cookie, and local Project data before reauthenti
   await page.setViewportSize({ width: 1440, height: 1000 });
   const errors = monitorBrowserErrors(page);
   await authenticate(page, harness);
+  await page.clock.install();
 
   await expect(page.getByLabel("Active Project")).toHaveValue(seed.projectId);
   await openCard(page, seed.cards.privacy.title);
@@ -799,6 +958,9 @@ test("sign-out clears rendered, cookie, and local Project data before reauthenti
   await expect(page.getByRole("heading", { name: "Open your workspace" })).toBeVisible();
   await expect(page.getByLabel("Owner key")).toBeFocused();
   await expect(page.getByText("Signed out", { exact: true })).toBeVisible();
+  await page.clock.fastForward(5_100);
+  await expect(page.getByText("Signed out", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Owner key")).toBeFocused();
   await expect(page.locator("body")).not.toContainText("Context Dock regression");
   await expect(page.locator("body")).not.toContainText(seed.cards.privacy.title);
   await expect(page.locator("body")).not.toContainText(seed.cards.privacy.body);
