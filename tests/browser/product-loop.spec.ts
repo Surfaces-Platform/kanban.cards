@@ -23,8 +23,8 @@ const CLIENT_PATH = path.resolve(
 );
 const PROJECT_NAME = "Product loop proof";
 const CARD_TITLE = "Reconcile the product loop";
-const CARD_BODY = "Created by the bundled skill from an isolated empty Project.";
-const BROWSER_BODY = "Edited in the browser before the work moved.";
+const CARD_BODY = "# Skill-created plan\n\nCreated by the bundled skill from an isolated empty Project.";
+const BROWSER_BODY = "## Browser update\n\n- Edited before the work moved\n- Preserved as exact Markdown source\n";
 const BROWSER_COMMENT = "Person verified the browser workflow.";
 const SKILL_COMMENT = "Skill reconciliation marker.";
 const EXTERNAL_KEY = "proof:product-loop:card";
@@ -165,19 +165,28 @@ test("skill and browser complete one isolated product loop from empty through ar
 
   const boardCard = page.locator("button.board-card").filter({ hasText: CARD_TITLE });
   await expect(boardCard).toBeVisible();
+  await expect(boardCard.locator(".card-summary")).toHaveText("Skill-created plan Created by the bundled skill from an isolated empty Project.");
   await boardCard.click();
   await expect(page.getByLabel("Title", { exact: true })).toHaveValue(CARD_TITLE);
+  await expect(page.getByLabel("Description", { exact: true })).toHaveValue(CARD_BODY);
+  await page.getByRole("tab", { name: "Preview", exact: true }).click();
+  await expect(page.getByRole("tabpanel", { name: "Preview", exact: true }).getByRole("heading", { name: "Skill-created plan" })).toBeVisible();
 
   await page.getByRole("tab", { name: "Activity", exact: true }).click();
   await expect(page.getByText(`Created card ${CARD_TITLE}.`, { exact: true })).toBeVisible();
   await page.getByRole("tab", { name: "Card", exact: true }).click();
+  await expect(page.getByRole("tab", { name: "Preview", exact: true })).toHaveAttribute("aria-selected", "true");
+  await page.getByRole("tab", { name: "Write", exact: true }).click();
 
-  await page.getByLabel("Body", { exact: true }).fill(BROWSER_BODY);
-  await page.getByRole("tab", { name: "Activity", exact: true }).click();
+  await page.getByLabel("Description", { exact: true }).fill(BROWSER_BODY);
+  await page.getByRole("tab", { name: "Preview", exact: true }).click();
+  await expect(page.getByRole("tabpanel", { name: "Preview", exact: true }).getByRole("heading", { name: "Browser update" })).toBeVisible();
+  await expect(page.getByRole("tabpanel", { name: "Preview", exact: true }).getByRole("listitem")).toHaveCount(2);
   await expect.poll(async () => {
     const stored = await readSeededProject(harness!, projectId);
     return stored.cards.find((card) => card.id === cardId)?.body;
   }).toBe(BROWSER_BODY);
+  await page.getByRole("tab", { name: "Activity", exact: true }).click();
   await page.getByRole("tab", { name: "Card", exact: true }).click();
 
   await page.getByLabel("Add Comment", { exact: true }).fill(BROWSER_COMMENT);

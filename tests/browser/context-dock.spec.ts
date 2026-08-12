@@ -76,7 +76,7 @@ test("desktop opens an adjacent Card inspector, autosaves on blur, and restores 
   await page.setViewportSize({ width: 1440, height: 1000 });
 
   const savedBody = "Stored desktop body — autosaved browser change";
-  await page.getByLabel("Body", { exact: true }).fill(savedBody);
+  await page.getByLabel("Description", { exact: true }).fill(savedBody);
   await page.getByRole("tab", { name: "Activity", exact: true }).click();
   await expect(page.getByRole("tab", { name: "Activity", exact: true })).toHaveAttribute("aria-selected", "true");
   await expect.poll(async () => {
@@ -88,7 +88,7 @@ test("desktop opens an adjacent Card inspector, autosaves on blur, and restores 
   await expect(cardButton(page, seed.cards.desktopDraft.title)).toBeFocused();
 
   await cardButton(page, seed.cards.desktopDraft.title).click();
-  await expect(page.getByLabel("Body", { exact: true })).toHaveValue(savedBody);
+  await expect(page.getByLabel("Description", { exact: true })).toHaveValue(savedBody);
   await page.getByRole("button", { name: "Close Card and return to Next" }).click();
   await expect(cardButton(page, seed.cards.desktopDraft.title)).toBeFocused();
 
@@ -98,6 +98,155 @@ test("desktop opens an adjacent Card inspector, autosaves on blur, and restores 
   await page.getByRole("button", { name: "Close Card and return to Next" }).click();
   await expect(cardButton(page, seed.overflowTitle)).toBeFocused();
   expectNoUnexpectedBrowserErrors(errors);
+});
+
+test("Markdown source survives Preview, Create, autosave, Card views, and API reads without duplicate writes", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  const errors = monitorBrowserErrors(page);
+  await authenticate(page, harness);
+
+  const title = "Markdown lifecycle proof";
+  const createdSource = "    indented code\n\n# Lifecycle\n\nLine with hard break  \nNext line\n";
+  const requests: Array<{ method: string; body: Record<string, unknown> }> = [];
+  page.on("request", (request) => {
+    const pathname = new URL(request.url()).pathname;
+    if (!pathname.startsWith(`/api/projects/${seed.projectId}/cards`)) return;
+    if (request.method() !== "POST" && request.method() !== "PATCH") return;
+    requests.push({ method: request.method(), body: request.postDataJSON() as Record<string, unknown> });
+  });
+
+  await page.getByRole("button", { name: "Actions", exact: true }).click();
+  await page.getByRole("button", { name: "New Card", exact: true }).click();
+  await page.getByLabel("Title", { exact: true }).fill(title);
+  const description = page.getByLabel("Description", { exact: true });
+  await description.fill(createdSource);
+  await page.getByRole("tab", { name: "Preview", exact: true }).click();
+  await expect(page.getByRole("tabpanel", { name: "Preview", exact: true }).getByRole("heading", { name: "Lifecycle" })).toBeVisible();
+  await expect(description).toHaveValue(createdSource);
+  await page.getByRole("complementary").getByRole("button", { name: "Create Card", exact: true }).click();
+  await expect(page.getByText("Card created", { exact: true })).toBeVisible();
+
+  let stored = await readSeededProject(harness, seed.projectId);
+  const created = stored.cards.find((card) => card.title === title);
+  expect(created?.body).toBe(createdSource);
+  expect(requests.filter((request) => request.method === "POST" && request.body.title === title)).toHaveLength(1);
+
+  await page.getByRole("tab", { name: "Write", exact: true }).click();
+  await expect(description).toHaveValue(createdSource);
+  const updatedSource = `${createdSource}\n## Updated\n\nTrailing source space  \n`;
+  await description.fill(updatedSource);
+  await page.getByRole("tab", { name: "Preview", exact: true }).click();
+  await expect.poll(async () => {
+    stored = await readSeededProject(harness, seed.projectId);
+    return stored.cards.find((card) => card.id === created?.id)?.body;
+  }).toBe(updatedSource);
+  expect(requests.filter((request) => request.method === "PATCH" && request.body.body === updatedSource)).toHaveLength(1);
+  await expect(page.getByText("Draft retained", { exact: true })).toHaveCount(0);
+
+  await page.getByRole("tab", { name: "Activity", exact: true }).click();
+  await page.getByRole("tab", { name: "Card", exact: true }).click();
+  await expect(page.getByRole("tab", { name: "Preview", exact: true })).toHaveAttribute("aria-selected", "true");
+  await page.getByRole("button", { name: "Close Card and return to Next" }).click();
+  await cardButton(page, title).click();
+  const writeTab = page.getByRole("tab", { name: "Write", exact: true });
+  const previewTab = page.getByRole("tab", { name: "Preview", exact: true });
+  await expect(writeTab).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByLabel("Description", { exact: true })).toHaveValue(updatedSource);
+  await writeTab.focus();
+  await page.keyboard.press("End");
+  await expect(previewTab).toBeFocused();
+  await expect(previewTab).toHaveAttribute("aria-selected", "true");
+  await page.keyboard.press("ArrowLeft");
+  await expect(writeTab).toBeFocused();
+  await expect(writeTab).toHaveAttribute("aria-selected", "true");
+  await page.keyboard.press("Tab");
+  await expect(page.getByLabel("Description", { exact: true })).toBeFocused();
+  expectNoUnexpectedBrowserErrors(errors);
+});
+
+test("Markdown summaries and recovery states stay plain and contained at narrow widths", async ({ page }) => {
+  const title = "Markdown edge-state proof";
+  const initialSource = "# Readable summary\n\n**Bold** [Safe link](https://example.com) and `code`.";
+  const created = await postHarnessResource<{ card: { id: string } }>(
+    harness,
+    `/projects/${seed.projectId}/cards`,
+    { title, body: initialSource, columnId: "next" },
+    "browser:markdown-edge-state"
+  );
+  const errors = monitorBrowserErrors(page);
+  const externalRequests: string[] = [];
+  page.on("request", (request) => {
+    if (new URL(request.url()).hostname === "example.com") externalRequests.push(request.url());
+  });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await authenticate(page, harness);
+
+  const summary = cardButton(page, title).locator(".card-summary");
+  await expect(summary).toHaveText("Readable summary Bold Safe link and code.");
+  expect(await summary.textContent()).not.toMatch(/[#*`\[\]]/);
+
+  await openCard(page, title);
+  const description = page.getByLabel("Description", { exact: true });
+  await description.fill("");
+  await page.getByRole("tab", { name: "Preview", exact: true }).click();
+  await expect(page.getByText("Nothing to preview.", { exact: true })).toBeVisible();
+
+  const longToken = "UnbrokenMarkdownCodeToken".repeat(24);
+  const longUrl = `https://example.com/${"long-path-segment".repeat(24)}`;
+  const longSource = `# Wide content\n\n*Emphasis* and **strong text**\n\n- Unordered item\n\n1. Ordered item\n\n> Quoted context\n\n[Long destination](${longUrl})\n\n[Unsafe script](javascript:alert(1))\n\n[Unsafe data](data:text/html,unsafe)\n\nInline \`code\`\n\n\`\`\`text\n${longToken}\n\`\`\`\n\n---\n\n![remote image](${longUrl}.png)\n\n<script>window.__markdownExecuted = true</script>`;
+  await page.getByRole("tab", { name: "Write", exact: true }).click();
+  await description.fill(longSource);
+  await page.getByRole("tab", { name: "Preview", exact: true }).click();
+  const safeLink = page.getByRole("link", { name: "Long destination (opens in new tab)", exact: true });
+  await expect(safeLink).toHaveAttribute("rel", "noopener noreferrer");
+  await expect(safeLink).toHaveAttribute("target", "_blank");
+  await expect(page.locator("#description-preview-panel a")).toHaveCount(1);
+  await expect(page.getByText("Unsafe script", { exact: true })).toBeVisible();
+  await expect(page.getByText("Unsafe data", { exact: true })).toBeVisible();
+  await expect(page.locator("#description-preview-panel strong")).toHaveText("strong text");
+  await expect(page.locator("#description-preview-panel em")).toHaveText("Emphasis");
+  await expect(page.locator("#description-preview-panel blockquote")).toContainText("Quoted context");
+  await expect(page.locator("#description-preview-panel ul li")).toHaveText("Unordered item");
+  await expect(page.locator("#description-preview-panel ol li")).toHaveText("Ordered item");
+  await expect(page.locator("#description-preview-panel hr")).toHaveCount(1);
+  await expect(page.locator("#description-preview-panel img")).toHaveCount(0);
+  await expect(page.locator("#description-preview-panel script, #description-preview-panel style, #description-preview-panel iframe")).toHaveCount(0);
+  await expect(page.getByText("Image not shown: remote image", { exact: true })).toBeVisible();
+  expect(await page.evaluate(() => (window as Window & { __markdownExecuted?: boolean }).__markdownExecuted)).toBeUndefined();
+  expect(externalRequests).toEqual([]);
+  await expect.poll(async () => {
+    const stored = await readSeededProject(harness, seed.projectId);
+    return stored.cards.find((card) => card.id === created.card.id)?.body;
+  }).toBe(longSource);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expectNoHorizontalOverflow(page, "390px Markdown Preview");
+  await page.setViewportSize({ width: 320, height: 720 });
+  await expectNoHorizontalOverflow(page, "320px Markdown Preview");
+  const codeMetrics = await page.locator("#description-preview-panel pre").evaluate((element) => ({
+    clientWidth: element.clientWidth,
+    overflowX: window.getComputedStyle(element).overflowX,
+    scrollWidth: element.scrollWidth
+  }));
+  expect(codeMetrics.overflowX).toBe("auto");
+  expect(codeMetrics.scrollWidth).toBeGreaterThan(codeMetrics.clientWidth);
+
+  await page.getByRole("tab", { name: "Write", exact: true }).click();
+  const draftSource = "# Browser draft\n\n<script>draft must remain source</script>";
+  await description.fill(draftSource);
+  const beforeConflict = await readSeededProject(harness, seed.projectId);
+  const current = beforeConflict.cards.find((card) => card.id === created.card.id)!;
+  const storedSource = `# Stored source\n\n<img src="${longUrl}.png" onerror="alert(1)">`;
+  await updateSeededCard(harness, seed.projectId, current.id, current.version, { body: storedSource });
+  await page.getByRole("tab", { name: "Activity", exact: true }).click();
+
+  await expect(page.getByRole("heading", { name: "The stored Card changed" })).toBeVisible();
+  await expect(page.getByLabel("Description", { exact: true })).toHaveValue(draftSource);
+  await expect(page.getByRole("tab", { name: "Preview", exact: true })).toBeDisabled();
+  await expect(page.locator(".stored-change")).toContainText(storedSource);
+  await expect(page.locator(".stored-change img, .stored-change script, .stored-change h1")).toHaveCount(0);
+  await expectNoHorizontalOverflow(page, "320px Markdown stale recovery");
+  expectNoUnexpectedBrowserErrors(errors, [/status of 409/i, /409 \(Conflict\)/i]);
 });
 
 test("desktop exposes an explicit Move chooser and a visible new-Card destination", async ({ page }) => {
@@ -125,7 +274,7 @@ test("desktop exposes an explicit Move chooser and a visible new-Card destinatio
   });
 
   const sequencedBody = "Body autosave must commit before the explicit move";
-  await page.getByLabel("Body", { exact: true }).fill(sequencedBody);
+  await page.getByLabel("Description", { exact: true }).fill(sequencedBody);
   await move.click();
   await expect(move).toHaveAttribute("aria-expanded", "true");
   await expect(page.getByRole("heading", { name: "Move Card", exact: true })).toBeVisible();
@@ -253,7 +402,8 @@ test("Move stays blocked when a pending Card autosave fails", async ({ page }) =
   const autosaveReached = new Promise<void>((resolve) => { autosaveReachedResolve = resolve; });
   const autosaveGate = new Promise<void>((resolve) => { releaseAutosave = resolve; });
   let movePatchCount = 0;
-  await page.route(`**/api/projects/${seed.projectId}/cards/${seed.cards.privacy.id}`, async (route) => {
+  const autosaveRoute = `**/api/projects/${seed.projectId}/cards/${seed.cards.privacy.id}`;
+  await page.route(autosaveRoute, async (route) => {
     if (route.request().method() !== "PATCH") return route.continue();
     const body = route.request().postDataJSON() as Record<string, unknown>;
     if (body.columnId) {
@@ -271,7 +421,7 @@ test("Move stays blocked when a pending Card autosave fails", async ({ page }) =
   });
 
   const unsavedBody = "This retained draft must not move before it saves";
-  await page.getByLabel("Body", { exact: true }).fill(unsavedBody);
+  await page.getByLabel("Description", { exact: true }).fill(unsavedBody);
   await page.getByRole("button", { name: "Move…", exact: true }).click();
   await autosaveReached;
   await page.getByRole("button", { name: "Move to Doing", exact: true }).click();
@@ -283,13 +433,28 @@ test("Move stays blocked when a pending Card autosave fails", async ({ page }) =
   await expect(page.getByText(/Deterministic pending autosave failure/)).toBeVisible();
   await expect(page.locator("body")).toHaveAttribute("data-state", "selected");
   await expect(page.getByLabel("Title", { exact: true })).toBeFocused();
-  await expect(page.getByLabel("Body", { exact: true })).toHaveValue(unsavedBody);
+  await expect(page.getByLabel("Description", { exact: true })).toHaveValue(unsavedBody);
   await expect(page.getByRole("button", { name: "Move…", exact: true })).toHaveAttribute("aria-expanded", "false");
   expect(movePatchCount).toBe(0);
   const stored = await readSeededProject(harness, seed.projectId);
   const unmoved = stored.cards.find((card) => card.id === seed.cards.privacy.id);
   expect(unmoved?.body).toBe(seed.cards.privacy.body);
   expect(unmoved?.columnId).toBe("next");
+
+  await page.unroute(autosaveRoute);
+  const recoveredBody = `${unsavedBody} after recovery`;
+  await page.getByLabel("Description", { exact: true }).fill(recoveredBody);
+  await page.getByLabel("Title", { exact: true }).focus();
+  await expect.poll(async () => {
+    const recovered = await readSeededProject(harness, seed.projectId);
+    return recovered.cards.find((card) => card.id === seed.cards.privacy.id)?.body;
+  }).toBe(recoveredBody);
+  await expect(page.getByText("Changes not saved", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("tab", { name: "Preview", exact: true })).toBeEnabled();
+  await expect(page.getByLabel("Title", { exact: true })).toBeFocused();
+  const afterRecovery = await readSeededProject(harness, seed.projectId);
+  const recovered = afterRecovery.cards.find((card) => card.id === seed.cards.privacy.id)!;
+  await updateSeededCard(harness, seed.projectId, recovered.id, recovered.version, { body: seed.cards.privacy.body });
   expectNoUnexpectedBrowserErrors(errors, [/503/]);
 });
 
@@ -309,14 +474,14 @@ test("390px mobile presents a full-height Card view, autosaves on blur, and rest
   await expect(page.locator("dialog, [role='dialog']")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Close Card and return to Next" })).toBeVisible();
   const mobileBody = "Stored mobile body — autosaved on blur";
-  await page.getByLabel("Body", { exact: true }).fill(mobileBody);
+  await page.getByLabel("Description", { exact: true }).fill(mobileBody);
   await page.getByRole("tab", { name: "Activity", exact: true }).click();
   await expect.poll(async () => {
     const stored = await readSeededProject(harness, seed.projectId);
     return stored.cards.find((card) => card.id === seed.cards.mobileAutosave.id)?.body;
   }).toBe(mobileBody);
   await page.getByRole("tab", { name: "Card", exact: true }).click();
-  await expect(page.getByLabel("Body", { exact: true })).toHaveValue(mobileBody);
+  await expect(page.getByLabel("Description", { exact: true })).toHaveValue(mobileBody);
   await expectNoHorizontalOverflow(page, "390px mobile Card view");
 
   await page.getByRole("button", { name: "Close Card and return to Next" }).click();
@@ -644,7 +809,7 @@ test("sign-out clears rendered, cookie, and local Project data before reauthenti
   await page.getByRole("button", { name: "Open workspace" }).click();
   await expect(page.getByRole("heading", { name: "Context Dock regression" })).toBeVisible();
   await openCard(page, seed.cards.privacy.title);
-  await expect(page.getByLabel("Body", { exact: true })).toHaveValue(seed.cards.privacy.body);
+  await expect(page.getByLabel("Description", { exact: true })).toHaveValue(seed.cards.privacy.body);
   // Chromium can classify a successful bodyless 204 DELETE as aborted; cookie and privacy assertions gate the outcome above.
   expectNoUnexpectedBrowserErrors(errors, [/DELETE .*\/api\/session: net::ERR_ABORTED/i]);
 });

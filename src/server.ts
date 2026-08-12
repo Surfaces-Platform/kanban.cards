@@ -276,7 +276,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
         id: makeId("card"),
         ...(externalKey ? { externalKey } : {}),
         title: requiredString(body.title, "Card title"),
-        body: optionalText(body.body),
+        body: cardBodyText(body.body),
         columnId,
         position: optionalPosition(body.position, nextCardPosition(project, columnId)),
         version: 1,
@@ -311,7 +311,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
         changed = true;
       }
       if (hasOwn(body, "body")) {
-        card.body = optionalText(body.body);
+        card.body = cardBodyText(body.body);
         changed = true;
       }
       if (hasOwn(body, "columnId")) {
@@ -645,6 +645,10 @@ function optionalString(value: unknown): string | undefined {
 
 function optionalText(value: unknown): string {
   return value === undefined || value === null ? "" : String(value).trim();
+}
+
+function cardBodyText(value: unknown): string {
+  return value === undefined || value === null ? "" : String(value).replace(/\r\n?/g, "\n");
 }
 
 function cleanLabel(value: unknown, fallback: string): string {

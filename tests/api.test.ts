@@ -142,9 +142,11 @@ test("one resource API supports idempotent plans, concurrency, comments, activit
     });
     assert.equal(keyConflict.status, 409);
 
+    const createdMarkdown = "    indented code\r\n\r\nLine with hard break  \r\nNext line\r\n";
+    const normalizedCreatedMarkdown = "    indented code\n\nLine with hard break  \nNext line\n";
     const cardBody = {
       title: "Simplify authentication",
-      body: "Use the owner credential.",
+      body: createdMarkdown,
       columnId: "inbox",
       externalKey: "recommendation:simplify-auth"
     };
@@ -157,6 +159,7 @@ test("one resource API supports idempotent plans, concurrency, comments, activit
     const cardPayload = await cardResponse.json() as any;
     const card = unwrap(cardPayload, "card");
     assert.equal(card.version, 1);
+    assert.equal(card.body, normalizedCreatedMarkdown);
 
     const cardReplayResponse = await fetch(`${baseUrl}/api/projects/${project.id}/cards`, {
       method: "POST",
@@ -172,7 +175,7 @@ test("one resource API supports idempotent plans, concurrency, comments, activit
       headers: { ...headers, "Content-Type": "application/json", "Idempotency-Key": "card:simplify-auth:retry" },
       body: JSON.stringify({
         title: "Simplify authentication",
-        body: "Use the owner credential.",
+        body: createdMarkdown,
         columnId: "inbox",
         externalKey: "recommendation:simplify-auth"
       })
@@ -190,6 +193,17 @@ test("one resource API supports idempotent plans, concurrency, comments, activit
     const moved = unwrap(await movedResponse.json(), "card");
     assert.equal(moved.columnId, "doing");
     assert.equal(moved.version, 2);
+
+    const updatedMarkdown = `${normalizedCreatedMarkdown}\n## Updated\n\nTrailing source space  \n`;
+    const markdownUpdateResponse = await fetch(`${baseUrl}/api/projects/${project.id}/cards/${card.id}`, {
+      method: "PATCH",
+      headers: { ...headers, "Content-Type": "application/json", "X-Kanban-Version": String(moved.version) },
+      body: JSON.stringify({ body: updatedMarkdown })
+    });
+    assert.equal(markdownUpdateResponse.status, 200);
+    const markdownUpdated = unwrap(await markdownUpdateResponse.json(), "card");
+    assert.equal(markdownUpdated.body, updatedMarkdown);
+    assert.equal(markdownUpdated.version, 3);
 
     const staleResponse = await fetch(`${baseUrl}/api/projects/${project.id}/cards/${card.id}`, {
       method: "PATCH",
@@ -221,7 +235,7 @@ test("one resource API supports idempotent plans, concurrency, comments, activit
     assert.equal(commentResponse.status, 201);
     const commentPayload = await commentResponse.json() as any;
     assert.equal(commentPayload.comment.body, "Implemented and verified the owner-token path.");
-    assert.deepEqual(commentPayload.card, { id: card.id, version: 3 });
+    assert.deepEqual(commentPayload.card, { id: card.id, version: 4 });
 
     const commentReplayResponse = await fetch(`${baseUrl}/api/projects/${project.id}/cards/${card.id}/comments`, {
       method: "POST",
@@ -234,7 +248,7 @@ test("one resource API supports idempotent plans, concurrency, comments, activit
 
     const storedState = JSON.parse(await fs.readFile(dataPath, "utf8"));
     const commentRecord = storedState.idempotencyRecords.find((record: any) => record.key === "comment:implemented");
-    assert.deepEqual(commentRecord.response.card, { id: card.id, version: 3 });
+    assert.deepEqual(commentRecord.response.card, { id: card.id, version: 4 });
 
     const archivedResponse = await fetch(`${baseUrl}/api/projects/${project.id}/cards/${card.id}`, {
       method: "PATCH",
@@ -267,6 +281,7 @@ test("one resource API supports idempotent plans, concurrency, comments, activit
     assert.equal(persisted.cards.length, 1);
     assert.equal(persisted.cards[0].comments.length, 1);
     assert.equal(persisted.cards[0].columnId, "doing");
+    assert.equal(persisted.cards[0].body, updatedMarkdown);
     assert.equal(path.basename(dataPath), "workspace.json");
   });
 });

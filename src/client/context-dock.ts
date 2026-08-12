@@ -1,3 +1,5 @@
+import { renderCardMarkdown } from "./markdown";
+
 declare global {
   interface Window {
     KANBAN_CARDS_API_BASE_URL?: string;
@@ -7,6 +9,7 @@ declare global {
 type Revision = string | number;
 type ProjectEditorMode = "create" | "edit" | null;
 type InspectorTab = "card" | "activity";
+type DescriptionView = "write" | "preview";
 type MutationKind = "sign-in" | "refresh" | "project" | "card" | "move" | "comment" | "archive" | "undo" | null;
 type StatusTone = "neutral" | "success" | "warning" | "error" | "receipt";
 
@@ -194,6 +197,8 @@ let pendingFocusRestore: FocusTarget | null = null;
 let pendingFocusId: string | null = null;
 let pendingScrollRestore: number | null = null;
 let inspectorTab: InspectorTab = "card";
+let descriptionView: DescriptionView = "write";
+let descriptionSelection: { start: number; end: number; direction: "forward" | "backward" | "none" } | null = null;
 let accountPanelOpen = false;
 let projectActionsOpen = false;
 let autosaveChain: Promise<void> = Promise.resolve();
@@ -412,7 +417,7 @@ function formatRecency(value: string): string {
 }
 
 function bodySummary(value: string): string {
-  const compact = value.replace(/\s+/g, " ").trim();
+  const compact = renderCardMarkdown(value).text;
   if (compact.length <= 116) return compact;
   return `${compact.slice(0, 113).trimEnd()}…`;
 }
@@ -493,6 +498,33 @@ function resetMoveContext(): void {
   moveConflict = null;
   movePanelOpen = false;
   moveDestinationId = "";
+}
+
+function resetDescriptionContext(): void {
+  descriptionView = "write";
+  descriptionSelection = null;
+}
+
+function captureDescriptionSelection(): void {
+  const textarea = document.querySelector<HTMLTextAreaElement>("#card-body-input");
+  if (!textarea) return;
+  descriptionSelection = {
+    start: textarea.selectionStart,
+    end: textarea.selectionEnd,
+    direction: textarea.selectionDirection || "none"
+  };
+}
+
+function restoreDescriptionSelection(): void {
+  if (descriptionView !== "write" || !descriptionSelection) return;
+  const textarea = document.querySelector<HTMLTextAreaElement>("#card-body-input");
+  if (!textarea) return;
+  const end = textarea.value.length;
+  textarea.setSelectionRange(
+    Math.min(descriptionSelection.start, end),
+    Math.min(descriptionSelection.end, end),
+    descriptionSelection.direction
+  );
 }
 
 function setWorkspaceMutationsDisabled(disabled: boolean, kind: MutationKind = null): void {
@@ -865,6 +897,8 @@ function renderCardInspector(project: Project): string {
   const staleMarkup = conflict && card ? `<section class="stale-review jk-status" data-kind="warning" aria-labelledby="stale-heading"><span class="jk-status-marker" aria-hidden="true">!</span><div><h3 id="stale-heading" tabindex="-1">${staleHeading}</h3><p>${staleGuidance}</p><dl class="stored-change"><div><dt>${storedLabel} state</dt><dd>${card.archivedAt ? "Archived" : "Active"}</dd></div><div><dt>${storedLabel} title</dt><dd>${escapeHtml(card.title)}</dd></div><div><dt>${storedLabel} Column</dt><dd>${escapeHtml(project.columns.find((candidate) => candidate.id === card.columnId)?.name || "Unknown Column")}</dd></div><div><dt>${storedLabel} body</dt><dd>${escapeHtml(card.body || "No body")}</dd></div></dl><div class="jk-actions">${latestConflictLoaded ? renderButton(retryLabel, "retry-save", { priority: "primary" }) : renderButton("Refresh latest", "refresh-project", { priority: "primary" })}${renderButton("Discard draft", "discard-draft")}</div></div></section>` : "";
   const moveConflictMarkup = card ? renderMoveConflict(project, card) : "";
   const recoveryActive = conflict || Boolean(moveConflictMarkup);
+  const previewBlocked = recoveryActive || Boolean(status && (status.tone === "error" || status.title.includes("outcome unconfirmed")));
+  if (previewBlocked) descriptionView = "write";
   const cardSelected = inspectorTab === "card" || !card;
   const tabs = `<div class="inspector-tabs" role="tablist" aria-label="Card views"><button id="card-tab" class="inspector-tab" type="button" role="tab" data-action="show-card-tab" aria-selected="${cardSelected ? "true" : "false"}" aria-controls="card-panel" tabindex="${cardSelected ? "0" : "-1"}"${disabledAttribute()}>Card</button>${card ? `<button id="activity-tab" class="inspector-tab" type="button" role="tab" data-action="show-activity-tab" aria-selected="${cardSelected ? "false" : "true"}" aria-controls="activity-panel" tabindex="${cardSelected ? "-1" : "0"}"${disabledAttribute(recoveryActive)}>Activity</button>` : ""}</div>`;
   const closeLabel = `Close Card and return to ${contextColumn?.name || "Column"}`;
@@ -886,10 +920,19 @@ function renderCardInspector(project: Project): string {
     placeholder: "Add details…",
     rows: 12,
     className: "surface-control card-body-control",
-    ariaLabel: "Body"
+    ariaLabel: "Description",
+    ariaDescribedBy: "card-description-help"
   });
+  const descriptionMarkdown = renderCardMarkdown(draft.body);
+  const descriptionTabs = `<div class="description-view-tabs" role="tablist" aria-label="Description view" data-tablist="description"><button id="description-write-tab" class="description-view-tab" type="button" role="tab" data-action="show-description-write" aria-selected="${descriptionView === "write" ? "true" : "false"}" aria-controls="description-write-panel" tabindex="${descriptionView === "write" ? "0" : "-1"}"${disabledAttribute()}>Write</button><button id="description-preview-tab" class="description-view-tab" type="button" role="tab" data-action="show-description-preview" aria-selected="${descriptionView === "preview" ? "true" : "false"}" aria-controls="description-preview-panel" tabindex="${descriptionView === "preview" ? "0" : "-1"}"${disabledAttribute(previewBlocked)}>Preview</button></div>`;
+  const writePanel = `<div id="description-write-panel" class="description-view-panel" role="tabpanel" aria-labelledby="description-write-tab"${descriptionView === "write" ? "" : " hidden"}>${bodyControl}</div>`;
+  const previewContent = descriptionMarkdown.empty
+    ? `<p class="markdown-preview-empty">Nothing to preview.</p>`
+    : `${descriptionMarkdown.failed ? `<p class="jk-error markdown-preview-error">Preview unavailable. Showing plain text.</p>` : ""}${descriptionMarkdown.html}`;
+  const previewPanel = `<div id="description-preview-panel" class="description-view-panel markdown-preview" role="tabpanel" aria-labelledby="description-preview-tab" tabindex="0"${descriptionView === "preview" ? "" : " hidden"}>${previewContent}</div>`;
+  const descriptionEditor = `<div class="jk-field surface-field card-body-field"><div class="description-field-header"><label for="card-body-input">Description</label>${descriptionTabs}</div><p class="jk-help" id="card-description-help">Markdown supports headings, lists, links, quotes, and code. HTML and images aren’t supported.</p>${writePanel}${previewPanel}</div>`;
   const createDestination = card ? "" : renderCreateDestination(project, draft);
-  const editor = `<form class="card-form surface-card-form" data-form="card" data-autosave="${card ? "true" : "false"}" data-card-id="${escapeHtml(card?.id || "")}" novalidate><div class="jk-field surface-field"><label class="jk-visually-hidden" for="card-title-input">Title</label>${titleControl}${titleError ? `<p class="jk-error" id="card-title-error">${escapeHtml(titleError)}</p>` : ""}</div><div class="jk-field surface-field card-body-field"><label class="jk-visually-hidden" for="card-body-input">Body</label>${bodyControl}</div>${createDestination}${conflict || moveConflictMarkup ? "" : card ? `<div class="inspector-actions">${renderButton("Archive", "archive-card", { priority: "risk", data: `data-card-id="${escapeHtml(card.id)}"` })}</div>` : `<div class="inspector-actions"><button class="jk-button" data-priority="primary" type="submit"${disabledAttribute()}>${mutationKind === "card" ? "Creating…" : "Create Card"}</button></div>`}</form>`;
+  const editor = `<form class="card-form surface-card-form" data-form="card" data-autosave="${card ? "true" : "false"}" data-card-id="${escapeHtml(card?.id || "")}" novalidate><div class="jk-field surface-field"><label class="jk-visually-hidden" for="card-title-input">Title</label>${titleControl}${titleError ? `<p class="jk-error" id="card-title-error">${escapeHtml(titleError)}</p>` : ""}</div>${descriptionEditor}${createDestination}${conflict || moveConflictMarkup ? "" : card ? `<div class="inspector-actions">${renderButton("Archive", "archive-card", { priority: "risk", data: `data-card-id="${escapeHtml(card.id)}"` })}</div>` : `<div class="inspector-actions"><button class="jk-button" data-priority="primary" type="submit"${disabledAttribute()}>${mutationKind === "card" ? "Creating…" : "Create Card"}</button></div>`}</form>`;
   const cardPanel = `<div id="card-panel" class="inspector-panel" role="tabpanel" aria-labelledby="card-tab">${status ? `<div class="card-status">${renderStatus(status, "card-status")}</div>` : renderStatus(null, "card-status")}${staleMarkup}${moveConflictMarkup}${pendingCardCreate}${editor}${card ? renderComments(card) : ""}</div>`;
   const toolbarActions = `<div class="inspector-toolbar-actions">${card ? renderMoveDisclosure(project, card, conflict) : ""}<button class="close-button inspector-close" type="button" data-action="close-card" aria-label="${escapeHtml(closeLabel)}"${disabledAttribute()}><span aria-hidden="true">×</span></button></div>`;
   return `<aside class="card-inspector jk-panel" aria-labelledby="card-tab"><div class="inspector-content"><header class="inspector-toolbar">${tabs}${toolbarActions}</header><div id="card-autosave-status" class="jk-visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div>${cardSelected ? cardPanel : card ? renderActivity(card) : cardPanel}</div></aside>`;
@@ -971,6 +1014,7 @@ function restorePendingContext(): void {
 function render(): void {
   document.body.dataset.state = currentUiState();
   root.innerHTML = initialLoading ? renderLoading() : session ? renderWorkspace() : renderSignIn();
+  restoreDescriptionSelection();
   restorePendingContext();
 }
 
@@ -986,6 +1030,10 @@ function cleanValue(value: string): string {
   return value.trim();
 }
 
+function cardBodyValue(value: string): string {
+  return value.replace(/\r\n?/g, "\n");
+}
+
 function captureProjectDraft(form: HTMLFormElement): void {
   if (!projectEditorDraft) return;
   const data = formData(form);
@@ -999,7 +1047,7 @@ function captureProjectDraft(form: HTMLFormElement): void {
 
 function sameDraft(left: CardDraft, right: CardDraft): boolean {
   return cleanValue(left.title) === cleanValue(right.title)
-    && cleanValue(left.body) === cleanValue(right.body)
+    && cardBodyValue(left.body) === cardBodyValue(right.body)
     && left.columnId === right.columnId;
 }
 
@@ -1009,7 +1057,7 @@ function sameRevision(left: Revision | null, right: Revision | null): boolean {
 
 function storedCardMatchesDraftBase(card: ProjectCard, draft: CardDraft): boolean {
   return cleanValue(card.title) === cleanValue(draft.baseTitle)
-    && cleanValue(card.body) === cleanValue(draft.baseBody)
+    && cardBodyValue(card.body) === cardBodyValue(draft.baseBody)
     && card.columnId === draft.baseColumnId
     && card.archivedAt === draft.baseArchivedAt;
 }
@@ -1081,6 +1129,7 @@ function clearPrivateState(notice: AuthNotice): void {
   pendingFocusRestore = null;
   pendingScrollRestore = null;
   inspectorTab = "card";
+  resetDescriptionContext();
   accountPanelOpen = false;
   projectActionsOpen = false;
   setWorkspaceMutationsDisabled(false);
@@ -1363,6 +1412,7 @@ function openCard(cardId: string, trigger: HTMLElement, allowArchived = false): 
   cardConflict = hasStoredConflict ? { projectId: project.id, cardId: card.id, latestLoaded: true } : null;
   resetMoveContext();
   inspectorTab = "card";
+  resetDescriptionContext();
   accountPanelOpen = false;
   projectActionsOpen = false;
   render();
@@ -1386,6 +1436,7 @@ function openNewCard(columnId: string, trigger: HTMLElement): void {
   cardConflict = null;
   resetMoveContext();
   inspectorTab = "card";
+  resetDescriptionContext();
   accountPanelOpen = false;
   projectActionsOpen = false;
   render();
@@ -1408,6 +1459,7 @@ function closeCard(): void {
   cardConflict = null;
   resetMoveContext();
   inspectorTab = "card";
+  resetDescriptionContext();
   pendingFocusRestore = cardReturnFocus || (cardId ? { action: "open-card", cardId, occurrence: 0 } : null);
   pendingScrollRestore = boardScrollPositions.get(project.id) ?? null;
   cardReturnFocus = null;
@@ -1418,6 +1470,7 @@ function validateCardDraft(draft: CardDraft): boolean {
   cardFieldErrors.clear();
   if (!cleanValue(draft.title)) cardFieldErrors.set("title", "Enter a Card title before saving.");
   if (!cardFieldErrors.size) return true;
+  descriptionView = "write";
   pendingFocusId = "card-title-input";
   cardStatus = { tone: "error", title: "Card needs attention", message: "Correct the marked fields before saving." };
   render();
@@ -1467,6 +1520,7 @@ async function performCardAutosave(projectId: string, cardId: string): Promise<v
   if (!cleanValue(draft.title)) {
     cardFieldErrors.set("title", "Enter a Card title.");
     cardStatus = { tone: "error", title: "Title required", message: "Add a title before this Card can be saved." };
+    descriptionView = "write";
     if (selectedCardId === cardId) render();
     return;
   }
@@ -1476,7 +1530,7 @@ async function performCardAutosave(projectId: string, cardId: string): Promise<v
     const response = await api(`/projects/${safeId(projectId)}/cards/${safeId(cardId)}`, {
       method: "PATCH",
       revision: draft.baseVersion ?? card.version,
-      body: { title: cleanValue(draft.title), body: cleanValue(draft.body) }
+      body: { title: cleanValue(draft.title), body: cardBodyValue(draft.body) }
     });
     const storedCard = applyCardMutationResponse(projectId, response);
     recordBrowserActivity(project, `Updated ${storedCard.title}.`, storedCard.id);
@@ -1484,12 +1538,23 @@ async function performCardAutosave(projectId: string, cardId: string): Promise<v
     if (!latestDraft || sameDraft(latestDraft, draft)) retainedDrafts.delete(key);
     else retainedDrafts.set(key, rebaseDraft(latestDraft, storedCard));
     cardFieldErrors.clear();
+    const hadVisibleSaveError = cardStatus?.tone === "error";
+    const activeControlId = document.activeElement instanceof HTMLElement && document.activeElement.closest(".card-inspector")
+      ? document.activeElement.id || null
+      : null;
     cardStatus = null;
     updateRenderedBoardCard(storedCard);
+    const shouldRefreshPreview = selectedCardId === cardId && inspectorTab === "card" && descriptionView === "preview";
+    if (shouldRefreshPreview || hadVisibleSaveError) {
+      pendingFocusId = shouldRefreshPreview ? "description-preview-tab" : activeControlId || "card-title-input";
+      render();
+    } else if (selectedCardId === cardId && !inspectorHasActiveControl() && inspectorTab === "activity") {
+      render();
+    }
     announceAutosave("Changes saved.");
-    if (selectedCardId === cardId && !inspectorHasActiveControl() && inspectorTab === "activity") render();
   } catch (error) {
     if (handlePrivateError(error)) return;
+    descriptionView = "write";
     if (error instanceof ApiError && (error.status === 409 || error.status === 412)) {
       let latestLoaded = false;
       try {
@@ -1543,6 +1608,17 @@ async function flushCardAutosaves(): Promise<void> {
     await pending.catch(() => undefined);
     if (pending === autosaveChain && !pendingAutosaves.size) return;
   }
+}
+
+function showDescriptionView(nextView: DescriptionView): void {
+  const previewUnavailable = Boolean(cardConflict || moveConflict || (cardStatus && (cardStatus.tone === "error" || cardStatus.title.includes("outcome unconfirmed"))));
+  if (nextView === "preview" && previewUnavailable) return;
+  if (descriptionView === "write") captureDescriptionSelection();
+  const form = document.querySelector<HTMLFormElement>("form[data-form='card']");
+  if (form) captureCardDraft(form);
+  descriptionView = nextView;
+  pendingFocusId = nextView === "preview" ? "description-preview-tab" : "description-write-tab";
+  render();
 }
 
 function toggleMovePanel(): void {
@@ -1735,7 +1811,7 @@ async function saveCard(form: HTMLFormElement | null, explicitRetry = false): Pr
     if (card) {
       const body: Record<string, unknown> = {
         title: cleanValue(draft.title),
-        body: cleanValue(draft.body)
+        body: cardBodyValue(draft.body)
       };
       if (explicitRetry && card.archivedAt) body.archivedAt = null;
       const response = await api(`/projects/${safeId(project.id)}/cards/${safeId(card.id)}`, {
@@ -1746,7 +1822,7 @@ async function saveCard(form: HTMLFormElement | null, explicitRetry = false): Pr
       storedCard = applyCardMutationResponse(project.id, response);
       recordBrowserActivity(project, `Updated ${storedCard.title}.`, storedCard.id);
     } else {
-      const body = { title: cleanValue(draft.title), body: cleanValue(draft.body), columnId: draft.columnId };
+      const body = { title: cleanValue(draft.title), body: cardBodyValue(draft.body), columnId: draft.columnId };
       const idempotencyScope = `card:create:${project.id}`;
       const response = await api(`/projects/${safeId(project.id)}/cards`, {
         method: "POST",
@@ -1778,6 +1854,7 @@ async function saveCard(form: HTMLFormElement | null, explicitRetry = false): Pr
     }
   } catch (error) {
     if (handlePrivateError(error)) return;
+    descriptionView = "write";
     if (!card) {
       const idempotencyScope = `card:create:${project.id}`;
       if (!outcomeIsUnconfirmed(error)) clearIdempotencyKey(idempotencyScope);
@@ -2054,6 +2131,10 @@ function handlePrivateError(error: unknown): boolean {
 
 async function handleAction(button: HTMLElement): Promise<void> {
   const action = button.dataset.action || "";
+  if (action === "show-description-write" || action === "show-description-preview") {
+    showDescriptionView(action === "show-description-preview" ? "preview" : "write");
+    return;
+  }
   if (mutationInFlight) return;
   if (projectEditorMode && !button.closest("#project-editor")) return;
   if (action === "toggle-account-panel") {
@@ -2148,6 +2229,7 @@ root.addEventListener("input", (event) => {
 root.addEventListener("focusout", (event) => {
   const target = event.target as HTMLElement;
   if (target.id !== "card-title-input" && target.id !== "card-body-input") return;
+  if (target.id === "card-body-input") captureDescriptionSelection();
   const form = target.closest<HTMLFormElement>("form[data-form='card'][data-autosave='true']");
   if (form) queueCardAutosave(form);
 });
@@ -2199,6 +2281,17 @@ root.addEventListener("keydown", (event) => {
   const target = event.target as HTMLElement;
   if (target.getAttribute("role") === "tab" && ["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
     event.preventDefault();
+    if (target.closest("[data-tablist='description']")) {
+      const nextView = event.key === "Home"
+        ? "write"
+        : event.key === "End"
+          ? "preview"
+          : event.key === "ArrowRight"
+            ? target.id === "description-write-tab" ? "preview" : "write"
+            : target.id === "description-preview-tab" ? "write" : "preview";
+      showDescriptionView(nextView);
+      return;
+    }
     const showActivity = event.key === "ArrowRight" || event.key === "End";
     if (showActivity && !document.querySelector("#activity-tab")) return;
     if (showActivity && (cardConflict || moveConflict)) return;

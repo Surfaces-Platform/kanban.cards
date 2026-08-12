@@ -182,7 +182,7 @@ test("Refresh failure retains selected Card context and unlocks the workspace", 
       await refreshGate.reached;
       await expect(page.locator("body")).toHaveAttribute("data-state", "refreshing");
       await expect(inspector.getByLabel("Title", { exact: true })).toHaveValue(seed.cards.privacy.title);
-      await expect(inspector.getByLabel("Body", { exact: true })).toHaveValue(seed.cards.privacy.body);
+      await expect(inspector.getByLabel("Description", { exact: true })).toHaveValue(seed.cards.privacy.body);
       await expect(inspector.getByLabel("Title", { exact: true })).toBeDisabled();
       refreshGate.fulfill(503, { error: "Injected Refresh outage." });
       await expect(page.locator("body")).toHaveAttribute("data-state", "selected");
@@ -194,7 +194,7 @@ test("Refresh failure retains selected Card context and unlocks the workspace", 
 
     await expect(inspector).toBeVisible();
     await expect(inspector.getByLabel("Title", { exact: true })).toHaveValue(seed.cards.privacy.title);
-    await expect(inspector.getByLabel("Body", { exact: true })).toHaveValue(seed.cards.privacy.body);
+    await expect(inspector.getByLabel("Description", { exact: true })).toHaveValue(seed.cards.privacy.body);
     await expect(inspector.getByLabel("Title", { exact: true })).toBeEnabled();
     await expect(page.getByRole("button", { name: "Actions", exact: true })).toBeEnabled();
     expectNoUnexpectedBrowserErrors(errors, [/503/]);
