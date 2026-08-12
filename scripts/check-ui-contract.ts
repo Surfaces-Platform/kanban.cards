@@ -106,6 +106,8 @@ const requiredActions: Array<{ capability: string; actions: string[] }> = [
   { capability: "explicit Project Refresh", actions: ["refresh-project"] },
   { capability: "Card creation", actions: ["new-card"] },
   { capability: "Card selection", actions: ["open-card"] },
+  { capability: "Description Write view", actions: ["show-description-write"] },
+  { capability: "Description Preview", actions: ["show-description-preview"] },
   { capability: "Card movement disclosure", actions: ["toggle-move-panel"] },
   { capability: "Card movement commit", actions: ["move-card"] },
   { capability: "Card movement recovery", actions: ["retry-move", "cancel-move"] },
@@ -368,6 +370,17 @@ function checkApplicationSource(app: SourceFile, violations: Violation[]): void 
   if (inspector && !/card\s*\?\s*renderMoveDisclosure\s*\(/.test(inspector)) {
     addViolation(violations, app.file, app.source, app.source.indexOf(inspector), "selected Card detail must expose the canonical Move disclosure");
   }
+  for (const marker of [
+    'aria-label="Description view"',
+    'ariaLabel: "Description"',
+    'renderCardMarkdown(draft.body)',
+    'Nothing to preview.',
+    'role="tabpanel"'
+  ]) {
+    if (inspector && !inspector.includes(marker)) {
+      addViolation(violations, app.file, app.source, app.source.indexOf(inspector), "Card Description must expose the accepted Write and safe Preview contract", marker);
+    }
+  }
   firstMatchViolation(
     violations,
     app,
@@ -454,6 +467,13 @@ function checkApplicationSource(app: SourceFile, violations: Violation[]): void 
   if (!functionSection(app.source, "performCardAutosave") || !/addEventListener\(["']focusout["']/.test(app.source)) {
     violations.push({ file: app.file, line: 1, reason: "surface-integrated Card fields must serialize autosave on blur", code: "expected performCardAutosave and delegated focusout handling" });
   }
+  const summary = functionSection(app.source, "bodySummary");
+  if (summary && !/renderCardMarkdown\(value\)\.text/.test(summary)) {
+    addViolation(violations, app.file, app.source, app.source.indexOf(summary), "board summaries must derive from the safe Markdown representation");
+  }
+  if (!functionSection(app.source, "cardBodyValue")) {
+    violations.push({ file: app.file, line: 1, reason: "Card Markdown source must use body-specific newline normalization without title-style trimming", code: "function cardBodyValue(...)" });
+  }
 
   if (!/(?:retainedDrafts|cardDrafts)\s*=\s*new Map/.test(app.source)) {
     violations.push({ file: app.file, line: 1, reason: "per-Card retained-draft storage is missing", code: "const retainedDrafts = new Map(...)" });
@@ -520,6 +540,37 @@ function checkApplicationSource(app: SourceFile, violations: Violation[]): void 
     app,
     /focus-workspace|project-rail|navigation-rail/i,
     "comparison direction or permanent Project rail must not ship in the production client"
+  );
+}
+
+function checkMarkdownSource(markdown: SourceFile, violations: Violation[]): void {
+  const requiredFragments = [
+    'import { micromark } from "micromark"',
+    "allowDangerousHtml: false",
+    "allowDangerousProtocol: false",
+    "PASSIVE_ELEMENTS",
+    "safeLinkDestination",
+    "replaceImage",
+    'link.setAttribute("target", "_blank")',
+    'link.setAttribute("rel", "noopener noreferrer")',
+    "plainText(template.content)"
+  ];
+  for (const fragment of requiredFragments) {
+    if (!markdown.source.includes(fragment)) {
+      violations.push({ file: markdown.file, line: 1, reason: "safe Markdown rendering boundary is incomplete", code: fragment });
+    }
+  }
+  firstMatchViolation(
+    violations,
+    markdown,
+    /allowDangerous(?:Html|Protocol)\s*:\s*true/,
+    "Markdown Preview must not enable dangerous HTML or URL protocols"
+  );
+  firstMatchViolation(
+    violations,
+    markdown,
+    /\.innerHTML\s*=\s*(?:source|normalized)\b/,
+    "raw Card source must never be assigned directly to innerHTML"
   );
 }
 
@@ -676,6 +727,7 @@ async function main(): Promise<void> {
   const violations: Violation[] = [];
   const appEntry = await readSource(path.resolve(__dirname, "../src/client/app.ts"), "src/client/app.ts", violations);
   const appImplementation = await readSource(path.resolve(__dirname, "../src/client/context-dock.ts"), "src/client/context-dock.ts", violations);
+  const markdown = await readSource(path.resolve(__dirname, "../src/client/markdown.ts"), "src/client/markdown.ts", violations);
   if (!appEntry.source.includes('import "./context-dock"')) {
     violations.push({
       file: appEntry.file,
@@ -693,6 +745,7 @@ async function main(): Promise<void> {
   const styles = await readSource(path.resolve(__dirname, "../styles.css"), "styles.css", violations);
 
   checkApplicationSource(app, violations);
+  checkMarkdownSource(markdown, violations);
   checkStaticShell(html, violations);
   const declaredTokens = checkJudgmentKitSource(tokens, violations);
   checkApplicationStyles(styles, declaredTokens, violations);
