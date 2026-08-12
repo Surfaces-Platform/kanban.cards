@@ -2102,6 +2102,7 @@ async function archiveCard(cardId: string): Promise<void> {
     resetMoveContext();
     const refreshError = await refreshCommittedProject(project.id);
     if (session) {
+      cardStatus = null;
       projectStatus = refreshError
         ? { tone: "warning", title: "Card archived; refresh needed", message: `The Card is stored as archived and Undo is available. Refresh failed: ${refreshError}` }
         : null;

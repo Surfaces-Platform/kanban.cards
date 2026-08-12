@@ -937,6 +937,12 @@ test("archive removes the active Card and Undo restores both resource and focus"
   await undo.click();
   await expect(cardButton(page, seed.cards.archive.title)).toBeVisible();
   await expect(cardButton(page, seed.cards.archive.title)).toBeFocused();
+  const toastRegion = page.locator("#toast-region");
+  await expect(toastRegion.getByText("Card restored", { exact: true })).toBeVisible();
+  await expect(toastRegion.getByText(`${seed.cards.archive.title} returned to its stored Column.`, { exact: true })).toBeVisible();
+  await page.clock.fastForward(5_100);
+  await expect(toastRegion.locator(".toast")).toHaveCount(0);
+  await expect(cardButton(page, seed.cards.archive.title)).toBeFocused();
   const stored = await readSeededProject(harness, seed.projectId);
   expect(stored.cards.find((card) => card.id === seed.cards.archive.id)?.archivedAt).toBeNull();
   expectNoUnexpectedBrowserErrors(errors);
