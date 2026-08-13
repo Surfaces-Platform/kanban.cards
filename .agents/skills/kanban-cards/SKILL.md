@@ -5,7 +5,7 @@ description: Operate kanban.cards projects through its owner API and bundled CLI
 
 # kanban.cards
 
-Use the API as the source of truth. Treat the authenticated agent as a client acting for the owner; do not create agent identities, roles, sessions, reviewers, or approval workflows.
+Use the API as the source of truth. This slice's credential is a compatibility path acting for the owner and bound server-side to exactly one Workspace. It cannot select a Workspace from a Project binding, payload, query, or header. Do not create agent identities, roles, sessions, reviewers, or approval workflows; verified agent identity is the next roadmap slice.
 
 Run the bundled helper from the repository root:
 
@@ -19,7 +19,7 @@ Read [references/api.md](references/api.md) when exact payloads, headers, or res
 
 ## Connect
 
-Store the owner token only in `~/.kanban-cards/config.json`. Pipe it through standard input so it does not appear in the command line:
+Store the Workspace-bound compatibility token only in `~/.kanban-cards/config.json`. Pipe it through standard input so it does not appear in the command line:
 
 ```bash
 node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs setup \

@@ -1,10 +1,32 @@
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import { createServer } from "node:http";
+import { isIP } from "node:net";
 import path from "node:path";
 import express, { type ErrorRequestHandler, type NextFunction, type Request, type RequestHandler, type Response } from "express";
 
-import { createStateStore } from "./state-store";
+import { AccessStoreError, createAccessStore, type AccessStore, type AccessWorkspace } from "./access-store";
+import {
+  clearRootSessionCookie,
+  clearTenantSessionCookie,
+  clearLogoutRetryCookie,
+  createLogoutRetryCookie,
+  createRootSessionCookie,
+  createTenantSessionCookie,
+  finishOwnerLogin,
+  getPlatformAuthConfig,
+  hasPlatformAuthConfig,
+  isProductionRequest,
+  startOwnerLogin,
+  validatePlatformAuthConfig,
+  verifyRootSession,
+  verifyLogoutRetrySession,
+  verifyTenantSession,
+  type AuthRouteResponse,
+  type PlatformAuthConfig,
+  type RootSession
+} from "./platform-auth";
+import { createStateStore, createWorkspaceStoreResolver, DEFAULT_WORKSPACE_ID } from "./state-store";
 import type {
   Activity,
   ActivityActor,
@@ -18,12 +40,15 @@ import type {
   StateStoreOptions,
   WorkspaceState
 } from "./types";
+import type { WorkspaceStoreResolver } from "./types";
 
 type AuthMethod = "bearer" | "cookie";
 
 interface OwnerAuth {
   method: AuthMethod;
   actor: ActivityActor;
+  workspace: AccessWorkspace | null;
+  store: StateStore;
 }
 
 declare global {
@@ -42,6 +67,16 @@ export interface CreateAppOptions extends StateStoreOptions {
   ownerLabel?: string;
   sessionTtlSeconds?: number;
   store?: StateStore;
+  accessStore?: AccessStore;
+  workspaceStoreResolver?: WorkspaceStoreResolver;
+  platformAuthConfig?: PlatformAuthConfig | null;
+  rootHost?: string;
+  legacyApiWorkspaceId?: string;
+  legacyWorkspaceSlug?: string;
+  legacyWorkspaceName?: string;
+  legacyOwnerSubject?: string;
+  trustForwardedHost?: boolean;
+  fetch?: typeof fetch;
   host?: string;
   port?: string | number;
 }
@@ -56,6 +91,25 @@ interface MutationResult {
   replayed: boolean;
 }
 
+interface ResolvedAccessContext {
+  kind: "local" | "root" | "workspace";
+  auth: OwnerAuth | null;
+  identity: RootSession | null;
+  workspace: AccessWorkspace | null;
+}
+
+interface AccessContextConfig {
+  accessStore: AccessStore;
+  apiToken: string;
+  legacyApiWorkspaceId: string;
+  legacyStore: StateStore;
+  ownerLabel: string;
+  platformAuthConfig: PlatformAuthConfig | null;
+  rootHost: string;
+  trustForwardedHost: boolean;
+  workspaceStoreResolver: WorkspaceStoreResolver;
+}
+
 type AsyncHandler = (req: Request, res: Response, next: NextFunction) => unknown | Promise<unknown>;
 type UnknownRecord = Record<string, unknown>;
 
@@ -63,6 +117,7 @@ const PRODUCT_NAME = "kanban.cards";
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 4317;
 const SESSION_COOKIE = "kanban_cards_session";
+const RESERVED_WORKSPACE_SLUGS = new Set(["api", "app", "auth", "admin", "www"]);
 const DEFAULT_SESSION_TTL_SECONDS = 60 * 60 * 24 * 7;
 const MAX_ACTIVITY = 1_000;
 const MAX_IDEMPOTENCY_RECORDS = 1_000;
@@ -93,15 +148,62 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
   const ownerLabel = cleanLabel(options.ownerLabel ?? process.env.KANBAN_CARDS_OWNER_LABEL ?? "Owner", "Owner");
   const databaseRequired = options.requireDatabase ?? production;
   const connectionString = options.connectionString || process.env.KANBAN_CARDS_DATABASE_URL || process.env.POSTGRES_URL || process.env.DATABASE_URL;
+  const trustForwardedHost = options.trustForwardedHost ?? Boolean(process.env.VERCEL);
+  const platformAuthConfigured = options.platformAuthConfig !== undefined
+    ? options.platformAuthConfig !== null
+    : hasPlatformAuthConfig();
+  const platformAuthConfig = options.platformAuthConfig === null
+    ? null
+    : options.platformAuthConfig || (platformAuthConfigured ? getPlatformAuthConfig() : null);
+  if (platformAuthConfig) validatePlatformAuthConfig(platformAuthConfig);
+  const rootHost = canonicalConfiguredHost(
+    options.rootHost ||
+    process.env.KANBAN_CARDS_ROOT_HOST ||
+    (platformAuthConfig ? new URL(platformAuthConfig.redirectUri).host : production ? PRODUCT_NAME : configuredHost)
+  );
+  const rootOrigin = `${publicProtocol(rootHost)}://${rootHost}`;
+  const rootHostname = new URL(`http://${rootHost}`).hostname.replace(/^\[|\]$/g, "");
+  if (platformAuthConfig && isIP(rootHostname)) {
+    throw new Error("Provider mode requires a DNS root host such as localhost or kanban.cards; numeric-IP tenant hosts are unsupported.");
+  }
+  if (platformAuthConfig && new URL(platformAuthConfig.redirectUri).origin.toLowerCase() !== rootOrigin) {
+    throw new Error("OIDC_REDIRECT_URI must use the configured kanban.cards root origin.");
+  }
+  if (
+    platformAuthConfig &&
+    !platformAuthConfig.postLogoutRedirectUri.startsWith("/") &&
+    new URL(platformAuthConfig.postLogoutRedirectUri).origin.toLowerCase() !== rootOrigin
+  ) {
+    throw new Error("OIDC_POST_LOGOUT_REDIRECT_URI must stay on the configured kanban.cards root origin.");
+  }
+  const legacyApiWorkspaceId = String(options.legacyApiWorkspaceId ?? process.env.KANBAN_CARDS_API_WORKSPACE_ID ?? DEFAULT_WORKSPACE_ID).trim();
+  if (legacyApiWorkspaceId !== DEFAULT_WORKSPACE_ID) {
+    throw new Error(`KANBAN_CARDS_API_WORKSPACE_ID must remain ${DEFAULT_WORKSPACE_ID} during the compatibility bridge.`);
+  }
+  const legacyOwnerSubject = String(options.legacyOwnerSubject ?? process.env.KANBAN_CARDS_LEGACY_OWNER_SUBJECT ?? "").trim();
+  const legacyWorkspaceSlug = String(options.legacyWorkspaceSlug ?? process.env.KANBAN_CARDS_LEGACY_WORKSPACE_SLUG ?? "").trim().toLowerCase();
+  const legacyWorkspaceName = String(options.legacyWorkspaceName ?? process.env.KANBAN_CARDS_LEGACY_WORKSPACE_NAME ?? "").trim();
+  if (legacyWorkspaceSlug) {
+    try {
+      workspaceSlug(legacyWorkspaceSlug);
+    } catch {
+      throw new Error("KANBAN_CARDS_LEGACY_WORKSPACE_SLUG must be a valid, non-reserved Workspace hostname label.");
+    }
+  }
   const sessionTtlSeconds = positiveInteger(
     options.sessionTtlSeconds ?? process.env.KANBAN_CARDS_SESSION_TTL_SECONDS,
     DEFAULT_SESSION_TTL_SECONDS
   );
+  const legacyMigrationValues = [legacyOwnerSubject, legacyWorkspaceSlug, legacyWorkspaceName];
   const missingConfiguration = [
-    ...(!apiToken ? ["KANBAN_CARDS_API_TOKEN"] : []),
+    ...(!platformAuthConfigured && !apiToken ? ["KANBAN_CARDS_API_TOKEN"] : []),
+    ...(production && !platformAuthConfigured ? ["OIDC_ISSUER, OIDC_CLIENT_ID, OIDC_REDIRECT_URI, SESSION_SECRET, and PLATFORM_SURFACE_ID"] : []),
+    ...(legacyMigrationValues.some(Boolean) && !legacyMigrationValues.every(Boolean)
+      ? ["KANBAN_CARDS_LEGACY_OWNER_SUBJECT, KANBAN_CARDS_LEGACY_WORKSPACE_SLUG, and KANBAN_CARDS_LEGACY_WORKSPACE_NAME must be set together"]
+      : []),
     ...(databaseRequired && !connectionString ? ["KANBAN_CARDS_DATABASE_URL or POSTGRES_URL or DATABASE_URL"] : [])
   ];
-  const store = options.store || createStateStore({
+  const legacyStore = options.store || createStateStore({
     dataPath: options.dataPath,
     connectionString,
     tableName: options.tableName,
@@ -109,36 +211,257 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     pool: options.pool,
     ssl: options.ssl
   });
+  const workspaceStoreResolver = options.workspaceStoreResolver || (options.store
+    ? fixedWorkspaceStoreResolver(options.store, legacyApiWorkspaceId)
+    : createWorkspaceStoreResolver({
+        dataPath: options.dataPath,
+        workspaceDirectory: options.workspaceDirectory,
+        connectionString,
+        tableName: options.tableName,
+        pool: options.pool,
+        ssl: options.ssl
+      }));
+  const defaultWorkspaceStore = workspaceStoreResolver.resolve(DEFAULT_WORKSPACE_ID);
+  const accessStore = options.accessStore || createAccessStore({
+    dataPath: process.env.KANBAN_CARDS_ACCESS_DATA_PATH,
+    connectionString,
+    pool: options.pool,
+    ssl: options.ssl
+  });
+  const authFetch = options.fetch || fetch;
+  const legacyMigrationConfigured = legacyMigrationValues.every(Boolean);
+
+  async function requireExistingLegacyState(): Promise<WorkspaceState> {
+    try {
+      const existing = await defaultWorkspaceStore.readExisting();
+      if (!existing) throw httpError(503, "Legacy Workspace state is unavailable.");
+      return existing;
+    } catch (error) {
+      if (isHttpError(error)) throw error;
+      throw httpError(503, "Legacy Workspace state is unavailable.");
+    }
+  }
+
+  async function inspectAccessReadiness(): Promise<{
+    ready: boolean;
+    registry: "ready" | "unavailable" | "not-required";
+    legacyState: "ready" | "missing" | "invalid" | "not-required";
+    legacyBinding: "ready" | "pending" | "mismatch" | "not-required";
+  }> {
+    if (!platformAuthConfig) {
+      return {
+        ready: missingConfiguration.length === 0,
+        registry: "not-required",
+        legacyState: "not-required",
+        legacyBinding: "not-required"
+      };
+    }
+
+    let registryState;
+    try {
+      registryState = await accessStore.read();
+    } catch {
+      return {
+        ready: false,
+        registry: "unavailable",
+        legacyState: "not-required",
+        legacyBinding: "not-required"
+      };
+    }
+
+    const legacyWorkspace = registryState.workspaces.find((workspace) => workspace.storageId === DEFAULT_WORKSPACE_ID) || null;
+    const legacyAccessRequired = Boolean(apiToken || legacyMigrationConfigured || legacyWorkspace);
+    if (!legacyAccessRequired) {
+      return {
+        ready: missingConfiguration.length === 0,
+        registry: "ready",
+        legacyState: "not-required",
+        legacyBinding: "not-required"
+      };
+    }
+
+    let legacyState: "ready" | "missing" | "invalid" = "ready";
+    try {
+      if (!await defaultWorkspaceStore.readExisting()) legacyState = "missing";
+    } catch {
+      legacyState = "invalid";
+    }
+
+    let legacyBinding: "ready" | "pending" | "mismatch";
+    if (!legacyWorkspace) {
+      legacyBinding = "pending";
+    } else if (legacyMigrationConfigured) {
+      const owner = registryState.owners.find((candidate) => candidate.providerSubject === legacyOwnerSubject);
+      legacyBinding = owner &&
+        legacyWorkspace.slug === legacyWorkspaceSlug &&
+        legacyWorkspace.name === legacyWorkspaceName &&
+        legacyWorkspace.ownerIds.includes(owner.id)
+        ? "ready"
+        : "mismatch";
+    } else {
+      legacyBinding = "ready";
+    }
+
+    return {
+      ready: missingConfiguration.length === 0 && legacyState === "ready" && legacyBinding === "ready",
+      registry: "ready",
+      legacyState,
+      legacyBinding
+    };
+  }
+
+  let legacyBindingPromise: Promise<AccessWorkspace | null> | null = null;
+  function ensureLegacyBinding(identity?: RootSession): Promise<AccessWorkspace | null> {
+    if (!legacyOwnerSubject && !legacyWorkspaceSlug && !legacyWorkspaceName) return Promise.resolve(null);
+    if (!legacyOwnerSubject || !legacyWorkspaceSlug || !legacyWorkspaceName) {
+      return Promise.reject(httpError(503, "Legacy Workspace migration requires owner subject, Workspace slug, and Workspace name together."));
+    }
+    if (!identity || identity.providerSubject !== legacyOwnerSubject) {
+      return Promise.resolve(null);
+    }
+    if (!legacyBindingPromise) {
+      legacyBindingPromise = requireExistingLegacyState().then(() => accessStore.bindLegacyWorkspace({
+          providerSubject: legacyOwnerSubject,
+          email: identity.email,
+          displayName: identity.displayName,
+          slug: legacyWorkspaceSlug,
+          name: legacyWorkspaceName
+        })).catch((error) => {
+        legacyBindingPromise = null;
+        throw error;
+      });
+    }
+    return legacyBindingPromise;
+  }
 
   app.disable("x-powered-by");
   app.use(securityHeaders());
+  app.use(express.urlencoded({ extended: false, limit: "16kb", type: "application/x-www-form-urlencoded" }));
   app.use(express.json({ limit: "256kb", type: "application/json" }));
 
-  app.get("/api/health", (_req, res) => {
-    res.status(missingConfiguration.length ? 503 : 200).json({
-      ok: missingConfiguration.length === 0,
+  app.get("/api/health", asyncHandler(async (_req, res) => {
+    const access = await inspectAccessReadiness();
+    res.status(access.ready ? 200 : 503).json({
+      ok: access.ready,
       product: PRODUCT_NAME,
       schemaVersion: 2,
-      store: store.kind,
-      authentication: "owner-key",
+      store: legacyStore.kind,
+      authentication: platformAuthConfigured ? "provider-session+workspace" : "local-owner-key",
+      access,
       missingConfiguration
     });
-  });
+  }));
 
-  app.get("/api/session", (req, res) => {
-    noStore(res);
-    const auth = authenticate(req, { apiToken, ownerLabel });
-    if (!auth) {
-      res.json({ authenticated: false });
+  app.get("/api/access/health", asyncHandler(async (_req, res) => {
+    const access = await inspectAccessReadiness();
+    res.status(access.ready ? 200 : 503).json({
+      ok: access.ready,
+      authentication: platformAuthConfigured ? "provider-session+workspace" : "local-owner-key",
+      registry: accessStore.kind,
+      legacyBridge: apiToken ? "enabled" : "disabled",
+      registryState: access.registry,
+      legacyState: access.legacyState,
+      legacyBinding: { present: access.legacyBinding === "ready", status: access.legacyBinding },
+      missingConfiguration
+    });
+  }));
+
+  app.get("/auth/login", asyncHandler(async (req, res) => {
+    if (!platformAuthConfig) throw httpError(503, "Provider sign-in is not configured.");
+    requireRootRequest(req, rootHost, trustForwardedHost);
+    sendAuthRoute(res, await startOwnerLogin(webRequest(req, trustForwardedHost), platformAuthConfig, authFetch));
+  }));
+
+  app.get("/auth/callback", asyncHandler(async (req, res) => {
+    if (!platformAuthConfig) throw httpError(503, "Provider sign-in is not configured.");
+    requireRootRequest(req, rootHost, trustForwardedHost);
+    const completed = await finishOwnerLogin(webRequest(req, trustForwardedHost), platformAuthConfig, authFetch);
+    if (!completed.completion) {
+      sendAuthRoute(res, completed);
       return;
     }
-    res.json({ authenticated: true, label: auth.actor.label });
-  });
+    const { identity, returnTo } = completed.completion;
+    const rootSession: RootSession = { ...identity, sessionId: crypto.randomUUID() };
+    await ensureLegacyBinding(rootSession);
+    const platformRequest = webRequest(req, trustForwardedHost);
+    const productionRequest = isProductionRequest(platformRequest);
+    const cookie = await createRootSessionCookie(
+      rootSession,
+      platformAuthConfig.sessionSecret,
+      productionRequest,
+      platformAuthConfig.rootSessionTtlSeconds
+    );
+    const clears = headerValues(completed.headers?.["Set-Cookie"]);
+    for (const value of [...clears, cookie]) res.append("Set-Cookie", value);
+    res.redirect(303, returnTo);
+  }));
+
+  app.get("/auth/logout", asyncHandler(async (req, res) => {
+    if (!platformAuthConfig) {
+      res.redirect(303, "/");
+      return;
+    }
+    requireRootRequest(req, rootHost, trustForwardedHost);
+    const platformRequest = webRequest(req, trustForwardedHost);
+    const productionRequest = isProductionRequest(platformRequest);
+    res.append("Set-Cookie", clearRootSessionCookie(productionRequest));
+    const identity = await verifyRootSession(platformRequest, platformAuthConfig.sessionSecret, productionRequest)
+      || await verifyLogoutRetrySession(platformRequest, platformAuthConfig.sessionSecret, productionRequest);
+    try {
+      if (identity) await accessStore.revokeSession(identity.providerSubject, identity.sessionId);
+    } catch {
+      if (identity) {
+        res.append("Set-Cookie", await createLogoutRetryCookie(
+          identity,
+          platformAuthConfig.sessionSecret,
+          productionRequest
+        ));
+      }
+      res.redirect(303, "/?signout=incomplete");
+      return;
+    }
+    res.append("Set-Cookie", clearLogoutRetryCookie(productionRequest));
+    res.redirect(303, platformAuthConfig.postLogoutRedirectUri || "/");
+  }));
+
+  app.get("/api/session", asyncHandler(async (req, res) => {
+    noStore(res);
+    const requestContext = await resolveAccessContext(req, {
+      accessStore,
+      apiToken,
+      legacyApiWorkspaceId,
+      legacyStore,
+      ownerLabel,
+      platformAuthConfig,
+      rootHost,
+      trustForwardedHost,
+      workspaceStoreResolver
+    });
+    if (!requestContext.auth) {
+      res.json({
+        authenticated: false,
+        context: requestContext.kind,
+        loginUrl: rootLoginUrl(rootHost),
+        ...(platformAuthConfig ? { logoutUrl: rootLogoutUrl(rootHost) } : {})
+      });
+      return;
+    }
+    res.json({
+      authenticated: true,
+      context: requestContext.kind,
+      loginUrl: rootLoginUrl(rootHost),
+      logoutUrl: rootLogoutUrl(rootHost),
+      label: requestContext.auth.actor.label,
+      email: requestContext.identity?.email,
+      ...(requestContext.workspace ? { workspace: publicAccessWorkspace(requestContext.workspace, rootHost) } : {})
+    });
+  }));
 
   app.post("/api/session", asyncHandler(async (req, res) => {
     noStore(res);
-    assertRequestOrigin(req, false);
-    if (!apiToken) throw httpError(503, "Owner authentication is not configured.");
+    assertRequestOrigin(req, false, trustForwardedHost);
+    if (platformAuthConfigured) throw httpError(404, "API route not found.");
+    if (!apiToken) throw httpError(503, "Local owner authentication is not configured.");
     const suppliedToken = requiredString(asRecord(req.body).token, "Access key");
     if (!safeEqual(suppliedToken, apiToken)) throw httpError(401, "Invalid access key.");
     const expiresAt = Math.floor(Date.now() / 1_000) + sessionTtlSeconds;
@@ -152,12 +475,143 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     res.json({ authenticated: true, label: ownerLabel });
   }));
 
-  app.delete("/api/session", (req, res) => {
+  app.delete("/api/session", asyncHandler(async (req, res) => {
     noStore(res);
-    assertRequestOrigin(req, false);
+    assertRequestOrigin(req, Boolean(platformAuthConfig), trustForwardedHost);
     res.clearCookie(SESSION_COOKIE, { httpOnly: true, secure: production, sameSite: "lax", path: "/" });
+    if (platformAuthConfig) {
+      const platformRequest = webRequest(req, trustForwardedHost);
+      const productionRequest = isProductionRequest(platformRequest);
+      const [rootSession, tenantSession, retrySession] = await Promise.all([
+        verifyRootSession(platformRequest, platformAuthConfig.sessionSecret, productionRequest),
+        verifyTenantSession(platformRequest, platformAuthConfig.sessionSecret, productionRequest),
+        verifyLogoutRetrySession(platformRequest, platformAuthConfig.sessionSecret, productionRequest)
+      ]);
+      res.append("Set-Cookie", clearRootSessionCookie(productionRequest));
+      res.append("Set-Cookie", clearTenantSessionCookie(productionRequest));
+      const session = tenantSession || rootSession || retrySession;
+      try {
+        if (session) await accessStore.revokeSession(session.providerSubject, session.sessionId);
+      } catch {
+        if (session) {
+          res.append("Set-Cookie", await createLogoutRetryCookie(
+            session,
+            platformAuthConfig.sessionSecret,
+            productionRequest
+          ));
+        }
+        res.status(503).json({
+          error: "Global sign-out could not be completed.",
+          signedOutHere: true,
+          globalSignOutComplete: false
+        });
+        return;
+      }
+      res.append("Set-Cookie", clearLogoutRetryCookie(productionRequest));
+      res.json({
+        signedOutHere: true,
+        globalSignOutComplete: true,
+        logoutUrl: rootLogoutUrl(rootHost)
+      });
+      return;
+    }
     res.status(204).end();
-  });
+  }));
+
+  app.get("/api/workspaces", asyncHandler(async (req, res) => {
+    requireRootRequest(req, rootHost, trustForwardedHost);
+    if (!platformAuthConfig) throw httpError(404, "API route not found.");
+    const identity = await verifiedRootIdentity(req, platformAuthConfig, trustForwardedHost, accessStore);
+    if (!identity) throw httpError(401, "Owner sign-in required.");
+    const workspaces = await accessStore.listWorkspacesForOwner(identity.providerSubject);
+    res.json({ workspaces: workspaces.map((workspace) => publicAccessWorkspace(workspace, rootHost)) });
+  }));
+
+  app.post("/api/workspaces", asyncHandler(async (req, res) => {
+    requireRootRequest(req, rootHost, trustForwardedHost);
+    assertRequestOrigin(req, true, trustForwardedHost);
+    if (!platformAuthConfig) throw httpError(404, "API route not found.");
+    const identity = await verifiedRootIdentity(req, platformAuthConfig, trustForwardedHost, accessStore);
+    if (!identity) throw httpError(401, "Owner sign-in required.");
+    rejectWorkspaceSelectors(req, true);
+    const body = asRecord(req.body);
+    const slug = workspaceSlug(body.slug);
+    if (legacyMigrationConfigured && slug === legacyWorkspaceSlug) {
+      throw httpError(409, "Workspace address is reserved for the configured legacy migration.");
+    }
+    let workspace: AccessWorkspace;
+    try {
+      workspace = await accessStore.createWorkspace({
+        providerSubject: identity.providerSubject,
+        email: identity.email,
+        displayName: identity.displayName,
+        name: workspaceName(body.name),
+        slug
+      });
+    } catch (error) {
+      if (error instanceof AccessStoreError && error.code === "ACCESS_CONFLICT") {
+        throw httpError(409, "Workspace address is already in use.");
+      }
+      throw error;
+    }
+    res.status(201).json({ workspace: publicAccessWorkspace(workspace, rootHost) });
+  }));
+
+  app.post("/api/workspace-handoffs", asyncHandler(async (req, res) => {
+    requireRootRequest(req, rootHost, trustForwardedHost);
+    assertRequestOrigin(req, true, trustForwardedHost);
+    if (!platformAuthConfig) throw httpError(404, "API route not found.");
+    const identity = await verifiedRootIdentity(req, platformAuthConfig, trustForwardedHost, accessStore);
+    if (!identity) throw httpError(401, "Owner sign-in required.");
+    const slug = workspaceSlug(asRecord(req.body).slug);
+    const workspace = (await accessStore.listWorkspacesForOwner(identity.providerSubject)).find((candidate) => candidate.slug === slug);
+    if (!workspace) throw httpError(404, "Workspace unavailable.");
+    const destinationHost = workspaceHost(workspace.slug, rootHost);
+    const handoff = await accessStore.createHandoff({
+      providerSubject: identity.providerSubject,
+      workspaceId: workspace.id,
+      destinationHost,
+      sessionId: identity.sessionId,
+      ttlSeconds: 120
+    });
+    res.status(201).json({
+      destination: `${publicProtocol(rootHost)}://${destinationHost}/api/workspace-handoff`,
+      handoffToken: handoff.token
+    });
+  }));
+
+  app.post("/api/workspace-handoff", asyncHandler(async (req, res) => {
+    if (!platformAuthConfig) throw httpError(404, "API route not found.");
+    const host = requestHost(req, trustForwardedHost);
+    const workspace = await resolveTenantWorkspace(host, rootHost, accessStore);
+    if (!workspace) throw httpError(404, "Workspace unavailable.");
+    assertExactOrigin(req, `${publicProtocol(rootHost)}://${rootHost}`);
+    try {
+      const consumed = await accessStore.consumeHandoff({ token: requiredString(asRecord(req.body).token, "Handoff token"), destinationHost: host });
+      if (consumed.workspace.id !== workspace.id) throw httpError(401, "The sign-in handoff was not accepted.");
+      const tenantSession = {
+        providerSubject: consumed.owner.providerSubject,
+        email: consumed.owner.email,
+        displayName: consumed.owner.displayName,
+        sessionId: consumed.sessionId,
+        workspaceId: workspace.id
+      };
+      res.append("Set-Cookie", await createTenantSessionCookie(
+        tenantSession,
+        platformAuthConfig.sessionSecret,
+        isProductionRequest(webRequest(req, trustForwardedHost)),
+        platformAuthConfig.tenantSessionTtlSeconds
+      ));
+      if (req.is("application/x-www-form-urlencoded")) {
+        res.redirect(303, "/");
+        return;
+      }
+      res.json({ authenticated: true, workspace: publicAccessWorkspace(workspace, rootHost) });
+    } catch (error) {
+      if (error instanceof AccessStoreError) throw httpError(401, "The sign-in handoff was not accepted.");
+      throw error;
+    }
+  }));
 
   app.get("/", serveIndex(staticDir));
   app.get("/index.html", serveIndex(staticDir));
@@ -168,25 +622,40 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
   app.get("/favicon.ico", (_req, res) => res.status(204).end());
 
   app.use("/api/projects", (req, _res, next) => {
-    if (missingConfiguration.length) throw httpError(503, `Missing required configuration: ${missingConfiguration.join(", ")}.`);
-    const auth = authenticate(req, { apiToken, ownerLabel });
-    if (!auth) throw httpError(401, "Authentication required.");
-    req.ownerAuth = auth;
-    if (req.method !== "GET" && req.method !== "HEAD" && auth.method === "cookie") assertRequestOrigin(req, true);
-    next();
+    void (async () => {
+      if (missingConfiguration.length) throw httpError(503, `Missing required configuration: ${missingConfiguration.join(", ")}.`);
+      rejectWorkspaceSelectors(req, req.method !== "GET" && req.method !== "HEAD");
+      const context = await resolveAccessContext(req, {
+        accessStore,
+        apiToken,
+        legacyApiWorkspaceId,
+        legacyStore,
+        ownerLabel,
+        platformAuthConfig,
+        rootHost,
+        trustForwardedHost,
+        workspaceStoreResolver
+      });
+      const auth = context.auth;
+      if (!auth || context.kind === "root") throw httpError(401, "Authentication required.");
+      if (context.workspace?.storageId === DEFAULT_WORKSPACE_ID) await requireExistingLegacyState();
+      req.ownerAuth = auth;
+      if (req.method !== "GET" && req.method !== "HEAD" && auth.method === "cookie") assertRequestOrigin(req, true, trustForwardedHost);
+      next();
+    })().catch(next);
   });
 
   app.get("/api/projects", asyncHandler(async (req, res) => {
     noStore(res);
     const includeArchived = req.query.includeArchived === "true";
-    const state = await store.read();
+    const state = await requestStore(req).read();
     res.json({ projects: state.projects.filter((project) => includeArchived || !project.archivedAt).map(projectSummary) });
   }));
 
   app.post("/api/projects", asyncHandler(async (req, res) => {
     const body = asRecord(req.body);
     const actor = requireActor(req);
-    const outcome = (await store.update((state) => idempotentMutation(req, state, () => {
+    const outcome = (await requestStore(req).update((state) => idempotentMutation(req, state, () => {
       const now = new Date().toISOString();
       const project: Project = {
         id: makeId("project"),
@@ -209,7 +678,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
 
   app.get("/api/projects/:projectId", asyncHandler(async (req, res) => {
     noStore(res);
-    const project = findProject(await store.read(), routeParam(req, "projectId"));
+    const project = findProject(await requestStore(req).read(), routeParam(req, "projectId"));
     res.setHeader("ETag", quoteVersion(project.revision));
     res.json({ project });
   }));
@@ -219,7 +688,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     const actor = requireActor(req);
     const body = asRecord(req.body);
     const expectedRevision = requiredMatch(req, "Project revision");
-    const { result } = await store.update((state) => {
+    const { result } = await requestStore(req).update((state) => {
       const project = findProject(state, projectId);
       assertVersion(project.revision, expectedRevision, "Project");
       let changed = false;
@@ -256,7 +725,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     const projectId = routeParam(req, "projectId");
     const actor = requireActor(req);
     const body = asRecord(req.body);
-    const outcome = (await store.update((state) => idempotentMutation(req, state, () => {
+    const outcome = (await requestStore(req).update((state) => idempotentMutation(req, state, () => {
       const project = findProject(state, projectId);
       assertProjectWritable(project);
       const externalKey = optionalString(body.externalKey);
@@ -299,7 +768,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     const actor = requireActor(req);
     const body = asRecord(req.body);
     const expectedVersion = requiredMatch(req, "Card version");
-    const { result } = await store.update((state) => {
+    const { result } = await requestStore(req).update((state) => {
       const project = findProject(state, projectId);
       assertProjectWritable(project);
       const card = findCard(project, cardId);
@@ -346,7 +815,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     const cardId = routeParam(req, "cardId");
     const actor = requireActor(req);
     const body = asRecord(req.body);
-    const outcome = (await store.update((state) => idempotentMutation(req, state, () => {
+    const outcome = (await requestStore(req).update((state) => idempotentMutation(req, state, () => {
       const project = findProject(state, projectId);
       assertProjectWritable(project);
       const card = findCard(project, cardId);
@@ -374,7 +843,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
 
   app.get("/api/projects/:projectId/activity", asyncHandler(async (req, res) => {
     noStore(res);
-    const project = findProject(await store.read(), routeParam(req, "projectId"));
+    const project = findProject(await requestStore(req).read(), routeParam(req, "projectId"));
     const limit = boundedInteger(req.query.limit, 50, 1, 200);
     res.json({ activity: project.activity.slice(-limit), projectRevision: project.revision });
   }));
@@ -391,7 +860,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
 function securityHeaders(): RequestHandler {
   return (req, res, next) => {
     res.setHeader("X-Content-Type-Options", "nosniff");
-    res.setHeader("Referrer-Policy", "no-referrer");
+    res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
     res.setHeader("X-Frame-Options", "DENY");
     res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
     res.setHeader(
@@ -403,9 +872,9 @@ function securityHeaders(): RequestHandler {
   };
 }
 
-function authenticate(
+function authenticateLocal(
   req: Request,
-  config: { apiToken: string; ownerLabel: string }
+  config: { apiToken: string; ownerLabel: string; store: StateStore }
 ): OwnerAuth | null {
   const authorization = req.get("authorization") || "";
   if (authorization) {
@@ -414,14 +883,264 @@ function authenticate(
     if (!safeEqual(supplied, config.apiToken)) return null;
     return {
       method: "bearer",
-      actor: { channel: "api", label: cleanLabel(req.get("x-kanban-actor"), config.ownerLabel) }
+      actor: { channel: "api", label: cleanLabel(req.get("x-kanban-actor"), config.ownerLabel) },
+      workspace: null,
+      store: config.store
     };
   }
   const cookie = parseCookies(req.get("cookie") || "")[SESSION_COOKIE];
   if (cookie && config.apiToken && verifySessionValue(cookie, config.apiToken)) {
-    return { method: "cookie", actor: { channel: "web", label: config.ownerLabel } };
+    return { method: "cookie", actor: { channel: "web", label: config.ownerLabel }, workspace: null, store: config.store };
   }
   return null;
+}
+
+async function resolveAccessContext(req: Request, config: AccessContextConfig): Promise<ResolvedAccessContext> {
+  const host = requestHost(req, config.trustForwardedHost);
+  const tenantWorkspace = await resolveTenantWorkspace(host, config.rootHost, config.accessStore);
+
+  if (!config.platformAuthConfig) {
+    return {
+      kind: "local",
+      auth: authenticateLocal(req, { apiToken: config.apiToken, ownerLabel: config.ownerLabel, store: config.legacyStore }),
+      identity: null,
+      workspace: null
+    };
+  }
+
+  const authorization = req.get("authorization") || "";
+  if (authorization) {
+    const bearer = /^Bearer\s+(\S+)$/.exec(authorization)?.[1] || "";
+    if (!config.apiToken || !safeEqual(bearer, config.apiToken)) {
+      return {
+        kind: host === config.rootHost ? "root" : "workspace",
+        auth: null,
+        identity: null,
+        workspace: tenantWorkspace
+      };
+    }
+    const bearerWorkspace = host === config.rootHost
+      ? (await config.accessStore.read()).workspaces.find((workspace) => workspace.storageId === config.legacyApiWorkspaceId) || null
+      : tenantWorkspace;
+    if (bearerWorkspace?.storageId !== config.legacyApiWorkspaceId) {
+      return {
+        kind: host === config.rootHost ? "root" : "workspace",
+        auth: null,
+        identity: null,
+        workspace: bearerWorkspace
+      };
+    }
+    return {
+      kind: "workspace",
+      auth: {
+        method: "bearer",
+        actor: { channel: "api", label: cleanLabel(req.get("x-kanban-actor"), config.ownerLabel) },
+        workspace: bearerWorkspace,
+        store: config.workspaceStoreResolver.resolve(bearerWorkspace.storageId)
+      },
+      identity: null,
+      workspace: bearerWorkspace
+    };
+  }
+
+  if (host === config.rootHost) {
+    const identity = await verifiedRootIdentity(req, config.platformAuthConfig, config.trustForwardedHost, config.accessStore);
+    return {
+      kind: "root",
+      auth: identity ? {
+        method: "cookie",
+        actor: { channel: "web", label: cleanLabel(identity.displayName, config.ownerLabel) },
+        workspace: null,
+        store: config.legacyStore
+      } : null,
+      identity,
+      workspace: null
+    };
+  }
+
+  if (!tenantWorkspace) return { kind: "workspace", auth: null, identity: null, workspace: null };
+
+  const platformRequest = webRequest(req, config.trustForwardedHost);
+  const tenantSession = await verifyTenantSession(platformRequest, config.platformAuthConfig.sessionSecret, isProductionRequest(platformRequest));
+  if (!tenantSession || tenantSession.workspaceId !== tenantWorkspace.id) {
+    return { kind: "workspace", auth: null, identity: null, workspace: tenantWorkspace };
+  }
+  if (await config.accessStore.isSessionRevoked(tenantSession.providerSubject, tenantSession.sessionId)) {
+    return { kind: "workspace", auth: null, identity: null, workspace: tenantWorkspace };
+  }
+  const ownerAccess = await config.accessStore.resolveOwner(tenantSession.providerSubject);
+  if (!ownerAccess || !ownerAccess.workspaces.some((workspace) => workspace.id === tenantWorkspace.id)) {
+    return { kind: "workspace", auth: null, identity: null, workspace: tenantWorkspace };
+  }
+  return {
+    kind: "workspace",
+    auth: {
+      method: "cookie",
+      actor: { channel: "web", label: cleanLabel(ownerAccess.owner.displayName, config.ownerLabel) },
+      workspace: tenantWorkspace,
+      store: config.workspaceStoreResolver.resolve(tenantWorkspace.storageId)
+    },
+    identity: {
+      providerSubject: ownerAccess.owner.providerSubject,
+      email: ownerAccess.owner.email,
+      displayName: ownerAccess.owner.displayName,
+      sessionId: tenantSession.sessionId
+    },
+    workspace: tenantWorkspace
+  };
+}
+
+function requestStore(req: Request): StateStore {
+  if (!req.ownerAuth) throw httpError(401, "Authentication required.");
+  return req.ownerAuth.store;
+}
+
+function fixedWorkspaceStoreResolver(store: StateStore, storageId: string): WorkspaceStoreResolver {
+  return {
+    kind: store.kind,
+    resolve(requestedStorageId: string): StateStore {
+      if (requestedStorageId !== storageId) throw new Error(`Workspace store ${requestedStorageId} is unavailable in this fixture.`);
+      return store;
+    }
+  };
+}
+
+async function verifiedRootIdentity(
+  req: Request,
+  config: PlatformAuthConfig,
+  trustForwardedHost: boolean,
+  accessStore?: AccessStore
+): Promise<RootSession | null> {
+  const platformRequest = webRequest(req, trustForwardedHost);
+  const identity = await verifyRootSession(platformRequest, config.sessionSecret, isProductionRequest(platformRequest));
+  if (!identity) return null;
+  if (accessStore && await accessStore.isSessionRevoked(identity.providerSubject, identity.sessionId)) return null;
+  return identity;
+}
+
+function webRequest(req: Request, trustForwardedHost: boolean): globalThis.Request {
+  const protocol = requestProtocol(req, trustForwardedHost);
+  const host = requestHost(req, trustForwardedHost);
+  const headers = new Headers();
+  for (const [name, raw] of Object.entries(req.headers)) {
+    if (Array.isArray(raw)) for (const value of raw) headers.append(name, value);
+    else if (raw !== undefined) headers.set(name, raw);
+  }
+  return new globalThis.Request(`${protocol}://${host}${req.originalUrl}`, { method: req.method, headers });
+}
+
+function sendAuthRoute(res: Response, route: AuthRouteResponse): void {
+  for (const [name, raw] of Object.entries(route.headers || {})) {
+    const values = headerValues(raw);
+    for (const value of values) res.append(name, value);
+  }
+  if (route.json) res.status(route.status).json(route.json);
+  else res.status(route.status).end();
+}
+
+function headerValues(value: string | string[] | undefined): string[] {
+  return Array.isArray(value) ? value : value ? [value] : [];
+}
+
+function canonicalConfiguredHost(raw: string): string {
+  const value = String(raw || "").trim().toLowerCase().replace(/\.$/, "");
+  if (!value) throw new Error("Root host is required.");
+  try {
+    const parsed = new URL(`http://${value}`);
+    if (!parsed.hostname || parsed.username || parsed.password || parsed.pathname !== "/" || parsed.search || parsed.hash) throw new Error();
+    return parsed.host;
+  } catch {
+    throw new Error("Root host is invalid.");
+  }
+}
+
+function requestHost(req: Request, trustForwardedHost: boolean): string {
+  const raw = trustForwardedHost ? req.get("x-forwarded-host") || req.get("host") : req.get("host");
+  const value = String(raw || "").trim().toLowerCase().replace(/\.$/, "");
+  if (!value || value.includes(",") || /[\s/@?#\\]/.test(value)) return "";
+  try {
+    const parsed = new URL(`http://${value}`);
+    return parsed.host.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+function requestProtocol(req: Request, trustForwardedHost: boolean): "http" | "https" {
+  const forwarded = trustForwardedHost ? req.get("x-forwarded-proto") : undefined;
+  if (forwarded === "https") return "https";
+  return req.protocol === "https" ? "https" : "http";
+}
+
+function requireRootRequest(req: Request, rootHost: string, trustForwardedHost: boolean): void {
+  if (requestHost(req, trustForwardedHost) !== rootHost) throw httpError(404, "Workspace unavailable.");
+}
+
+async function resolveTenantWorkspace(host: string, rootHost: string, accessStore: AccessStore): Promise<AccessWorkspace | null> {
+  if (!host || host === rootHost) return null;
+  const hostname = new URL(`http://${host}`).hostname;
+  const rootHostname = new URL(`http://${rootHost}`).hostname;
+  const suffix = `.${rootHostname}`;
+  if (!hostname.endsWith(suffix)) return null;
+  const slug = hostname.slice(0, -suffix.length);
+  if (!slug || slug.includes(".") || RESERVED_WORKSPACE_SLUGS.has(slug)) return null;
+  try {
+    return await accessStore.getWorkspaceBySlug(slug);
+  } catch {
+    throw httpError(503, "Workspace registry is unavailable.");
+  }
+}
+
+function workspaceHost(slug: string, rootHost: string): string {
+  const parsed = new URL(`http://${rootHost}`);
+  return `${slug}.${parsed.hostname}${parsed.port ? `:${parsed.port}` : ""}`;
+}
+
+function publicAccessWorkspace(workspace: AccessWorkspace, rootHost: string): UnknownRecord {
+  return {
+    id: workspace.id,
+    slug: workspace.slug,
+    name: workspace.name,
+    url: `${publicProtocol(rootHost)}://${workspaceHost(workspace.slug, rootHost)}`
+  };
+}
+
+function rootLoginUrl(rootHost: string): string {
+  return `${publicProtocol(rootHost)}://${rootHost}/auth/login`;
+}
+
+function rootLogoutUrl(rootHost: string): string {
+  return `${publicProtocol(rootHost)}://${rootHost}/auth/logout`;
+}
+
+function publicProtocol(rootHost: string): "http" | "https" {
+  return isLoopbackHost(new URL(`http://${rootHost}`).hostname) ? "http" : "https";
+}
+
+function workspaceSlug(value: unknown): string {
+  const slug = requiredString(value, "Workspace slug").toLowerCase();
+  if (RESERVED_WORKSPACE_SLUGS.has(slug) || !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(slug)) {
+    throw httpError(400, "Workspace slug must use lowercase letters, numbers, and hyphens.");
+  }
+  return slug;
+}
+
+function workspaceName(value: unknown): string {
+  const name = requiredString(value, "Workspace name");
+  if (name.length > 120 || /[\r\n\0]/.test(name)) {
+    throw httpError(400, "Workspace name must be 120 characters or fewer and stay on one line.");
+  }
+  return name;
+}
+
+function rejectWorkspaceSelectors(req: Request, includeBody: boolean): void {
+  const selectorPattern = /^(workspace(?:id|slug)?|tenant(?:id|slug)?)$/i;
+  if (Object.keys(req.query).some((key) => selectorPattern.test(key)) || req.get("x-kanban-workspace")) {
+    throw httpError(400, "Workspace context cannot be supplied by the client.");
+  }
+  if (includeBody && Object.keys(asRecord(req.body)).some((key) => selectorPattern.test(key))) {
+    throw httpError(400, "Workspace context cannot be supplied by the client.");
+  }
 }
 
 function idempotentMutation(
@@ -603,7 +1322,7 @@ function parseCookies(header: string): Record<string, string> {
   return cookies;
 }
 
-function assertRequestOrigin(req: Request, requireOrigin: boolean): void {
+function assertRequestOrigin(req: Request, requireOrigin: boolean, trustForwardedHost = false): void {
   const origin = req.get("origin");
   if (!origin) {
     if (requireOrigin) throw httpError(403, "A same-origin browser request is required.");
@@ -615,9 +1334,23 @@ function assertRequestOrigin(req: Request, requireOrigin: boolean): void {
   } catch {
     throw httpError(403, "Invalid request origin.");
   }
-  const expectedHost = (req.get("x-forwarded-host") || req.get("host") || "").split(",", 1)[0].trim();
-  const expectedProtocol = (req.get("x-forwarded-proto") || req.protocol || "http").split(",", 1)[0].trim();
+  const expectedHost = requestHost(req, trustForwardedHost);
+  const expectedProtocol = requestProtocol(req, trustForwardedHost);
   if (parsed.host !== expectedHost || parsed.protocol !== `${expectedProtocol}:`) throw httpError(403, "Cross-origin request rejected.");
+}
+
+function assertExactOrigin(req: Request, expectedOrigin: string): void {
+  const origin = req.get("origin");
+  if (!origin) throw httpError(403, "A trusted root-origin handoff is required.");
+  let actual: URL;
+  let expected: URL;
+  try {
+    actual = new URL(origin);
+    expected = new URL(expectedOrigin);
+  } catch {
+    throw httpError(403, "Invalid request origin.");
+  }
+  if (actual.origin !== expected.origin) throw httpError(403, "Cross-origin request rejected.");
 }
 
 function requireActor(req: Request): ActivityActor {
@@ -708,8 +1441,10 @@ function slugId(name: string, position: number): string {
 }
 
 function isLoopbackHost(host: string): boolean {
-  const normalized = host.trim().toLowerCase().replace(/^\[|\]$/g, "");
-  return normalized === "localhost" || normalized === "::1" || normalized.startsWith("127.");
+  const raw = host.trim().toLowerCase();
+  const candidate = raw === "::1" ? raw : raw.startsWith("[") ? raw.slice(1, raw.indexOf("]")) : raw.split(":", 1)[0];
+  const normalized = candidate.replace(/^\[|\]$/g, "");
+  return normalized === "localhost" || normalized.endsWith(".localhost") || normalized === "::1" || normalized.startsWith("127.");
 }
 
 function formatAction(action: string): string {

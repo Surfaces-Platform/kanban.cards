@@ -17,7 +17,7 @@ Product scope wins over design preference. This file wins over implementation ha
 
 kanban.cards should make delegated execution easy to start, easy to inspect, and easy to correct.
 
-The skill does most of the operating. The browser turns the shared state into a clear workspace a person can understand and change. Every design decision should make one of those jobs easier.
+The skill does most of the operating. The browser turns the shared state into a clear Workspace a person can understand and change. Every design decision should make one of those jobs easier.
 
 ## Experience model
 
@@ -27,6 +27,8 @@ The browser and skill are two clients of the same system:
 - The browser shows the current state, provides direct editing, and helps the owner catch drift.
 - A Project is the board. Columns express state. Cards carry the work. Comments and Activity preserve useful context.
 - Neither client maintains a second workflow model.
+
+Owners sign in through a provider-verified root experience, then enter one server-authorized Workspace at its canonical host. Zero Workspaces leads to creation, one opens directly, and many require an explicit choice. The skill credential remains a temporary owner-authority compatibility path bound server-side to the migrated Workspace; the next roadmap slice replaces that bridge with a verified agent principal.
 
 The interface should feel like a focused work surface. It should not feel like an administration console for agents, permissions, or workflows.
 
@@ -55,7 +57,7 @@ The active Project and selected Card must be obvious. Changing Projects should n
 
 ### Authority stays simple and honest
 
-One owner key grants access to the whole workspace. The interface must not imply per-Project permissions, authenticated agent identities, or verified authorship that the system does not provide.
+A verified owner session grants access only to Workspaces explicitly bound to that provider identity. Within a Workspace, authority remains Workspace-wide. The interface must not imply per-Project permissions, authenticated agent identities, or verified agent authorship that the system does not provide.
 
 Activity may show the client channel and a caller-supplied actor label. The presentation should treat that information as attribution, not identity proof.
 
@@ -94,7 +96,7 @@ These qualities are outcomes, not inherited tokens. The new system must choose i
 
 ### Sign-in
 
-The sign-in surface should explain that the owner key opens the whole workspace. Key entry is a short transition into the product, not a permanent part of the application chrome. The key must disappear from the client after the session exchange.
+The production sign-in surface should send the owner through the configured identity provider without collecting credentials in kanban.cards. After sign-in, the root surface creates the first Workspace, opens the sole Workspace, or presents an explicit Workspace chooser. A one-time, exact-host handoff establishes a host-only tenant session without placing its token in a URL. Local development may retain the owner-key form when provider auth is deliberately absent.
 
 ### Empty workspace
 
@@ -129,7 +131,7 @@ The design must account for the full workflow, including states that are easy to
 | State | What the experience must communicate |
 | --- | --- |
 | Opening | The application is loading without exposing stale private data. |
-| Signed out | One owner key opens one private workspace. |
+| Signed out | Provider sign-in opens only Workspaces owned by the verified identity; local fallback states their narrower development boundary. |
 | Invalid key | Access was refused; no Project names or content are revealed. |
 | Empty workspace | The owner can create a Project or ask the skill to create one. |
 | Empty Project | Columns are present and the next Card can be created. |
@@ -157,13 +159,14 @@ The design must account for the full workflow, including states that are easy to
 
 ## Access and context presentation
 
-The product has one implicit owner and one workspace-wide credential.
+The product has provider-verified owners, isolated Workspaces, and one Workspace-wide authority boundary inside each Workspace.
 
-- The account indicator may show the configured owner label, but it must not suggest a role system.
+- The account indicator may show the provider-verified display name, but it must not suggest a role system.
+- The canonical Workspace host and server-validated session select tenant context. A Project ID, request body, query, or header never selects it.
 - The active Project is navigation context, not an authorization scope.
 - Repository binding belongs to the skill workflow; the browser does not need to simulate repository permissions.
-- API actor labels should not receive avatars, presence, or identity treatments that imply verification.
-- The owner key and bearer tokens must never appear in client-readable storage, markup, URLs, logs, or screenshots. The browser session is retained only in the signed, expiring HttpOnly cookie.
+- API actor labels still should not receive avatars, presence, or identity treatments that imply verification.
+- Provider secrets and the compatibility bearer must never appear in client-readable storage, markup, URLs, logs, or screenshots. A handoff token may exist only in the root response, an immediately removed hidden form control, and the exact-destination POST body; it never enters rendered content, persistent browser storage, a URL, a log, or a screenshot. Browser sessions remain only in signed, expiring, host-only HttpOnly cookies.
 
 ## Responsive and accessible behavior
 
@@ -272,7 +275,7 @@ A design is ready to implement when:
 - authentication, loading, empty, success, error, and session-expiry states are designed
 - the same core workflow works at desktop and mobile widths
 - keyboard and assistive-technology behavior is defined for interactive surfaces
-- no interface element overstates actor identity or narrows the owner key's real authority
+- no interface element overstates agent identity or narrows the authenticated Workspace authority
 - rendered review compares the result with this file and the product vision, not with historical screenshots
 - `UI_CONTRACT.md` and its automated checks are updated to match the accepted design
 

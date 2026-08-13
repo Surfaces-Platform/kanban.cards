@@ -1,19 +1,20 @@
 # kanban.cards
 
-kanban.cards is a small, skill-first Kanban system. An agent uses the same resource API as the browser and acts with the owner's credential. The website is the visual oversight surface; it is not a second workflow engine.
+kanban.cards is a small, skill-first Kanban system. Owners use provider-verified, tenant-aware browser sessions. During the migration slice, the skill uses a compatibility credential bound server-side to one Workspace and acts with the owner's authority. The website is the visual oversight surface; it is not a second workflow engine.
 
 The product model is deliberately narrow:
 
 ```text
 Owner
-└── Projects
+└── Workspaces
+    └── Projects
     ├── Columns
     ├── Cards
     │   └── Comments
     └── Activity
 ```
 
-A Project is the board. There are no teams, board sub-resources, modeled agents, delegated sessions, roles, reviewers, approval gates, workflow generators, or legacy-board migration.
+A Project is the board. Workspaces are the tenant boundary. There are no teams, board sub-resources, modeled agent identities, delegated sessions, roles, invitations, reviewers, approval gates, workflow generators, or legacy-board migration.
 
 ## Design authority
 
@@ -32,7 +33,7 @@ export KANBAN_CARDS_API_TOKEN='choose-a-local-owner-key'
 npm run dev
 ```
 
-Open `http://127.0.0.1:4317` and enter the same owner key. Static assets and the sign-in screen remain public; project data requires either the signed browser cookie or bearer token.
+Open `http://127.0.0.1:4317` and enter the same owner key. This form is the deliberate local fallback when OIDC is absent. Production requires provider sign-in; Project data requires either the tenant session or the Workspace-bound compatibility bearer.
 
 The runnable helper is included with the skill. Connect it to the local server:
 
@@ -71,6 +72,8 @@ Create operations accept `Idempotency-Key`, card imports can use `externalKey`, 
 Runtime source is TypeScript under `src/`:
 
 - `src/server.ts`: public shell, owner authentication, and resource API
+- `src/platform-auth.ts`: OIDC, claim validation, and signed root/tenant sessions
+- `src/access-store.ts`: owner, Workspace, ownership, and one-time handoff registry
 - `src/state-store.ts`: local JSON and Postgres persistence
 - `src/client/app.ts`: sign-in, project list, Kanban board, and Card detail and editing
 - `src/cli/kanban-cards-client.ts`: skill helper
@@ -79,14 +82,9 @@ The TypeScript CLI source builds to the tracked `.agents/skills/kanban-cards/scr
 
 Local development stores state in `data/kanban-cards-v2-state.json` unless a database URL is configured. Production uses the independent `kanban_v2_workspaces` table. Old workspace rows are not imported or read.
 
-Environment variables:
+Production requires the database URL and the OIDC issuer/client/redirect/session/surface configuration. The optional legacy cutover requires the exact provider subject plus Workspace slug/name; verified email and display name always come from the matching provider callback. While the skill bridge remains enabled, configure `KANBAN_CARDS_API_TOKEN` and `KANBAN_CARDS_API_WORKSPACE_ID=default`; remove the token after provider access passes the retirement proof. Set `KANBAN_CARDS_ROOT_HOST=kanban.cards` in production. Local provider mode derives `localhost:<port>` from the validated OIDC redirect when the root host is absent.
 
-- `KANBAN_CARDS_API_TOKEN`: required owner key in production
-- `KANBAN_CARDS_OWNER_LABEL`: optional activity label, default `Owner`
-- `KANBAN_CARDS_SESSION_TTL_SECONDS`: optional browser-cookie lifetime, default seven days
-- `KANBAN_CARDS_DATABASE_URL`, `POSTGRES_URL`, or `DATABASE_URL`: Postgres connection
-
-Every environment requires the owner key. A non-loopback bind is treated as production: cookies are Secure and a database URL is required. Missing authentication or storage configuration fails closed while the public shell remains available.
+The access migration leaves the existing `kanban_v2_workspaces:default` JSON unchanged and adds an access-registry mapping around it. See [`docs/workspace-access-migration.md`](docs/workspace-access-migration.md) for the exact cutover and rollback proof.
 
 ## API
 
@@ -94,6 +92,10 @@ The browser and helper use the same endpoints:
 
 ```text
 GET/POST/DELETE /api/session
+GET             /api/access/health
+GET/POST        /api/workspaces
+POST            /api/workspace-handoffs
+POST            /api/workspace-handoff
 GET/POST        /api/projects
 GET/PATCH       /api/projects/:projectId
 POST            /api/projects/:projectId/cards
@@ -120,10 +122,10 @@ npm run test:browser
 
 The repository deploys to Vercel as an Express function through `api/index.ts`.
 
-1. Configure the owner key and Postgres URL for production.
+1. Configure provider auth, the explicit legacy Workspace mapping, Postgres, and—only while required—the Workspace-bound compatibility key.
 2. Deploy the exact validated commit to a protected production-target candidate without moving the public domain.
-3. Make an authenticated candidate read and confirm it reports the `postgres` store. That request creates the V2 table and empty workspace idempotently when they do not exist.
-4. Verify a skill-created Card, comment, movement, Activity, and rendered browser state against the candidate before promoting that exact artifact.
+3. Confirm `/api/health` and `/api/access/health` are ready. Legacy cutover refuses a missing or invalid `kanban_v2_workspaces:default` row before it writes the access mapping; it does not initialize replacement legacy data.
+4. Verify the rendered provider root and tenant flow. While the bridge is enabled, also verify a skill-created Card, comment, movement, and Activity before promoting that exact artifact.
 
 `npm run db:init` is an optional manual initializer only when a production database URL is already present in the current process. Treat it as successful production proof only when it reports `Initialized V2 postgres workspace at kanban_v2_workspaces:default`; a `file` result initialized local storage instead. Follow [the runbook](docs/runbook.md) for the complete candidate, promotion, rotation, and rollback procedure.
 

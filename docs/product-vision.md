@@ -6,7 +6,7 @@ kanban.cards is a durable, visible execution surface for a person and the agents
 
 Recommendations and plans are easy to generate and hard to carry through. A repository needs a small shared record of what was proposed, what is happening now, what changed, and what remains.
 
-The agent is a client authenticated with the owner's key and acting with the owner's authority. The browser and the skill operate on the same Projects, Cards, Comments, and Activity through the same API.
+The browser uses a provider-verified owner identity and an isolated Workspace session. During the migration slice, the skill remains a client authenticated by a compatibility credential that is bound server-side to the migrated Workspace and acts with the owner's authority. Both clients operate on the same Projects, Cards, Comments, and Activity through the same API.
 
 ## Why Kanban
 
@@ -22,7 +22,7 @@ That is enough to support an execution loop:
 
 ## Product boundary
 
-kanban.cards has one implicit owner and many Projects. A Project is the board and contains Columns and Cards. Cards contain Comments. Project Activity records changes made with the owner's authority.
+kanban.cards has owners, isolated Workspaces, and many Projects within each Workspace. A Project is the board and contains Columns and Cards. Cards contain Comments. Project Activity records changes made with the owner's authority.
 
 The skill is the primary operating client. The browser provides sign-in, project selection, a visual board, and Card detail and editing. The product vision does not prescribe a drawer, inspector, or other specific UI construction.
 
@@ -30,13 +30,13 @@ The skill is the primary operating client. The browser provides sign-in, project
 
 ## Trust boundary
 
-One owner key grants read and write access to the entire workspace. This version has no per-Project permissions, delegated grants, or separate agent identities.
+A provider-verified root session may enumerate only Workspaces owned by that identity. Entering a Workspace uses a single-use, exact-destination handoff and a signed, expiring, host-only HttpOnly tenant cookie. Every data read and mutation selects its state store from the validated host and session. This version has no per-Project permissions, delegated grants, invitations, roles, or separate agent identities.
 
-The browser exchanges the owner key for a signed, expiring, HttpOnly cookie. The skill stores the key in user-scoped configuration and sends it as a bearer token. A repository's `.kanban-cards.json` contains only a Project ID. That ID selects context; it does not limit the key's authority.
+The skill stores the interim owner-authority credential in user-scoped configuration and sends it as a bearer token. The server binds that credential to exactly one legacy Workspace and storage row; it cannot enumerate, select, or enter a sibling Workspace. A repository's `.kanban-cards.json` contains only a Project ID. That ID selects Project context inside the authenticated Workspace; it does not select tenant authority.
 
 Activity records whether a change came through the browser or API and may include a caller-supplied actor label. The label provides context. It is not a separately authenticated identity.
 
-Rotating the owner key requires a new deployment and skill configuration. Deployments using the new key reject browser sessions signed with the old one. Older immutable deployment URLs retain their original environment snapshot and must be protected or retired separately.
+Rotating the interim skill credential requires a new deployment and skill configuration. Provider and browser session rotation is independent. Older immutable deployment URLs retain their original environment snapshot and must be protected or retired separately.
 
 ## Agentic safety
 

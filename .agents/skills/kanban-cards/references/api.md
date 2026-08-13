@@ -1,6 +1,6 @@
 # kanban.cards API
 
-The base URL defaults to `http://127.0.0.1:4317/api`. The owner token authorizes the browser and skill to use the same project API.
+The base URL defaults to `http://127.0.0.1:4317/api`. The compatibility token authorizes the skill to use one server-bound Workspace. It never accepts a client-supplied Workspace selector. The browser uses provider-verified root and tenant sessions in production.
 
 ## Headers
 
@@ -51,7 +51,7 @@ Use `https://` for every non-loopback API URL. The helper permits plaintext `htt
 
 ### `GET /session`
 
-Return the authenticated owner session.
+Return the authenticated local, root, or Workspace session. The helper expects a Workspace context; it cannot use root Workspace-enumeration routes.
 
 ### `GET /projects`
 

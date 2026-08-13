@@ -15,7 +15,7 @@ Context Dock is the only production interface direction.
 - Closing returns to the originating Column unless the Card moved while open. After a move, it returns to the destination Column and restores the moved Card, selection, and keyboard focus.
 - Focus Workspace remains comparison evidence. It must not ship as a second product mode.
 
-The client still has four primary surfaces: access-key sign-in, Project selection and empty state, the Project workspace, and Card detail and editing. Their structure must follow this accepted direction without introducing a second product model.
+The client has provider sign-in, zero/one/many Workspace routing, Project selection and empty state, the Project workspace, and Card detail and editing. Local development may show the access-key fallback when provider auth is absent. Their structure must follow this accepted direction without introducing a second product model.
 
 ## Resource model
 
@@ -68,11 +68,14 @@ The client still has four primary surfaces: access-key sign-in, Project selectio
 ## Authentication boundary
 
 - The static shell and sign-in surface render without authenticated project data.
-- The access key is submitted once to `POST /api/session`.
-- The browser relies on the resulting secure, HttpOnly cookie.
-- The access key must never be stored in local storage, session storage, markup, logs, or a client global.
+- Production redirects from the exact root `/auth/login` route into provider-verified OIDC with PKCE, state, nonce, issuer, audience, verified-email, and explicit `kanban.cards` surface checks.
+- Root and tenant sessions are separate signed, expiring, host-only HttpOnly cookies. A root session lists only Workspaces owned by its verified subject. A tenant cookie works only at its exact Workspace host.
+- Zero Workspaces renders creation, one opens directly, and many render a chooser. The tenant handoff uses an exact-origin, cross-host form POST; its hashed, single-use token exists only in the root response, an immediately removed hidden form control, and the exact-destination POST body. It never enters a URL, rendered content, or persistent browser storage.
+- A host/session or the server-bound compatibility bearer selects Workspace context. Body, query, and header tenant selectors are rejected.
+- Provider secrets and the compatibility bearer must never be stored in local storage, session storage, markup, URLs, logs, or a client global. The handoff token is limited to the transient POST transport above and is not retained. The local fallback key is submitted once to `POST /api/session` only when provider auth is absent.
+- Sign-out clears private UI and the current host cookie before durable session-family revocation. A revocation-store failure must show an incomplete-global-sign-out error and never render the successful `Signed out` state. The current host may retain only a short-lived, signed, non-authorizing family-revocation handle. A tenant retry repeats `DELETE /api/session` on that tenant before navigating to root logout; the root recovery marker is removed from the URL on load, and retry remains available after recovery.
 - Logging out calls `DELETE /api/session` and clears pending and retained drafts, Card fields, selected Card, mobile Column context, receipts, transient-confirmation content and timers, focus-return state, and pending client operations.
-- Sign out displays a persistent textual completion status and focuses an empty owner-key field.
+- Sign out displays a persistent textual completion status and focuses the provider sign-in action, or the empty owner-key field in local fallback mode.
 - Re-authentication must not restore a pre-signout draft or selection.
 - An API `401` after authentication applies the same private-state clearing behavior as Sign out before returning to sign-in.
 - Opening, invalid access, session expiry, service failure, and Sign out expose no private Project or Card content.

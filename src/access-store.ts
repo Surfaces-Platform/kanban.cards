@@ -1,0 +1,806 @@
+import crypto from "node:crypto";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { Pool } from "pg";
+
+import { normalizePostgresConnectionString, resolvePostgresSsl } from "./postgres-config";
+import type { PostgresOptions } from "./types";
+
+export const ACCESS_REGISTRY_SCHEMA_VERSION = 1 as const;
+export const DEFAULT_ACCESS_TABLE_NAME = "kanban_v3_access_registry";
+export const DEFAULT_ACCESS_DATA_PATH = path.join(process.cwd(), "data", "kanban-cards-v3-access.json");
+export const LEGACY_WORKSPACE_STORAGE_ID = "default";
+
+const ACCESS_REGISTRY_ROW_ID = "registry";
+const DEFAULT_HANDOFF_TTL_SECONDS = 5 * 60;
+const MAX_HANDOFF_TTL_SECONDS = 15 * 60;
+
+export interface AccessOwner {
+  id: string;
+  providerSubject: string;
+  email: string;
+  displayName: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AccessWorkspace {
+  id: string;
+  slug: string;
+  name: string;
+  storageId: string;
+  ownerIds: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AccessHandoff {
+  id: string;
+  tokenHash: string;
+  ownerId: string;
+  workspaceId: string;
+  sessionId: string;
+  destinationHost: string;
+  createdAt: string;
+  expiresAt: string;
+  consumedAt: string | null;
+}
+
+export interface RevokedAccessSession {
+  providerSubject: string;
+  sessionId: string;
+  revokedAt: string;
+}
+
+export interface AccessRegistryState {
+  schemaVersion: 1;
+  owners: AccessOwner[];
+  workspaces: AccessWorkspace[];
+  handoffs: AccessHandoff[];
+  revokedSessions: RevokedAccessSession[];
+}
+
+export interface AccessStoreOptions extends PostgresOptions {
+  dataPath?: string;
+  now?: () => Date;
+}
+
+export interface CreateWorkspaceInput {
+  providerSubject: string;
+  email: string;
+  displayName: string;
+  slug: string;
+  name: string;
+}
+
+export interface BindLegacyWorkspaceInput extends CreateWorkspaceInput {}
+
+export interface CreateHandoffInput {
+  providerSubject: string;
+  workspaceId: string;
+  sessionId: string;
+  destinationHost: string;
+  ttlSeconds?: number;
+  expiresAt?: string;
+}
+
+export interface IssuedAccessHandoff {
+  id: string;
+  token: string;
+  ownerId: string;
+  owner: AccessOwner;
+  workspaceId: string;
+  sessionId: string;
+  destinationHost: string;
+  createdAt: string;
+  expiresAt: string;
+}
+
+export interface ConsumeHandoffInput {
+  token: string;
+  destinationHost: string;
+}
+
+export interface ConsumedAccessHandoff {
+  handoffId: string;
+  owner: AccessOwner;
+  workspace: AccessWorkspace;
+  sessionId: string;
+  consumedAt: string;
+}
+
+export interface ResolvedAccessOwner {
+  owner: AccessOwner;
+  workspaces: AccessWorkspace[];
+}
+
+export type AccessStoreErrorCode =
+  | "ACCESS_CONFLICT"
+  | "ACCESS_FORBIDDEN"
+  | "ACCESS_HANDOFF_CONSUMED"
+  | "ACCESS_HANDOFF_DESTINATION_MISMATCH"
+  | "ACCESS_HANDOFF_EXPIRED"
+  | "ACCESS_HANDOFF_INVALID"
+  | "ACCESS_OWNER_NOT_FOUND"
+  | "ACCESS_SESSION_REVOKED"
+  | "ACCESS_WORKSPACE_NOT_FOUND";
+
+export class AccessStoreError extends Error {
+  constructor(readonly code: AccessStoreErrorCode, message: string) {
+    super(message);
+    this.name = "AccessStoreError";
+  }
+}
+
+export interface AccessStore {
+  kind: "file" | "postgres";
+  path: string;
+  read(): Promise<AccessRegistryState>;
+  resolveOwner(providerSubject: string): Promise<ResolvedAccessOwner | null>;
+  getOwnerByProviderSubject(providerSubject: string): Promise<AccessOwner | null>;
+  getWorkspaceById(workspaceId: string): Promise<AccessWorkspace | null>;
+  getWorkspaceBySlug(slug: string): Promise<AccessWorkspace | null>;
+  listWorkspacesForOwner(providerSubject: string): Promise<AccessWorkspace[]>;
+  createWorkspace(input: CreateWorkspaceInput): Promise<AccessWorkspace>;
+  bindLegacyWorkspace(input: BindLegacyWorkspaceInput): Promise<AccessWorkspace>;
+  isSessionRevoked(providerSubject: string, sessionId: string): Promise<boolean>;
+  revokeSession(providerSubject: string, sessionId: string): Promise<RevokedAccessSession>;
+  createHandoff(input: CreateHandoffInput): Promise<IssuedAccessHandoff>;
+  consumeHandoff(input: ConsumeHandoffInput): Promise<ConsumedAccessHandoff>;
+}
+
+interface AccessRegistryAdapter {
+  kind: "file" | "postgres";
+  path: string;
+  read(): Promise<AccessRegistryState>;
+  update<T>(mutator: (state: AccessRegistryState) => T): Promise<{ state: AccessRegistryState; result: T }>;
+}
+
+export function createAccessStore(options: AccessStoreOptions = {}): AccessStore {
+  const connectionString =
+    options.connectionString || process.env.KANBAN_CARDS_DATABASE_URL || process.env.POSTGRES_URL || process.env.DATABASE_URL;
+  if (connectionString || options.pool) {
+    return createPostgresAccessStore({ ...options, connectionString });
+  }
+  return createFileAccessStore(options.dataPath || DEFAULT_ACCESS_DATA_PATH, options);
+}
+
+export function createFileAccessStore(dataPath: string, options: Pick<AccessStoreOptions, "now"> = {}): AccessStore {
+  const resolvedPath = path.resolve(dataPath);
+  let writeQueue: Promise<unknown> = Promise.resolve();
+
+  async function write(nextState: unknown): Promise<AccessRegistryState> {
+    const normalized = normalizeAccessRegistry(nextState);
+    await fs.mkdir(path.dirname(resolvedPath), { recursive: true });
+    const temporaryPath = `${resolvedPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+    await fs.writeFile(temporaryPath, `${JSON.stringify(normalized, null, 2)}\n`, { mode: 0o600 });
+    await fs.rename(temporaryPath, resolvedPath);
+    return normalized;
+  }
+
+  async function read(): Promise<AccessRegistryState> {
+    try {
+      return normalizeAccessRegistry(JSON.parse(await fs.readFile(resolvedPath, "utf8")));
+    } catch (error) {
+      if (!isNodeError(error) || error.code !== "ENOENT") throw error;
+      return write(freshAccessRegistryState());
+    }
+  }
+
+  async function update<T>(mutator: (state: AccessRegistryState) => T): Promise<{ state: AccessRegistryState; result: T }> {
+    const nextWrite = writeQueue
+      .catch(() => undefined)
+      .then(async () => {
+        const state = await read();
+        const result = mutator(state);
+        const saved = await write(state);
+        return { state: saved, result };
+      });
+    writeQueue = nextWrite;
+    return nextWrite;
+  }
+
+  return accessStoreFromAdapter({ kind: "file", path: resolvedPath, read, update }, options.now);
+}
+
+export function createPostgresAccessStore(options: AccessStoreOptions = {}): AccessStore {
+  const tableName = validateTableName(options.tableName || DEFAULT_ACCESS_TABLE_NAME);
+  const pool =
+    options.pool ||
+    new Pool({
+      connectionString: normalizePostgresConnectionString(options.connectionString),
+      ssl: resolvePostgresSsl(options)
+    });
+  let readyPromise: Promise<void> | null = null;
+
+  function ensureReady(): Promise<void> {
+    if (!readyPromise) {
+      readyPromise = pool.query(`
+        CREATE TABLE IF NOT EXISTS ${tableName} (
+          id text PRIMARY KEY,
+          state jsonb NOT NULL,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          updated_at timestamptz NOT NULL DEFAULT now()
+        )
+      `).then(() => undefined).catch((error: unknown) => {
+        readyPromise = null;
+        throw error;
+      });
+    }
+    return readyPromise;
+  }
+
+  async function initialize(): Promise<void> {
+    await ensureReady();
+    await pool.query(
+      `INSERT INTO ${tableName} (id, state, created_at, updated_at)
+       VALUES ($1, $2::jsonb, now(), now())
+       ON CONFLICT (id) DO NOTHING`,
+      [ACCESS_REGISTRY_ROW_ID, JSON.stringify(freshAccessRegistryState())]
+    );
+  }
+
+  async function read(): Promise<AccessRegistryState> {
+    await initialize();
+    const result = await pool.query<{ state: unknown }>(`SELECT state FROM ${tableName} WHERE id = $1`, [ACCESS_REGISTRY_ROW_ID]);
+    if (!result.rows.length) throw new Error("Access registry was not initialized.");
+    return normalizeAccessRegistry(result.rows[0].state);
+  }
+
+  async function update<T>(mutator: (state: AccessRegistryState) => T): Promise<{ state: AccessRegistryState; result: T }> {
+    await ensureReady();
+    const client = await pool.connect();
+    let transactionStarted = false;
+    try {
+      await client.query("BEGIN");
+      transactionStarted = true;
+      await client.query(
+        `INSERT INTO ${tableName} (id, state, created_at, updated_at)
+         VALUES ($1, $2::jsonb, now(), now())
+         ON CONFLICT (id) DO NOTHING`,
+        [ACCESS_REGISTRY_ROW_ID, JSON.stringify(freshAccessRegistryState())]
+      );
+      const selected = await client.query<{ state: unknown }>(
+        `SELECT state FROM ${tableName} WHERE id = $1 FOR UPDATE`,
+        [ACCESS_REGISTRY_ROW_ID]
+      );
+      const state = normalizeAccessRegistry(selected.rows[0]?.state);
+      const mutationResult = mutator(state);
+      const normalized = normalizeAccessRegistry(state);
+      await client.query(`UPDATE ${tableName} SET state = $2::jsonb, updated_at = now() WHERE id = $1`, [
+        ACCESS_REGISTRY_ROW_ID,
+        JSON.stringify(normalized)
+      ]);
+      await client.query("COMMIT");
+      return { state: normalized, result: mutationResult };
+    } catch (error) {
+      if (transactionStarted) await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  return accessStoreFromAdapter(
+    { kind: "postgres", path: `${tableName}:${ACCESS_REGISTRY_ROW_ID}`, read, update },
+    options.now
+  );
+}
+
+export function freshAccessRegistryState(): AccessRegistryState {
+  return {
+    schemaVersion: ACCESS_REGISTRY_SCHEMA_VERSION,
+    owners: [],
+    workspaces: [],
+    handoffs: [],
+    revokedSessions: []
+  };
+}
+
+export function normalizeAccessRegistry(rawState: unknown): AccessRegistryState {
+  const state = requireRecord(rawState, "Access registry");
+  if (state.schemaVersion !== ACCESS_REGISTRY_SCHEMA_VERSION) {
+    throw new Error(`Unsupported access registry schema. Expected version ${ACCESS_REGISTRY_SCHEMA_VERSION}.`);
+  }
+  const owners = requireArray(state.owners, "Access registry owners").map(normalizeOwner);
+  const workspaces = requireArray(state.workspaces, "Access registry workspaces").map(normalizeWorkspace);
+  const handoffs = requireArray(state.handoffs, "Access registry handoffs").map(normalizeHandoff);
+  const revokedSessions = state.revokedSessions === undefined
+    ? []
+    : requireArray(state.revokedSessions, "Access registry revokedSessions").map(normalizeRevokedSession);
+
+  assertUnique(owners.map((owner) => owner.id), "owner id");
+  assertUnique(owners.map((owner) => owner.providerSubject), "provider subject");
+  assertUnique(workspaces.map((workspace) => workspace.id), "workspace id");
+  assertUnique(workspaces.map((workspace) => workspace.slug), "workspace slug");
+  assertUnique(workspaces.map((workspace) => workspace.storageId), "workspace storage id");
+  assertUnique(handoffs.map((handoff) => handoff.id), "handoff id");
+  assertUnique(handoffs.map((handoff) => handoff.tokenHash), "handoff token hash");
+  assertUnique(
+    revokedSessions.map((session) => revokedSessionKey(session.providerSubject, session.sessionId)),
+    "revoked session"
+  );
+
+  const ownerIds = new Set(owners.map((owner) => owner.id));
+  const workspacesById = new Map(workspaces.map((workspace) => [workspace.id, workspace]));
+  for (const owner of owners) {
+    if (Date.parse(owner.updatedAt) < Date.parse(owner.createdAt)) {
+      throw new Error(`Owner ${owner.id} cannot be updated before it is created.`);
+    }
+  }
+  for (const workspace of workspaces) {
+    if (Date.parse(workspace.updatedAt) < Date.parse(workspace.createdAt)) {
+      throw new Error(`Workspace ${workspace.id} cannot be updated before it is created.`);
+    }
+    assertUnique(workspace.ownerIds, `owner membership in workspace ${workspace.id}`);
+    for (const ownerId of workspace.ownerIds) {
+      if (!ownerIds.has(ownerId)) throw new Error(`Workspace ${workspace.id} refers to missing owner ${ownerId}.`);
+    }
+  }
+  for (const handoff of handoffs) {
+    const workspace = workspacesById.get(handoff.workspaceId);
+    if (!ownerIds.has(handoff.ownerId)) throw new Error(`Handoff ${handoff.id} refers to missing owner ${handoff.ownerId}.`);
+    if (!workspace) throw new Error(`Handoff ${handoff.id} refers to missing workspace ${handoff.workspaceId}.`);
+    if (!workspace.ownerIds.includes(handoff.ownerId)) {
+      throw new Error(`Handoff ${handoff.id} owner does not own workspace ${handoff.workspaceId}.`);
+    }
+    if (Date.parse(handoff.expiresAt) <= Date.parse(handoff.createdAt)) {
+      throw new Error(`Handoff ${handoff.id} must expire after it is created.`);
+    }
+    if (handoff.consumedAt && Date.parse(handoff.consumedAt) < Date.parse(handoff.createdAt)) {
+      throw new Error(`Handoff ${handoff.id} cannot be consumed before it is created.`);
+    }
+  }
+  return { schemaVersion: ACCESS_REGISTRY_SCHEMA_VERSION, owners, workspaces, handoffs, revokedSessions };
+}
+
+function accessStoreFromAdapter(adapter: AccessRegistryAdapter, nowOption?: () => Date): AccessStore {
+  const now = nowOption || (() => new Date());
+
+  async function getOwnerByProviderSubject(providerSubject: string): Promise<AccessOwner | null> {
+    const subject = normalizeProviderSubject(providerSubject);
+    return (await adapter.read()).owners.find((owner) => owner.providerSubject === subject) || null;
+  }
+
+  async function resolveOwner(providerSubject: string): Promise<ResolvedAccessOwner | null> {
+    const subject = normalizeProviderSubject(providerSubject);
+    const state = await adapter.read();
+    const owner = state.owners.find((candidate) => candidate.providerSubject === subject);
+    if (!owner) return null;
+    const workspaces = state.workspaces
+      .filter((workspace) => workspace.ownerIds.includes(owner.id))
+      .sort((left, right) => left.slug.localeCompare(right.slug));
+    return { owner, workspaces };
+  }
+
+  async function getWorkspaceBySlug(slug: string): Promise<AccessWorkspace | null> {
+    const canonicalSlug = normalizeWorkspaceSlug(slug);
+    return (await adapter.read()).workspaces.find((workspace) => workspace.slug === canonicalSlug) || null;
+  }
+
+  async function getWorkspaceById(workspaceId: string): Promise<AccessWorkspace | null> {
+    const id = requiredIdentifier(workspaceId, "Workspace id");
+    return (await adapter.read()).workspaces.find((workspace) => workspace.id === id) || null;
+  }
+
+  async function listWorkspacesForOwner(providerSubject: string): Promise<AccessWorkspace[]> {
+    const subject = normalizeProviderSubject(providerSubject);
+    const state = await adapter.read();
+    const owner = state.owners.find((candidate) => candidate.providerSubject === subject);
+    if (!owner) return [];
+    return state.workspaces.filter((workspace) => workspace.ownerIds.includes(owner.id)).sort((left, right) => left.slug.localeCompare(right.slug));
+  }
+
+  async function createWorkspace(input: CreateWorkspaceInput): Promise<AccessWorkspace> {
+    const providerSubject = normalizeProviderSubject(input.providerSubject);
+    const email = normalizeOwnerEmail(input.email);
+    const displayName = normalizeOwnerDisplayName(input.displayName);
+    const slug = normalizeWorkspaceSlug(input.slug);
+    const name = normalizeWorkspaceName(input.name);
+    return (await adapter.update((state) => {
+      if (state.workspaces.some((workspace) => workspace.slug === slug)) {
+        throw new AccessStoreError("ACCESS_CONFLICT", `Workspace slug ${slug} is already registered.`);
+      }
+      const timestamp = validNow(now);
+      const owner = ensureOwner(state, { providerSubject, email, displayName }, timestamp);
+      const workspace: AccessWorkspace = {
+        id: uniqueId("workspace", new Set(state.workspaces.map((candidate) => candidate.id))),
+        slug,
+        name,
+        storageId: uniqueId("state", new Set(state.workspaces.map((candidate) => candidate.storageId))),
+        ownerIds: [owner.id],
+        createdAt: timestamp,
+        updatedAt: timestamp
+      };
+      state.workspaces.push(workspace);
+      return workspace;
+    })).result;
+  }
+
+  async function bindLegacyWorkspace(input: BindLegacyWorkspaceInput): Promise<AccessWorkspace> {
+    const providerSubject = normalizeProviderSubject(input.providerSubject);
+    const email = normalizeOwnerEmail(input.email);
+    const displayName = normalizeOwnerDisplayName(input.displayName);
+    const slug = normalizeWorkspaceSlug(input.slug);
+    const name = normalizeWorkspaceName(input.name);
+    return (await adapter.update((state) => {
+      const timestamp = validNow(now);
+      const owner = ensureOwner(state, { providerSubject, email, displayName }, timestamp);
+      const byStorage = state.workspaces.find((workspace) => workspace.storageId === LEGACY_WORKSPACE_STORAGE_ID);
+      const bySlug = state.workspaces.find((workspace) => workspace.slug === slug);
+      const existing = byStorage || bySlug;
+      if (existing) {
+        if (
+          byStorage !== bySlug ||
+          existing.storageId !== LEGACY_WORKSPACE_STORAGE_ID ||
+          existing.slug !== slug ||
+          existing.name !== name ||
+          !existing.ownerIds.includes(owner.id)
+        ) {
+          throw new AccessStoreError("ACCESS_CONFLICT", "Legacy Workspace binding conflicts with the stored mapping.");
+        }
+        return existing;
+      }
+      const workspace: AccessWorkspace = {
+        id: uniqueId("workspace", new Set(state.workspaces.map((candidate) => candidate.id))),
+        slug,
+        name,
+        storageId: LEGACY_WORKSPACE_STORAGE_ID,
+        ownerIds: [owner.id],
+        createdAt: timestamp,
+        updatedAt: timestamp
+      };
+      state.workspaces.push(workspace);
+      return workspace;
+    })).result;
+  }
+
+  async function isSessionRevoked(providerSubject: string, sessionId: string): Promise<boolean> {
+    const subject = normalizeProviderSubject(providerSubject);
+    const familyId = normalizeSessionId(sessionId);
+    return hasRevokedSession(await adapter.read(), subject, familyId);
+  }
+
+  async function revokeSession(providerSubject: string, sessionId: string): Promise<RevokedAccessSession> {
+    const subject = normalizeProviderSubject(providerSubject);
+    const familyId = normalizeSessionId(sessionId);
+    return (await adapter.update((state) => {
+      const existing = state.revokedSessions.find(
+        (candidate) => candidate.providerSubject === subject && candidate.sessionId === familyId
+      );
+      if (existing) return existing;
+      const revokedSession: RevokedAccessSession = {
+        providerSubject: subject,
+        sessionId: familyId,
+        revokedAt: validNow(now)
+      };
+      state.revokedSessions.push(revokedSession);
+      return revokedSession;
+    })).result;
+  }
+
+  async function createHandoff(input: CreateHandoffInput): Promise<IssuedAccessHandoff> {
+    const providerSubject = normalizeProviderSubject(input.providerSubject);
+    const workspaceId = requiredIdentifier(input.workspaceId, "Workspace id");
+    const sessionId = normalizeSessionId(input.sessionId);
+    const destinationHost = normalizeDestinationHost(input.destinationHost);
+    const issuedAt = validNow(now);
+    const expiresAt = resolveHandoffExpiry(input, issuedAt);
+    const token = `kch_${crypto.randomBytes(32).toString("base64url")}`;
+    const tokenHash = hashHandoffToken(token);
+    return (await adapter.update((state) => {
+      if (hasRevokedSession(state, providerSubject, sessionId)) {
+        throw new AccessStoreError("ACCESS_SESSION_REVOKED", "Session has been revoked.");
+      }
+      const owner = state.owners.find((candidate) => candidate.providerSubject === providerSubject);
+      if (!owner) throw new AccessStoreError("ACCESS_OWNER_NOT_FOUND", "Owner is not registered.");
+      const workspace = state.workspaces.find((candidate) => candidate.id === workspaceId);
+      if (!workspace) throw new AccessStoreError("ACCESS_WORKSPACE_NOT_FOUND", "Workspace is not registered.");
+      if (!workspace.ownerIds.includes(owner.id)) {
+        throw new AccessStoreError("ACCESS_FORBIDDEN", "Owner does not have access to this Workspace.");
+      }
+      const handoff: AccessHandoff = {
+        id: uniqueId("handoff", new Set(state.handoffs.map((candidate) => candidate.id))),
+        tokenHash,
+        ownerId: owner.id,
+        workspaceId: workspace.id,
+        sessionId,
+        destinationHost,
+        createdAt: issuedAt,
+        expiresAt,
+        consumedAt: null
+      };
+      state.handoffs.push(handoff);
+      return {
+        id: handoff.id,
+        token,
+        ownerId: owner.id,
+        owner: { ...owner },
+        workspaceId: workspace.id,
+        sessionId,
+        destinationHost,
+        createdAt: issuedAt,
+        expiresAt
+      };
+    })).result;
+  }
+
+  async function consumeHandoff(input: ConsumeHandoffInput): Promise<ConsumedAccessHandoff> {
+    const tokenHash = hashHandoffToken(normalizeHandoffToken(input.token));
+    const destinationHost = normalizeDestinationHost(input.destinationHost);
+    return (await adapter.update((state) => {
+      const handoff = state.handoffs.find((candidate) => safeHashEqual(candidate.tokenHash, tokenHash));
+      if (!handoff) throw new AccessStoreError("ACCESS_HANDOFF_INVALID", "Handoff is invalid.");
+      if (handoff.destinationHost !== destinationHost) {
+        throw new AccessStoreError("ACCESS_HANDOFF_DESTINATION_MISMATCH", "Handoff destination does not match this host.");
+      }
+      if (handoff.consumedAt) throw new AccessStoreError("ACCESS_HANDOFF_CONSUMED", "Handoff was already consumed.");
+      const consumedAt = validNow(now);
+      if (Date.parse(handoff.expiresAt) <= Date.parse(consumedAt)) {
+        throw new AccessStoreError("ACCESS_HANDOFF_EXPIRED", "Handoff has expired.");
+      }
+      const owner = state.owners.find((candidate) => candidate.id === handoff.ownerId);
+      if (!owner) throw new AccessStoreError("ACCESS_HANDOFF_INVALID", "Handoff no longer grants Workspace access.");
+      if (hasRevokedSession(state, owner.providerSubject, handoff.sessionId)) {
+        throw new AccessStoreError("ACCESS_SESSION_REVOKED", "Session has been revoked.");
+      }
+      const workspace = state.workspaces.find((candidate) => candidate.id === handoff.workspaceId);
+      if (!workspace || !workspace.ownerIds.includes(owner.id)) {
+        throw new AccessStoreError("ACCESS_HANDOFF_INVALID", "Handoff no longer grants Workspace access.");
+      }
+      handoff.consumedAt = consumedAt;
+      return { handoffId: handoff.id, owner, workspace, sessionId: handoff.sessionId, consumedAt };
+    })).result;
+  }
+
+  return {
+    kind: adapter.kind,
+    path: adapter.path,
+    read: adapter.read,
+    resolveOwner,
+    getOwnerByProviderSubject,
+    getWorkspaceById,
+    getWorkspaceBySlug,
+    listWorkspacesForOwner,
+    createWorkspace,
+    bindLegacyWorkspace,
+    isSessionRevoked,
+    revokeSession,
+    createHandoff,
+    consumeHandoff
+  };
+}
+
+function ensureOwner(
+  state: AccessRegistryState,
+  identity: { providerSubject: string; email: string; displayName: string },
+  timestamp: string
+): AccessOwner {
+  const existing = state.owners.find((owner) => owner.providerSubject === identity.providerSubject);
+  if (existing) {
+    if (existing.email !== identity.email || existing.displayName !== identity.displayName) {
+      existing.email = identity.email;
+      existing.displayName = identity.displayName;
+      existing.updatedAt = timestamp;
+    }
+    return existing;
+  }
+  const owner: AccessOwner = {
+    id: uniqueId("owner", new Set(state.owners.map((candidate) => candidate.id))),
+    providerSubject: identity.providerSubject,
+    email: identity.email,
+    displayName: identity.displayName,
+    createdAt: timestamp,
+    updatedAt: timestamp
+  };
+  state.owners.push(owner);
+  return owner;
+}
+
+function normalizeOwner(value: unknown): AccessOwner {
+  const owner = requireRecord(value, "Access owner");
+  return {
+    id: requiredIdentifier(owner.id, "Owner id"),
+    providerSubject: normalizeProviderSubject(owner.providerSubject),
+    email: normalizeOwnerEmail(owner.email),
+    displayName: normalizeOwnerDisplayName(owner.displayName),
+    createdAt: timestamp(owner.createdAt, "Owner createdAt"),
+    updatedAt: timestamp(owner.updatedAt, "Owner updatedAt")
+  };
+}
+
+function normalizeWorkspace(value: unknown): AccessWorkspace {
+  const workspace = requireRecord(value, "Access workspace");
+  return {
+    id: requiredIdentifier(workspace.id, "Workspace id"),
+    slug: normalizeWorkspaceSlug(workspace.slug),
+    name: normalizeWorkspaceName(workspace.name),
+    storageId: requiredIdentifier(workspace.storageId, "Workspace storage id"),
+    ownerIds: requireArray(workspace.ownerIds, "Workspace ownerIds").map((ownerId) => requiredIdentifier(ownerId, "Workspace owner id")),
+    createdAt: timestamp(workspace.createdAt, "Workspace createdAt"),
+    updatedAt: timestamp(workspace.updatedAt, "Workspace updatedAt")
+  };
+}
+
+function normalizeHandoff(value: unknown): AccessHandoff {
+  const handoff = requireRecord(value, "Access handoff");
+  const tokenHash = requiredString(handoff.tokenHash, "Handoff tokenHash");
+  if (!/^sha256:[a-f0-9]{64}$/.test(tokenHash)) throw new Error("Handoff tokenHash is invalid.");
+  return {
+    id: requiredIdentifier(handoff.id, "Handoff id"),
+    tokenHash,
+    ownerId: requiredIdentifier(handoff.ownerId, "Handoff owner id"),
+    workspaceId: requiredIdentifier(handoff.workspaceId, "Handoff workspace id"),
+    sessionId: normalizeSessionId(handoff.sessionId),
+    destinationHost: normalizeDestinationHost(handoff.destinationHost),
+    createdAt: timestamp(handoff.createdAt, "Handoff createdAt"),
+    expiresAt: timestamp(handoff.expiresAt, "Handoff expiresAt"),
+    consumedAt: handoff.consumedAt == null ? null : timestamp(handoff.consumedAt, "Handoff consumedAt")
+  };
+}
+
+function normalizeRevokedSession(value: unknown): RevokedAccessSession {
+  const session = requireRecord(value, "Revoked access session");
+  return {
+    providerSubject: normalizeProviderSubject(session.providerSubject),
+    sessionId: normalizeSessionId(session.sessionId),
+    revokedAt: timestamp(session.revokedAt, "Revoked session revokedAt")
+  };
+}
+
+function normalizeProviderSubject(value: unknown): string {
+  const subject = requiredString(value, "Provider subject");
+  if (subject.length > 512 || /[\r\n\0]/.test(subject)) throw new Error("Provider subject is invalid.");
+  return subject;
+}
+
+function normalizeSessionId(value: unknown): string {
+  const sessionId = requiredString(value, "Session id");
+  if (sessionId.length > 512 || /[\r\n\0]/.test(sessionId)) throw new Error("Session id is invalid.");
+  return sessionId;
+}
+
+function revokedSessionKey(providerSubject: string, sessionId: string): string {
+  return `${providerSubject}\0${sessionId}`;
+}
+
+function hasRevokedSession(state: AccessRegistryState, providerSubject: string, sessionId: string): boolean {
+  return state.revokedSessions.some(
+    (candidate) => candidate.providerSubject === providerSubject && candidate.sessionId === sessionId
+  );
+}
+
+function normalizeOwnerEmail(value: unknown): string {
+  const email = requiredString(value, "Owner email").toLowerCase();
+  if (email.length > 320 || /[\s\r\n\0]/.test(email) || !/^[^@]+@[^@]+$/.test(email)) {
+    throw new Error("Owner email is invalid.");
+  }
+  return email;
+}
+
+function normalizeOwnerDisplayName(value: unknown): string {
+  const displayName = requiredString(value, "Owner display name");
+  if (displayName.length > 120 || /[\r\n\0]/.test(displayName)) throw new Error("Owner display name is invalid.");
+  return displayName;
+}
+
+function normalizeWorkspaceSlug(value: unknown): string {
+  const slug = requiredString(value, "Workspace slug").toLowerCase();
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(slug)) {
+    throw new Error("Workspace slug must be a valid lowercase hostname label.");
+  }
+  return slug;
+}
+
+function normalizeWorkspaceName(value: unknown): string {
+  const name = requiredString(value, "Workspace name");
+  if (name.length > 120 || /[\r\n\0]/.test(name)) throw new Error("Workspace name is invalid.");
+  return name;
+}
+
+function normalizeDestinationHost(value: unknown): string {
+  const host = requiredString(value, "Handoff destination host").toLowerCase();
+  if (host.length > 253 || /[\s/@?#\\]/.test(host)) throw new Error("Handoff destination host is invalid.");
+  let parsed: URL;
+  try {
+    parsed = new URL(`https://${host}`);
+  } catch {
+    throw new Error("Handoff destination host is invalid.");
+  }
+  if (!parsed.hostname || parsed.pathname !== "/" || parsed.search || parsed.hash || parsed.username || parsed.password) {
+    throw new Error("Handoff destination host is invalid.");
+  }
+  return parsed.host.toLowerCase();
+}
+
+function normalizeHandoffToken(value: unknown): string {
+  const token = requiredString(value, "Handoff token");
+  if (!/^kch_[A-Za-z0-9_-]{43}$/.test(token)) throw new AccessStoreError("ACCESS_HANDOFF_INVALID", "Handoff is invalid.");
+  return token;
+}
+
+function hashHandoffToken(token: string): string {
+  return `sha256:${crypto.createHash("sha256").update(token).digest("hex")}`;
+}
+
+function safeHashEqual(left: string, right: string): boolean {
+  const leftBytes = Buffer.from(left);
+  const rightBytes = Buffer.from(right);
+  return leftBytes.length === rightBytes.length && crypto.timingSafeEqual(leftBytes, rightBytes);
+}
+
+function resolveHandoffExpiry(input: CreateHandoffInput, issuedAt: string): string {
+  if (input.expiresAt !== undefined && input.ttlSeconds !== undefined) {
+    throw new Error("Provide either expiresAt or ttlSeconds for a handoff, not both.");
+  }
+  if (input.expiresAt !== undefined) {
+    const expiresAt = timestamp(input.expiresAt, "Handoff expiresAt");
+    if (Date.parse(expiresAt) <= Date.parse(issuedAt)) throw new Error("Handoff expiresAt must be in the future.");
+    if (Date.parse(expiresAt) - Date.parse(issuedAt) > MAX_HANDOFF_TTL_SECONDS * 1_000) {
+      throw new Error(`Handoff lifetime cannot exceed ${MAX_HANDOFF_TTL_SECONDS} seconds.`);
+    }
+    return expiresAt;
+  }
+  const ttlSeconds = input.ttlSeconds === undefined ? DEFAULT_HANDOFF_TTL_SECONDS : Number(input.ttlSeconds);
+  if (!Number.isSafeInteger(ttlSeconds) || ttlSeconds < 1 || ttlSeconds > MAX_HANDOFF_TTL_SECONDS) {
+    throw new Error(`Handoff ttlSeconds must be an integer from 1 to ${MAX_HANDOFF_TTL_SECONDS}.`);
+  }
+  return new Date(Date.parse(issuedAt) + ttlSeconds * 1_000).toISOString();
+}
+
+function validNow(now: () => Date): string {
+  const value = now();
+  if (!(value instanceof Date) || !Number.isFinite(value.valueOf())) throw new Error("Access-store clock returned an invalid date.");
+  return value.toISOString();
+}
+
+function uniqueId(prefix: string, existing: Set<string>): string {
+  let id = "";
+  do id = `${prefix}-${crypto.randomUUID()}`;
+  while (existing.has(id));
+  return id;
+}
+
+function validateTableName(value: string): string {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) throw new Error("Invalid PostgreSQL table name.");
+  return value;
+}
+
+function requireRecord(value: unknown, label: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object.`);
+  return value as Record<string, unknown>;
+}
+
+function requireArray(value: unknown, label: string): unknown[] {
+  if (!Array.isArray(value)) throw new Error(`${label} must be an array.`);
+  return value;
+}
+
+function requiredString(value: unknown, label: string): string {
+  if (typeof value !== "string" || !value.trim()) throw new Error(`${label} is required.`);
+  return value.trim();
+}
+
+function requiredIdentifier(value: unknown, label: string): string {
+  const result = requiredString(value, label);
+  if (result.length > 512 || /[\r\n\0]/.test(result)) throw new Error(`${label} is invalid.`);
+  return result;
+}
+
+function timestamp(value: unknown, label: string): string {
+  const result = requiredString(value, label);
+  if (!Number.isFinite(Date.parse(result))) throw new Error(`${label} must be an ISO timestamp.`);
+  return new Date(result).toISOString();
+}
+
+function assertUnique(values: string[], label: string): void {
+  const seen = new Set<string>();
+  for (const value of values) {
+    if (seen.has(value)) throw new Error(`Duplicate ${label}: ${value}.`);
+    seen.add(value);
+  }
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error;
+}
