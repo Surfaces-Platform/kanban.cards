@@ -1,0 +1,194 @@
+import { execFile } from "node:child_process";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { promisify } from "node:util";
+
+import { authorizePromotion, evaluateCutoverSnapshot, trustedReleaseTarget, type CutoverPhase } from "../src/release-gate";
+import { mainGitDeploymentsAreDisabled } from "../src/release-policy";
+import { parseReleaseControllerArguments } from "../src/release-controller";
+
+const run = promisify(execFile);
+
+async function main(): Promise<void> {
+  const args = parseReleaseControllerArguments(process.argv.slice(2));
+  const snapshotPath = path.resolve(process.cwd(), args.snapshotPath);
+  let snapshot = JSON.parse(await fs.readFile(snapshotPath, "utf8")) as unknown;
+  if (args.live) snapshot = await hydrateWithLiveFacts(snapshot, args.phase);
+  const evaluation = args.authorizePromotion
+    ? authorizePromotion(snapshot, args.confirmation)
+    : evaluateCutoverSnapshot(snapshot, args.phase);
+  process.stdout.write(`${JSON.stringify(evaluation, null, 2)}\n`);
+  if (!evaluation.ok) {
+    process.exitCode = 1;
+    return;
+  }
+  if (args.promote) {
+    const root = record(snapshot);
+    const predecessor = deploymentIdentity(record(root.currentProduction));
+    const promotionReceipt = {
+      candidateDeploymentId: evaluation.candidate.deploymentId,
+      candidateUrl: evaluation.candidate.url,
+      candidateCommitSha: evaluation.candidate.commitSha,
+      rollbackTarget: { ...predecessor, verified: record(root.rollbackTarget).verified === true },
+      authorizedAt: new Date().toISOString()
+    } as Record<string, unknown>;
+    root.promotionReceipt = promotionReceipt;
+    await writeSnapshotAtomic(snapshotPath, root);
+    await runVercelPromotion(evaluation.candidate.deploymentId);
+    promotionReceipt.promotedAt = new Date().toISOString();
+    await writeSnapshotAtomic(snapshotPath, root);
+    process.stdout.write(`${JSON.stringify({ promotedDeploymentId: evaluation.candidate.deploymentId })}\n`);
+  }
+}
+
+async function runVercelPromotion(deploymentId: string): Promise<void> {
+  await run("vercel", ["promote", deploymentId], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    maxBuffer: 4 * 1024 * 1024
+  });
+}
+
+async function hydrateWithLiveFacts(snapshot: unknown, phase: CutoverPhase): Promise<unknown> {
+  const root = structuredClone(record(snapshot));
+  const target = trustedReleaseTarget();
+  const candidateInput = record(root.candidate);
+  const candidateId = stringValue(candidateInput.id);
+  if (!candidateId) throw new Error("Live verification requires candidate.id in the evidence record.");
+
+  const [statusResult, branchResult, headResult] = await Promise.all([
+    run("git", ["status", "--porcelain"], { cwd: process.cwd(), encoding: "utf8" }),
+    run("git", ["branch", "--show-current"], { cwd: process.cwd(), encoding: "utf8" }),
+    run("git", ["rev-parse", "HEAD"], { cwd: process.cwd(), encoding: "utf8" })
+  ]);
+  if (statusResult.stdout.trim()) throw new Error("Live authorization requires a clean checkout.");
+  if (branchResult.stdout.trim() !== target.productionBranch) throw new Error(`Live authorization requires the ${target.productionBranch} branch.`);
+
+  const vercelConfig = JSON.parse(await fs.readFile(path.resolve(process.cwd(), "vercel.json"), "utf8")) as Record<string, unknown>;
+  const [project, candidate, currentSummary] = await Promise.all([
+    vercelJson(["api", `/v9/projects/${target.projectId}`]),
+    vercelJson(["api", `/v13/deployments/${candidateId}`]),
+    vercelJson(["inspect", `https://${target.publicDomain}`, "--format=json"])
+  ]);
+  const currentId = stringValue(currentSummary.id);
+  if (!currentId) throw new Error("Live verification could not resolve the deployment serving the public domain.");
+  const current = await vercelJson(["api", `/v13/deployments/${currentId}`]);
+  const liveCandidate = deploymentRecord(candidate);
+  if (stringValue(liveCandidate.commitSha) !== headResult.stdout.trim()) throw new Error("Live candidate SHA does not match the validated checkout HEAD.");
+  const projectLink = record(project.link);
+  const protection = record(project.ssoProtection);
+  const localRules = record(record(vercelConfig.git).deploymentEnabled);
+  root.policy = {
+    projectId: stringValue(project.id),
+    teamId: stringValue(project.accountId),
+    repository: `${stringValue(projectLink.org)}/${stringValue(projectLink.repo)}`,
+    productionBranch: stringValue(projectLink.productionBranch),
+    autoAssignCustomDomains: project.autoAssignCustomDomains,
+    mainGitDeploymentsEnabled: !mainGitDeploymentsAreDisabled(localRules),
+    deploymentProtection: stringValue(protection.deploymentType)
+  };
+  root.candidate = liveCandidate;
+  const currentHealth = await publicJson(`https://${target.publicDomain}/api/health`);
+  root.currentProduction = { ...deploymentRecord(current), health: currentHealth };
+
+  const evidence = record(root.evidence);
+  const phaseKey = phase === "pre-promotion" ? "prePromotion" : "postPromotion";
+  const receipt = record(evidence[phaseKey]);
+  const proofOrigin = stringValue(receipt.origin);
+  const tenantOrigin = stringValue(receipt.tenantOrigin);
+  if (!proofOrigin) throw new Error(`Live verification requires evidence.${phaseKey}.origin.`);
+  if (!tenantOrigin) throw new Error(`Live verification requires evidence.${phaseKey}.tenantOrigin.`);
+  const [routed, tenantRouted] = await Promise.all([
+    vercelJson(["inspect", proofOrigin, "--format=json"]),
+    vercelJson(["inspect", tenantOrigin, "--format=json"])
+  ]);
+  receipt.routeDeploymentId = stringValue(routed.id);
+  receipt.routePinned = receipt.routeDeploymentId === candidateId ? "passed" : "failed";
+  receipt.tenantRouteDeploymentId = stringValue(tenantRouted.id);
+  receipt.tenantRoutePinned = receipt.tenantRouteDeploymentId === candidateId ? "passed" : "failed";
+  const runtimeOrigin = phase === "pre-promotion" ? stringValue(record(root.candidate).url) : `https://${target.publicDomain}`;
+  const [health, accessHealth] = phase === "pre-promotion"
+    ? await Promise.all([vercelRuntimeJson(runtimeOrigin, "/api/health"), vercelRuntimeJson(runtimeOrigin, "/api/access/health")])
+    : await Promise.all([publicJson(`${runtimeOrigin}/api/health`), publicJson(`${runtimeOrigin}/api/access/health`)]);
+  receipt.health = health;
+  receipt.accessHealth = accessHealth;
+  evidence[phaseKey] = receipt;
+  root.evidence = evidence;
+  if (phase === "post-promotion") {
+    const promotionReceipt = record(root.promotionReceipt);
+    const recordedRollback = record(promotionReceipt.rollbackTarget);
+    const rollbackId = stringValue(recordedRollback.id);
+    if (!rollbackId) throw new Error("Post-promotion live verification requires the controller-generated predecessor receipt.");
+    root.originalRollbackTarget = { ...deploymentRecord(await vercelJson(["api", `/v13/deployments/${rollbackId}`])), verified: recordedRollback.verified };
+  }
+  return root;
+}
+
+function deploymentRecord(value: Record<string, unknown>): Record<string, unknown> {
+  const gitSource = record(value.gitSource);
+  const meta = record(value.meta);
+  const project = record(value.project);
+  return {
+    id: stringValue(value.id),
+    url: canonicalUrl(value.url),
+    projectId: stringValue(value.projectId) || stringValue(project.id),
+    commitSha: stringValue(gitSource.sha) || stringValue(meta.githubCommitSha),
+    commitRef: stringValue(gitSource.ref) || stringValue(meta.githubCommitRef),
+    target: stringValue(value.target),
+    readyState: stringValue(value.readyState),
+    aliases: stringArray(value.alias ?? value.aliases)
+  };
+}
+
+function deploymentIdentity(value: Record<string, unknown>): Record<string, unknown> {
+  return {
+    id: stringValue(value.id),
+    url: canonicalUrl(value.url),
+    projectId: stringValue(value.projectId),
+    commitSha: stringValue(value.commitSha),
+    target: stringValue(value.target),
+    readyState: stringValue(value.readyState)
+  };
+}
+
+async function writeSnapshotAtomic(snapshotPath: string, snapshot: Record<string, unknown>): Promise<void> {
+  const temporaryPath = `${snapshotPath}.tmp-${process.pid}`;
+  await fs.writeFile(temporaryPath, `${JSON.stringify(snapshot, null, 2)}\n`, { mode: 0o600 });
+  await fs.rename(temporaryPath, snapshotPath);
+}
+
+async function vercelJson(args: string[]): Promise<Record<string, unknown>> {
+  const { stdout } = await run("vercel", args, { cwd: process.cwd(), encoding: "utf8", maxBuffer: 4 * 1024 * 1024 });
+  return record(JSON.parse(stdout));
+}
+
+async function vercelRuntimeJson(deploymentUrl: string, pathname: string): Promise<Record<string, unknown>> {
+  const { stdout } = await run("vercel", ["curl", pathname, "--deployment", deploymentUrl, "--", "--silent", "--show-error", "--write-out", "\n%{http_code}"], {
+    cwd: process.cwd(), encoding: "utf8", maxBuffer: 4 * 1024 * 1024
+  });
+  const splitAt = stdout.lastIndexOf("\n");
+  if (splitAt < 0) throw new Error(`Live ${pathname} response did not include an HTTP status.`);
+  const body = record(JSON.parse(stdout.slice(0, splitAt)));
+  body.status = Number(stdout.slice(splitAt + 1).trim());
+  return body;
+}
+
+async function publicJson(url: string): Promise<Record<string, unknown>> {
+  const response = await fetch(url, { headers: { Accept: "application/json" }, redirect: "error" });
+  const body = record(await response.json());
+  body.status = response.status;
+  return body;
+}
+
+function record(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function stringValue(value: unknown): string { return typeof value === "string" ? value.trim() : ""; }
+function stringArray(value: unknown): string[] { return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : []; }
+function canonicalUrl(value: unknown): string { const raw = stringValue(value); return raw ? (raw.startsWith("https://") ? raw : `https://${raw}`) : ""; }
+
+main().catch((error: unknown) => {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exit(1);
+});

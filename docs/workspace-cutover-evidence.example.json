@@ -1,0 +1,148 @@
+{
+  "policy": {
+    "projectId": "prj_exact-project-id",
+    "teamId": "team_exact-team-id",
+    "repository": "Surfaces-Platform/kanban.cards",
+    "productionBranch": "main",
+    "autoAssignCustomDomains": false,
+    "mainGitDeploymentsEnabled": false,
+    "deploymentProtection": "all_except_custom_domains"
+  },
+  "candidate": {
+    "id": "dpl_exact-candidate-id",
+    "url": "https://exact-immutable-candidate.vercel.app",
+    "projectId": "prj_exact-project-id",
+    "commitSha": "0000000000000000000000000000000000000000",
+    "commitRef": "main",
+    "target": "production",
+    "readyState": "READY",
+    "aliases": []
+  },
+  "currentProduction": {
+    "id": "dpl_exact-known-good-id",
+    "url": "https://exact-known-good.vercel.app",
+    "projectId": "prj_exact-project-id",
+    "commitSha": "1111111111111111111111111111111111111111",
+    "commitRef": "main",
+    "target": "production",
+    "readyState": "READY",
+    "aliases": ["kanban.cards"],
+    "health": { "status": 200, "ok": true, "store": "postgres" }
+  },
+  "evidence": {
+    "prePromotion": {
+      "phase": "pre-promotion",
+      "runId": "replace-with-unique-pre-promotion-run-id",
+      "observedAt": "1970-01-01T00:00:00.000Z",
+      "deploymentId": "dpl_exact-candidate-id",
+      "deploymentUrl": "https://exact-immutable-candidate.vercel.app",
+      "commitSha": "0000000000000000000000000000000000000000",
+      "origin": "https://approved-candidate-root.example",
+      "routeDeploymentId": "dpl_exact-candidate-id",
+      "routePinned": "not-run",
+      "callbackRegistered": "not-run",
+      "tenantOrigin": "https://approved-candidate-tenant.example",
+      "tenantRouteDeploymentId": "dpl_exact-candidate-id",
+      "tenantRoutePinned": "not-run",
+      "sameArtifactCanonicalHost": "not-run",
+      "health": {
+        "status": 503,
+        "ok": false,
+        "store": "postgres",
+        "missingConfiguration": [],
+        "access": { "registry": "ready", "legacyState": "ready", "legacyBinding": "pending" }
+      },
+      "accessHealth": {
+        "status": 503,
+        "ok": false,
+        "legacyBridge": "enabled",
+        "registryState": "ready",
+        "legacyState": "ready",
+        "legacyBinding": { "present": false, "status": "pending" },
+        "missingConfiguration": []
+      },
+      "providerProof": {
+        "login": "not-run",
+        "callback": "not-run",
+        "exactLegacyBinding": "not-run",
+        "canonicalHandoff": "not-run",
+        "tenantProjectAccess": "not-run",
+        "tenantProjectWrite": "not-run"
+      },
+      "compatibilityProof": {
+        "required": true,
+        "read": "not-run",
+        "create": "not-run",
+        "comment": "not-run",
+        "move": "not-run",
+        "archive": "not-run",
+        "cardId": "",
+        "finalCardVersion": 0
+      },
+      "retirementProof": {
+        "required": false,
+        "public401": "not-run",
+        "legacy401": "not-run",
+        "sibling401": "not-run",
+        "oldDeploymentsClosed": "not-run"
+      },
+      "dataIntegrityProof": {
+        "realPostgres": false,
+        "beforeDigest": "",
+        "afterDigest": "",
+        "beforeResourceFingerprint": "",
+        "afterResourceFingerprint": "",
+        "finalCandidateDigest": "",
+        "finalCandidateResourceFingerprint": ""
+      }
+    },
+    "postPromotion": {
+      "phase": "post-promotion",
+      "runId": "replace-with-distinct-post-promotion-run-id",
+      "observedAt": "1970-01-01T00:00:00.000Z",
+      "deploymentId": "dpl_exact-candidate-id",
+      "deploymentUrl": "https://exact-immutable-candidate.vercel.app",
+      "commitSha": "0000000000000000000000000000000000000000",
+      "origin": "https://kanban.cards",
+      "routeDeploymentId": "dpl_exact-candidate-id",
+      "routePinned": "not-run",
+      "callbackRegistered": "not-run",
+      "tenantOrigin": "https://approved-production-tenant.example",
+      "tenantRouteDeploymentId": "dpl_exact-candidate-id",
+      "tenantRoutePinned": "not-run",
+      "sameArtifactCanonicalHost": "not-run",
+      "health": {},
+      "accessHealth": {},
+      "providerProof": {},
+      "compatibilityProof": {},
+      "retirementProof": {},
+      "dataIntegrityProof": {}
+    }
+  },
+  "rollbackTarget": {
+    "id": "dpl_exact-known-good-id",
+    "url": "https://exact-known-good.vercel.app",
+    "projectId": "prj_exact-project-id",
+    "commitSha": "1111111111111111111111111111111111111111",
+    "target": "production",
+    "readyState": "READY",
+    "verified": true
+  },
+  "originalRollbackTarget": {
+    "id": "dpl_exact-known-good-id",
+    "url": "https://exact-known-good.vercel.app",
+    "projectId": "prj_exact-project-id",
+    "commitSha": "1111111111111111111111111111111111111111",
+    "target": "production",
+    "readyState": "READY",
+    "verified": true
+  },
+  "promotionReceipt": {
+    "candidateDeploymentId": "written-by-release-controller",
+    "candidateUrl": "written-by-release-controller",
+    "candidateCommitSha": "written-by-release-controller",
+    "rollbackTarget": "written-by-release-controller",
+    "authorizedAt": "written-by-release-controller",
+    "promotedAt": "written-by-release-controller-after-success"
+  }
+}

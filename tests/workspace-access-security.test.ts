@@ -115,6 +115,56 @@ test("legacy bearer is explicitly mapped to default and cannot enter a sibling W
     const legacyRead = await client.get("/api/projects", { host: LEGACY_HOST, bearer: LEGACY_BEARER });
     assert.deepEqual(legacyRead.data.projects.map((project: any) => project.name), ["Stored in default"]);
 
+    const projectId = legacyWrite.data.project.id;
+    const card = await client.post(`/api/projects/${projectId}/cards`, {
+      host: LEGACY_HOST,
+      bearer: LEGACY_BEARER,
+      idempotencyKey: "legacy-bounded-card",
+      json: { title: "Bounded compatibility proof", externalKey: "release:bounded-compatibility" }
+    });
+    assert.equal(card.status, 201);
+    assert.equal(card.data.card.version, 1);
+    const cardId = card.data.card.id;
+
+    const comment = await client.post(`/api/projects/${projectId}/cards/${cardId}/comments`, {
+      host: LEGACY_HOST,
+      bearer: LEGACY_BEARER,
+      idempotencyKey: "legacy-bounded-comment",
+      json: { body: "Compatibility Comment passed." }
+    });
+    assert.equal(comment.status, 201);
+    assert.equal(comment.data.card.version, 2);
+
+    const move = await client.patch(`/api/projects/${projectId}/cards/${cardId}`, {
+      host: LEGACY_HOST,
+      bearer: LEGACY_BEARER,
+      version: 2,
+      json: { columnId: legacyWrite.data.project.columns[1].id }
+    });
+    assert.equal(move.status, 200);
+    assert.equal(move.data.card.version, 3);
+
+    const archive = await client.patch(`/api/projects/${projectId}/cards/${cardId}`, {
+      host: LEGACY_HOST,
+      bearer: LEGACY_BEARER,
+      version: 3,
+      json: { archivedAt: "2026-08-12T12:30:00.000Z" }
+    });
+    assert.equal(archive.status, 200);
+    assert.equal(archive.data.card.version, 4);
+    assert.equal(archive.data.card.archivedAt, "2026-08-12T12:30:00.000Z");
+
+    const lifecycle = await client.get(`/api/projects/${projectId}`, { host: LEGACY_HOST, bearer: LEGACY_BEARER });
+    assert.equal(lifecycle.status, 200);
+    assert.equal(lifecycle.data.project.cards[0].comments.length, 1);
+    assert.deepEqual(lifecycle.data.project.activity.map((entry: any) => entry.action), [
+      "project.created",
+      "card.created",
+      "comment.created",
+      "card.moved",
+      "card.archived"
+    ]);
+
     assert.equal((await client.get("/api/projects", { host: BETA_HOST, bearer: LEGACY_BEARER })).status, 401);
     const rootAlias = await client.get("/api/projects", { host: ROOT_HOST, bearer: LEGACY_BEARER });
     assert.deepEqual(rootAlias.data.projects.map((project: any) => project.name), ["Stored in default"]);
@@ -449,7 +499,8 @@ test("verified legacy binding refuses an absent default row and preserves its di
       return Boolean(error && typeof error === "object" && "code" in error && error.code === "ENOENT");
     });
 
-    await workspaceStoreResolver.resolve("default").write(freshWorkspaceState());
+    const populatedState = populatedLegacyState();
+    await workspaceStoreResolver.resolve("default").write(populatedState);
     const beforeDigest = crypto.createHash("sha256").update(await fs.readFile(legacyStatePath)).digest("hex");
     const accepted = await completeLogin();
     assert.equal(accepted.status, 303);
@@ -462,6 +513,20 @@ test("verified legacy binding refuses an absent default row and preserves its di
     assert.equal(registry.workspaces[0].storageId, "default");
     assert.equal(registry.workspaces[0].slug, "legacy");
     assert.equal((await client.get("/api/access/health", { host: ROOT_HOST })).status, 200);
+    assert.deepEqual(await workspaceStoreResolver.resolve("default").readExisting(), populatedState);
+
+    const acceptedRootCookie = accepted.headers.getAll("set-cookie").find((cookie) => {
+      return cookie.startsWith(`${rootSessionCookieName(true)}=`) && !cookie.includes("Max-Age=0");
+    });
+    assert.ok(acceptedRootCookie);
+    const rootCookie = cookieHeader(acceptedRootCookie);
+    const workspaces = await client.get("/api/workspaces", { host: ROOT_HOST, cookie: rootCookie });
+    assert.equal(workspaces.status, 200);
+    assert.deepEqual(workspaces.data.workspaces.map((workspace: any) => workspace.slug), ["legacy"]);
+    const tenantCookie = await openWorkspace(client, rootCookie, "legacy");
+    const tenantProjects = await client.get("/api/projects", { host: LEGACY_HOST, cookie: tenantCookie });
+    assert.equal(tenantProjects.status, 200);
+    assert.deepEqual(tenantProjects.data.projects.map((project: any) => project.id), ["project-existing"]);
   } finally {
     await close(server).catch(() => undefined);
     await fs.rm(directory, { recursive: true, force: true });
@@ -717,6 +782,10 @@ class SecurityClient {
     return this.request("POST", pathname, options);
   }
 
+  patch(pathname: string, options: RequestOptions = {}): Promise<JsonResponse> {
+    return this.request("PATCH", pathname, options);
+  }
+
   delete(pathname: string, options: RequestOptions = {}): Promise<JsonResponse> {
     return this.request("DELETE", pathname, options);
   }
@@ -730,6 +799,7 @@ class SecurityClient {
     if (options.cookie) headers.Cookie = options.cookie;
     if (options.origin) headers.Origin = options.origin;
     if (options.idempotencyKey) headers["Idempotency-Key"] = options.idempotencyKey;
+    if (options.version !== undefined) headers["X-Kanban-Version"] = String(options.version);
     let body: string | undefined;
     if (options.form !== undefined) {
       body = new URLSearchParams(options.form).toString();
@@ -773,6 +843,7 @@ interface RequestOptions {
   cookie?: string;
   origin?: string;
   idempotencyKey?: string;
+  version?: number;
   form?: Record<string, string>;
   json?: Record<string, unknown>;
 }
@@ -813,6 +884,61 @@ function jsonResponse(body: unknown): Response {
 
 function cookieHeader(setCookie: string): string {
   return setCookie.split(";", 1)[0];
+}
+
+function populatedLegacyState() {
+  return {
+    schemaVersion: 2 as const,
+    projects: [{
+      id: "project-existing",
+      name: "Existing Project",
+      description: "Preserve every resource field.",
+      columns: [
+        { id: "next", name: "Next", position: 0 },
+        { id: "done", name: "Done", position: 1 }
+      ],
+      cards: [{
+        id: "card-existing",
+        externalKey: "existing:card",
+        title: "Existing Card",
+        body: "Existing body",
+        columnId: "done",
+        position: 0,
+        version: 7,
+        archivedAt: null,
+        createdAt: "2026-08-01T00:00:00.000Z",
+        updatedAt: "2026-08-02T00:00:00.000Z",
+        comments: [{
+          id: "comment-existing",
+          body: "Existing Comment",
+          author: "Existing owner",
+          createdAt: "2026-08-02T00:00:00.000Z"
+        }]
+      }],
+      activity: [{
+        id: "activity-existing",
+        action: "comment.created",
+        actor: { channel: "api" as const, label: "Existing owner" },
+        summary: "Existing owner commented on Existing Card.",
+        projectId: "project-existing",
+        cardId: "card-existing",
+        createdAt: "2026-08-02T00:00:00.000Z"
+      }],
+      revision: 11,
+      archivedAt: null,
+      createdAt: "2026-08-01T00:00:00.000Z",
+      updatedAt: "2026-08-02T00:00:00.000Z"
+    }],
+    idempotencyRecords: [{
+      key: "existing-idempotency-key",
+      method: "POST" as const,
+      path: "/api/projects/project-existing/cards",
+      requestHash: "existing-request-hash",
+      statusCode: 201,
+      response: { card: { id: "card-existing", version: 7 } },
+      createdAt: "2026-08-01T00:00:00.000Z"
+    }]
+  };
 }
 
 async function listen(server: Server): Promise<void> {

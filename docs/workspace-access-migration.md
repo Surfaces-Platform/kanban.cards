@@ -57,6 +57,8 @@ A second invocation with identical inputs is a successful no-op. Concurrent iden
 
 The tenant-aware candidate must be verified before the public domain moves:
 
+- Automatic Vercel deployments from `main` are disabled in repository configuration, and the Vercel Project keeps Auto-assign Custom Production Domains disabled. A merge cannot create or promote the production artifact.
+- Candidate creation uses an explicit production-target `--skip-domain` deployment. The recorded commit SHA, deployment ID, immutable URL, linked Project, production target, and alias state must all agree.
 - Provider-verified sign-in resolves the explicit legacy owner to the legacy Workspace.
 - The root route offers only Workspaces explicitly owned by that subject.
 - The canonical tenant host reads the unchanged `default` state.
@@ -97,7 +99,8 @@ Do not copy new-tenant data into `default`, merge tenant rows, or add a catch-al
 - [ ] A sibling-Workspace origin cannot perform a cookie-authenticated mutation.
 - [ ] While enabled, the legacy bearer reaches only the legacy Workspace.
 - [ ] Retirement proof shows provider access still works, `/api/access/health` reports `legacyBridge: disabled` and `ok: true`, and the retired bearer returns `401`.
-- [ ] Candidate browser proof covers root routing and the canonical tenant hostname.
+- [ ] Candidate browser proof covers root routing and the canonical tenant hostname through an approved protected candidate route pinned to the exact deployment. The generated immutable hostname alone does not satisfy provider callback or tenant-host proof.
+- [ ] `npm run release:gate` passes the complete pre-promotion snapshot and the literal explicit-promotion confirmation.
 - [ ] The exact candidate artifact is promoted; production checks repeat the identity and isolation proofs.
 
 `GET /api/access/health` reports provider mode, registry availability, compatibility-bridge state, and coarse `legacyState` and `legacyBinding` readiness without exposing an owner subject, email, display name, secret, Workspace id, or state-row id. It returns `503` for an unavailable registry, a required missing or invalid `default` state, or a pending or mismatched required binding. It is readiness evidence only; it does not replace the identity, isolation, handoff, database, or browser checks above.
