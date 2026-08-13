@@ -221,12 +221,13 @@ The alternative **Focus Workspace** remains comparison evidence, not a second pr
 - Place the compact Project selector immediately after the product name in the header. Do not repeat the active Project name, description, or recency in a second context bar.
 - Represent the owner with a simple avatar button. Its plain panel contains the username and Sign out; do not expose environment or QA labels in the chrome.
 - Put New Project, New Card, Edit Project, and Refresh in one Actions panel at the top right of the Kanban surface. Keep routine success copy off the surface; show persistent status only when the user must act on it.
-- New Projects start with exactly three ordered Columns: Next, Doing, and Done. Project editing covers name, description, and every stored Column without truncating additional API-created Columns. Conflicting navigation stays unavailable until Save or Cancel.
+- Make Add Column a direct board action: the final desktop lane and the narrow-screen board control expand in place to ask only for the new Column name while the current Columns remain visible. New Projects start with exactly three ordered Columns: Next, Doing, and Done. Add Column appends after every stored Column. Project editing covers name, description, and every stored Column without truncating additional API-created Columns. Conflicting navigation stays unavailable until Save or Cancel.
 
 ### Columns, Cards, and creation
 
 - Desktop uses an ordered Column grid with compact, consistently structured Card summaries: title, a short body-derived summary when present, Comment count, and recency.
 - Column placement communicates Card state; do not repeat state decoration without a separate need.
+- The board-local Add Column action preserves every existing Column id, order, and Card placement, then makes the new final Column visible on desktop and narrow screens.
 - New Project and New Card actions remain near their resource context and stay reachable in empty, populated, desktop, and narrow-screen states.
 - An existing Card has one canonical browser movement path: a visible `Move…` command in the selected-Card toolbar. It opens a named `Move Card` disclosure that states the current Column and presents every other Column as an explicit `Move to <Column>` action.
 - The Move disclosure uses ordinary buttons, not menu semantics. It remains the same command on desktop and narrow screens and is the keyboard, touch, and assistive-technology path. This slice does not add drag-and-drop, a board-Card overflow action, or a persistent selected-Card Column field.

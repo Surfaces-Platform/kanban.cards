@@ -250,6 +250,48 @@ test("one resource API supports idempotent plans, concurrency, comments, activit
     const commentRecord = storedState.idempotencyRecords.find((record: any) => record.key === "comment:implemented");
     assert.deepEqual(commentRecord.response.card, { id: card.id, version: 4 });
 
+    const beforeColumnAppend = unwrap(await fetchJson(`${baseUrl}/api/projects/${project.id}`, { headers }), "project");
+    const appendColumnsResponse = await fetch(`${baseUrl}/api/projects/${project.id}`, {
+      method: "PATCH",
+      headers: { ...headers, "Content-Type": "application/json", "X-Kanban-Version": String(beforeColumnAppend.revision) },
+      body: JSON.stringify({
+        columns: [
+          ...beforeColumnAppend.columns,
+          { id: "review", name: "Review", position: beforeColumnAppend.columns.length }
+        ]
+      })
+    });
+    assert.equal(appendColumnsResponse.status, 200);
+    const withAppendedColumn = unwrap(await appendColumnsResponse.json(), "project");
+    assert.equal(appendColumnsResponse.headers.get("etag"), `"${withAppendedColumn.revision}"`);
+    assert.deepEqual(withAppendedColumn.columns.map((column: any) => column.id), ["inbox", "doing", "done", "review"]);
+    assert.deepEqual(withAppendedColumn.columns.slice(0, -1), beforeColumnAppend.columns);
+    assert.deepEqual(withAppendedColumn.cards, beforeColumnAppend.cards);
+    assert.ok(withAppendedColumn.activity.some((entry: any) => entry.action === "project.updated"));
+
+    const staleProjectResponse = await fetch(`${baseUrl}/api/projects/${project.id}`, {
+      method: "PATCH",
+      headers: { ...headers, "Content-Type": "application/json", "X-Kanban-Version": String(beforeColumnAppend.revision) },
+      body: JSON.stringify({
+        columns: [
+          ...beforeColumnAppend.columns,
+          { id: "must-not-exist", name: "Must not exist", position: beforeColumnAppend.columns.length }
+        ]
+      })
+    });
+    assert.equal(staleProjectResponse.status, 409);
+
+    const strandedCardResponse = await fetch(`${baseUrl}/api/projects/${project.id}`, {
+      method: "PATCH",
+      headers: { ...headers, "Content-Type": "application/json", "X-Kanban-Version": String(withAppendedColumn.revision) },
+      body: JSON.stringify({ columns: withAppendedColumn.columns.filter((column: any) => column.id !== "doing") })
+    });
+    assert.equal(strandedCardResponse.status, 409);
+    const afterRejectedColumnWrites = unwrap(await fetchJson(`${baseUrl}/api/projects/${project.id}`, { headers }), "project");
+    assert.equal(afterRejectedColumnWrites.revision, withAppendedColumn.revision);
+    assert.deepEqual(afterRejectedColumnWrites.columns, withAppendedColumn.columns);
+    assert.deepEqual(afterRejectedColumnWrites.cards, beforeColumnAppend.cards);
+
     const archivedResponse = await fetch(`${baseUrl}/api/projects/${project.id}/cards/${card.id}`, {
       method: "PATCH",
       headers: { ...headers, "Content-Type": "application/json", "X-Kanban-Version": String(commentPayload.card.version) },
@@ -282,6 +324,7 @@ test("one resource API supports idempotent plans, concurrency, comments, activit
     assert.equal(persisted.cards[0].comments.length, 1);
     assert.equal(persisted.cards[0].columnId, "doing");
     assert.equal(persisted.cards[0].body, updatedMarkdown);
+    assert.deepEqual(persisted.columns.map((column: any) => column.id), ["inbox", "doing", "done", "review"]);
     assert.equal(path.basename(dataPath), "workspace.json");
   });
 });
