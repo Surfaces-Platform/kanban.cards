@@ -51,7 +51,11 @@ Use `https://` for every non-loopback API URL. The helper permits plaintext `htt
 
 ### `GET /session`
 
-Return the authenticated local, root, or Workspace session. The helper expects a Workspace context; it cannot use root Workspace-enumeration routes.
+Return the authenticated local, root, or Workspace session. Provider-mode responses include exact `rootUrl`, `loginUrl`, and `logoutUrl` values for the request's configured host family; Workspace responses also include the exact routed Workspace URL. The browser accepts navigation only when those origins and paths agree. The helper expects a Workspace context; it cannot use root Workspace-enumeration routes.
+
+### Root Workspace routing
+
+`GET /workspaces` returns only owned Workspaces that have a route in the current host family. `POST /workspaces` creates a routed Workspace. `POST /workspace-handoffs` returns an exact tenant `destination` and a single-use body-only `handoffToken`; `POST /workspace-handoff` consumes it only on that destination host and from the matching root origin. Candidate and canonical host-family sessions and handoffs cannot be replayed across origins.
 
 ### `GET /projects`
 
