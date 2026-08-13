@@ -59,11 +59,12 @@ Run from the repository root:
 npm ci
 npm run check
 npm test
+node --import tsx --test tests/release-gate.test.ts
 git status --short
 git rev-parse HEAD
 ```
 
-`git status --short` must be empty. Record the full commit SHA. Do not deploy an uncommitted working tree or a different commit from the one that passed validation.
+`git status --short` must be empty. Record the full commit SHA. Do not deploy an uncommitted working tree or a different commit from the one that passed validation. `npm run check` includes `npm run check:release-policy`; that policy fails unless automatic deployments from `main` remain disabled in `vercel.json`.
 
 Passing automation confirms the implementation contract. It does not prove the deployed database, browser rendering, or provider environment.
 
@@ -77,9 +78,17 @@ Before reading or changing environment variables, storage, deployments, aliases,
 vercel whoami
 vercel project inspect
 vercel project protection
+npm run release:preflight
 ```
 
 Confirm the expected account or team, the `kanban.cards` Project, and its deployment-protection boundary. Stop on any mismatch. Repeat this preflight immediately before a later Vercel mutation if the session, terminal, or active scope may have changed.
+
+Two independent controls keep a merge from moving production traffic:
+
+- `vercel.json` sets `git.deploymentEnabled.main` to `false`, so the Git integration cannot create a deployment from a `main` push or merge.
+- In Vercel Project Settings → Environments → Production → Branch Tracking, **Auto-assign Custom Production Domains** must remain disabled. The live Project API must report `autoAssignCustomDomains: false`.
+
+The first control is repository-enforced and covered by `npm run check:release-policy`. `npm run release:preflight` reads the linked Vercel Project and fails unless the exact Project/team/repository, `main` production branch, disabled domain auto-assignment, local `main` deployment block, and generated-deployment protection all agree. Run it before every candidate and immediately before promotion. If either control is absent, stop. Do not use `github.autoAlias: false`; that changes a merged build into a Preview-environment artifact and cannot prove the production environment that will serve after promotion.
 
 Configure provider auth, the canonical root host, and the database through the Vercel dashboard or interactive CLI. Do not use `--value` for secrets because it places them in command history. Add the compatibility token only when the recorded cutover plan still requires the skill bridge.
 
@@ -124,7 +133,7 @@ For the first V2 release, preserve any environment configuration needed by the p
 
 ## Create a candidate deployment
 
-Deploy the validated commit to the production target without assigning the production domain:
+Because `main` Git deployments are disabled, merging does not build or promote anything. Create the candidate as a separate explicit action. Deploy the validated commit to the production target without assigning the production domain:
 
 ```bash
 vercel whoami
@@ -139,22 +148,35 @@ Confirm the identity, linked Project, clean status, and SHA still match the reco
 ```bash
 KANBAN_CARDS_DEPLOYMENT_URL='paste-full-deployment-url'
 vercel inspect "$KANBAN_CARDS_DEPLOYMENT_URL" --wait --timeout 3m
+KANBAN_CARDS_DEPLOYMENT_ID='paste-exact-deployment-id'
+vercel api "/v13/deployments/$KANBAN_CARDS_DEPLOYMENT_ID"
 ```
 
-Do not rebuild between verification and promotion.
+The deployment API response must report the recorded full commit SHA, `target: production`, `readyState: READY`, the linked Project id, the same immutable URL, and no `kanban.cards` alias. Do not rebuild between verification and promotion.
 
 ## Verify the candidate deployment
 
-Generated deployment URLs may be behind Vercel Deployment Protection even when the custom production domain is public. Use `vercel curl`, which handles the linked Project's protection boundary, for source and API checks:
+Generated deployment URLs may be behind Vercel Deployment Protection even when the custom production domain is public. First read the fail-closed state through the exact immutable URL. On a first migration, `legacyBinding: pending` and HTTP `503` are expected until the verified provider callback creates the exact binding; they prove that promotion remains blocked, not that the candidate is ready:
 
 ```bash
 vercel curl /api/health --deployment "$KANBAN_CARDS_DEPLOYMENT_URL"
 vercel curl /api/access/health --deployment "$KANBAN_CARDS_DEPLOYMENT_URL"
 ```
 
-Both responses must report `ok: true`; `/api/health` must report `store: postgres` with no missing configuration, and `/api/access/health` must report `registryState: ready`, `legacyState: ready`, and `legacyBinding.status: ready` when the legacy Workspace is in scope. Record whether `legacyBridge` is `enabled` or `disabled`.
+Provider sign-in on a protected hostname pinned to the exact candidate is the action that creates and proves the binding. The generated immutable `*.vercel.app` hostname is useful for readiness calls but is not a valid provider or bearer proof: provider routes and the bounded bearer accept only the configured root or canonical tenant hosts. `/auth/login` on the generated hostname correctly returns `Workspace unavailable`.
 
-Provider sign-in on the protected candidate is the required identity and tenant-routing proof. If the compatibility bridge remains enabled, provide its key without placing it in a command argument and perform the bounded API read below. If the bridge is retired, skip the bearer write loop and follow **Retire the compatibility API key** instead.
+Before continuing, establish an approved candidate root and tenant routing mechanism with all of these properties: it is distinct from `kanban.cards`, `vercel inspect` resolves it to the recorded candidate deployment ID, it remains behind the intended protection boundary, its callback is registered with the provider, and the same immutable artifact remains valid when later served on the canonical production hosts. The current application and Vercel configuration do not supply that route automatically. Do not temporarily point `kanban.cards` at the candidate to manufacture proof. Until such a route exists, this cutover is deliberately blocked.
+
+```bash
+KANBAN_CARDS_CANDIDATE_ROOT_URL='https://paste-approved-candidate-root'
+vercel inspect "$KANBAN_CARDS_CANDIDATE_ROOT_URL" --format=json
+```
+
+Capture the canonical digest and resource fingerprint of `kanban_v2_workspaces:default` immediately before the first provider callback. Complete provider sign-in and callback on that exact route, verify the owner binding, root Workspace list, canonical handoff, and tenant Project read. Immediately re-read the state before any tenant or compatibility write; the digest and fingerprint must equal the pre-callback values. This pair proves that access binding did not change default Workspace data. Only after capturing equality, perform and record a bounded tenant-session write.
+
+Now repeat both readiness calls against the immutable deployment URL. Both responses must report `ok: true`; `/api/health` must report `store: postgres` with no missing configuration, and `/api/access/health` must report `registryState: ready`, `legacyState: ready`, and `legacyBinding.status: ready` with `present: true`. `not-required` is not acceptable for this migration. Record whether `legacyBridge` is `enabled` or `disabled`.
+
+If the compatibility bridge remains enabled, the same exact-host candidate routing must let the bearer reach only the mapped default Workspace. Provide its key without placing it in a command argument and perform the bounded lifecycle below. If the bridge is retired, skip the bearer loop and follow **Retire the compatibility API key** instead.
 
 ```bash
 printf 'Production compatibility key: '
@@ -162,7 +184,7 @@ IFS= read -r -s KANBAN_CARDS_API_TOKEN
 printf '\n'
 printf 'header = "Authorization: Bearer %s"\nheader = "X-Kanban-Actor: release-check"\n' \
   "$KANBAN_CARDS_API_TOKEN" | \
-  vercel curl /api/projects --deployment "$KANBAN_CARDS_DEPLOYMENT_URL" -- --config -
+  vercel curl /api/projects --deployment "$KANBAN_CARDS_CANDIDATE_ROOT_URL" -- --config -
 ```
 
 The authenticated bridge read must return the legacy Workspace Project list. It proves only that the bounded compatibility credential reaches the mapped `default` row; it does not prove provider identity or create missing legacy storage.
@@ -172,7 +194,7 @@ Use one persistent `Release verification` Project for deployment checks. Copy it
 ```bash
 printf 'header = "Authorization: Bearer %s"\nheader = "X-Kanban-Actor: release-check"\n' \
   "$KANBAN_CARDS_API_TOKEN" | \
-  vercel curl /api/projects --deployment "$KANBAN_CARDS_DEPLOYMENT_URL" -- \
+  vercel curl /api/projects --deployment "$KANBAN_CARDS_CANDIDATE_ROOT_URL" -- \
     --config - \
     --include \
     --request POST \
@@ -191,7 +213,7 @@ KANBAN_CARDS_RELEASE_RUN_ID="$(git rev-parse --short=12 HEAD)-$(date -u +%Y%m%dT
 printf 'header = "Authorization: Bearer %s"\nheader = "X-Kanban-Actor: release-check"\n' \
   "$KANBAN_CARDS_API_TOKEN" | \
   vercel curl "/api/projects/$KANBAN_CARDS_RELEASE_PROJECT_ID/cards" \
-    --deployment "$KANBAN_CARDS_DEPLOYMENT_URL" -- \
+    --deployment "$KANBAN_CARDS_CANDIDATE_ROOT_URL" -- \
     --config - \
     --include \
     --request POST \
@@ -204,7 +226,7 @@ KANBAN_CARDS_RELEASE_CARD_ID='paste-card-id-from-first-response'
 printf 'header = "Authorization: Bearer %s"\nheader = "X-Kanban-Actor: release-check"\n' \
   "$KANBAN_CARDS_API_TOKEN" | \
   vercel curl "/api/projects/$KANBAN_CARDS_RELEASE_PROJECT_ID/cards" \
-    --deployment "$KANBAN_CARDS_DEPLOYMENT_URL" -- \
+    --deployment "$KANBAN_CARDS_CANDIDATE_ROOT_URL" -- \
     --config - \
     --include \
     --request POST \
@@ -212,12 +234,48 @@ printf 'header = "Authorization: Bearer %s"\nheader = "X-Kanban-Actor: release-c
     --header "Idempotency-Key: release:$KANBAN_CARDS_RELEASE_RUN_ID:external-replay-v1" \
     --data "{\"title\":\"Verify release $KANBAN_CARDS_RELEASE_RUN_ID\",\"body\":\"Production smoke check.\",\"externalKey\":\"release:$KANBAN_CARDS_RELEASE_RUN_ID\"}"
 
+printf 'header = "Authorization: Bearer %s"\nheader = "X-Kanban-Actor: release-check"\n' \
+  "$KANBAN_CARDS_API_TOKEN" | \
+  vercel curl "/api/projects/$KANBAN_CARDS_RELEASE_PROJECT_ID/cards/$KANBAN_CARDS_RELEASE_CARD_ID/comments" \
+    --deployment "$KANBAN_CARDS_CANDIDATE_ROOT_URL" -- \
+    --config - \
+    --include \
+    --request POST \
+    --header 'Content-Type: application/json' \
+    --header "Idempotency-Key: release:$KANBAN_CARDS_RELEASE_RUN_ID:comment-v1" \
+    --data '{"body":"Candidate compatibility Comment passed."}'
+
+printf 'header = "Authorization: Bearer %s"\nheader = "X-Kanban-Actor: release-check"\n' \
+  "$KANBAN_CARDS_API_TOKEN" | \
+  vercel curl "/api/projects/$KANBAN_CARDS_RELEASE_PROJECT_ID/cards/$KANBAN_CARDS_RELEASE_CARD_ID" \
+    --deployment "$KANBAN_CARDS_CANDIDATE_ROOT_URL" -- \
+    --config - \
+    --include \
+    --request PATCH \
+    --header 'Content-Type: application/json' \
+    --header 'X-Kanban-Version: 2' \
+    --data '{"columnId":"doing"}'
+
+KANBAN_CARDS_ARCHIVED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+printf 'header = "Authorization: Bearer %s"\nheader = "X-Kanban-Actor: release-check"\n' \
+  "$KANBAN_CARDS_API_TOKEN" | \
+  vercel curl "/api/projects/$KANBAN_CARDS_RELEASE_PROJECT_ID/cards/$KANBAN_CARDS_RELEASE_CARD_ID" \
+    --deployment "$KANBAN_CARDS_CANDIDATE_ROOT_URL" -- \
+    --config - \
+    --include \
+    --request PATCH \
+    --header 'Content-Type: application/json' \
+    --header 'X-Kanban-Version: 3' \
+    --data "{\"archivedAt\":\"$KANBAN_CARDS_ARCHIVED_AT\"}"
+
 unset KANBAN_CARDS_API_TOKEN
 ```
 
-The first Card request must return `201` with version `1`. The second uses a different idempotency key and the same external key; it must return `200`, `deduplicated: true`, and the same Card ID. This is the compatibility-bridge proof that the candidate can read and mutate the mapped Postgres row. The Card remains visible until the post-promotion check archives it.
+The first Card request must return `201` with version `1`. The second uses a different idempotency key and the same external key; it must return `200`, `deduplicated: true`, and the same Card ID. Comment must return version `2`, Move version `3`, and archive version `4`. Re-read the Project with archived Cards included and confirm the same Card, Comment, move Activity, and archive Activity. This is the bounded compatibility-bridge proof that the candidate can read and complete create, comment, move, and archive against the mapped Postgres row before promotion.
 
-Open the immutable deployment URL in a browser authenticated with Vercel when Deployment Protection requires it. Complete provider sign-in, verify the root route lists only the owner's Workspaces, open the canonical tenant through the one-time handoff, and confirm the verification Card appears. Repeat at a narrow viewport. If the browser cannot cross the Vercel protection boundary, stop. API checks do not replace rendered candidate verification.
+Open the approved exact-deployment candidate hostname in a browser authenticated with Vercel when Deployment Protection requires it. Complete provider sign-in and callback, verify the root route lists only the owner's Workspaces, open the canonical candidate tenant through the one-time handoff, and confirm the archived verification Card remains present in the Project and Activity evidence. Repeat at a narrow viewport. If the browser cannot cross the Vercel protection boundary or the hostname/callback is not pinned to the exact deployment ID, stop. API checks do not replace rendered candidate verification.
+
+After the candidate smoke mutations, capture a new canonical digest and resource fingerprint in `prePromotion.dataIntegrityProof.finalCandidateDigest` and `finalCandidateResourceFingerprint`. This is the pre-promotion baseline for the post-promotion receipt; do not compare it with the pre-binding digest because the bounded verification Card intentionally changed the Workspace.
 
 Inspect recent candidate errors:
 
@@ -235,19 +293,42 @@ vercel inspect "$KANBAN_CARDS_ROLLBACK_URL"
 
 Confirm that this exact immutable URL is the intended known-good rollback target and is different from the candidate URL. Stop if no verified rollback target exists.
 
+## Record and evaluate cutover evidence
+
+Copy [`workspace-cutover-evidence.example.json`](workspace-cutover-evidence.example.json) to an operator-controlled location outside the repository and replace every placeholder with evidence from the exact candidate, current production deployment, and real Postgres store. The record contains no credential values. Pre- and post-promotion receipts have distinct run IDs, timestamps no more than 30 minutes old, exercised origins, exact deployment ID/URL/SHA bindings, and concrete compatibility Card IDs/versions. A proof field may be `passed` only when that action was completed against that phase's exact origin; `not-run`, `failed`, missing, stale, and invented values block promotion.
+
+The data proof uses separate phase-bound pairs:
+
+- Pre-promotion compares the canonical digest and resource fingerprint immediately before and after the access binding, before compatibility writes.
+- Post-promotion compares the final candidate baseline with the public production state immediately after promotion, before post-promotion smoke writes.
+
+Each fingerprint covers Project, Column, Card, Comment, and Activity ids, resource versions and revisions, archive state, and idempotency records.
+
+Run the pre-promotion evaluator:
+
+```bash
+KANBAN_CARDS_EVIDENCE_PATH='paste-operator-controlled-evidence-path'
+npm run release:gate -- --snapshot "$KANBAN_CARDS_EVIDENCE_PATH" --live
+```
+
+Every blocker is named by gate and code. A pending binding, provider failure, compatibility-loop failure, exact-artifact mismatch, changed default Workspace, unverified rollback target, enabled automatic domain assignment, or automatic `main` deployment leaves current production unchanged and returns a failing exit status.
+
 ## Promote the verified artifact
 
-Promote the exact deployment that passed verification:
+Promotion is a distinct explicit action. One controller re-reads the live Project policy, exact candidate metadata, public production/rollback identity, candidate route pin, and both runtime readiness endpoints; validates the phase-bound receipt and literal confirmation; and passes the evaluated deployment ID directly to `vercel promote`. It accepts no independent promotion target:
 
 ```bash
 vercel whoami
 vercel project inspect
 vercel project protection
-vercel promote "$KANBAN_CARDS_DEPLOYMENT_URL"
+npm run release:preflight
+KANBAN_CARDS_PROMOTION_CONFIRMATION='PROMOTE EXACT VERIFIED CANDIDATE'
+npm run release:gate -- --snapshot "$KANBAN_CARDS_EVIDENCE_PATH" \
+  --live --authorize-promotion --confirmation "$KANBAN_CARDS_PROMOTION_CONFIRMATION" --promote
 vercel inspect https://kanban.cards
 ```
 
-Confirm the identity, linked Project, and protection boundary again before promotion. While the compatibility bridge is enabled, configure the helper for the public production origin without placing the key on the command line. If the bridge is disabled, skip helper setup and run the retirement proof below.
+Confirm the identity, linked Project, remote auto-assignment setting, and protection boundary again immediately before promotion. A different ID, URL, SHA, Project, branch, or alias state invalidates the evidence. Never substitute a branch alias or rebuild. While the compatibility bridge is enabled, configure the helper for the public production origin without placing the key on the command line. If the bridge is disabled, skip helper setup and run the retirement proof below.
 
 First open `https://kanban.cards` in a signed-out or private browser window. The provider sign-in surface must load without a Vercel login. Complete provider sign-in, confirm the root route exposes only the expected Workspaces, then open the canonical tenant and verify the Project list.
 
@@ -270,9 +351,21 @@ node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs projects
 
 Both public readiness responses must match the candidate's ready state and bridge mode before helper-based verification continues. Run the helper commands only while the compatibility bridge is intentionally enabled.
 
-Reuse the Project, Card, and run ID from candidate verification. Run the public-origin smoke loop with `--project` so verification does not change the repository binding:
+Before creating the post-promotion verification Card, re-read the canonical digest and resource fingerprint through the public origin and compare them with the final candidate baseline. Record that distinct promotion-before/after pair in `evidence.postPromotion.dataIntegrityProof`; the gate requires its `before*` values to match the final candidate baseline. Only after equality is established, perform and capture a bounded tenant-session write, then run the post-promotion bearer lifecycle below.
+
+First read the candidate verification Project with archived Cards included and confirm the exact pre-promotion Card is still version `4` with the same evidence. Then choose a new post-promotion run ID and run a second public-origin bounded lifecycle with `--project` so verification does not change the repository binding:
 
 ```bash
+KANBAN_CARDS_RELEASE_RUN_ID="$(git rev-parse --short=12 HEAD)-post-$(date -u +%Y%m%dT%H%M%SZ)"
+
+node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs \
+  create-card --project "$KANBAN_CARDS_RELEASE_PROJECT_ID" \
+  --title "Verify release $KANBAN_CARDS_RELEASE_RUN_ID" \
+  --body "Production smoke check." \
+  --external-key "release:$KANBAN_CARDS_RELEASE_RUN_ID"
+
+KANBAN_CARDS_RELEASE_CARD_ID='paste-new-post-promotion-card-id'
+
 node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs \
   create-card --project "$KANBAN_CARDS_RELEASE_PROJECT_ID" \
   --title "Verify release $KANBAN_CARDS_RELEASE_RUN_ID" \
@@ -298,7 +391,7 @@ node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs \
   activity --project "$KANBAN_CARDS_RELEASE_PROJECT_ID" --limit 25
 ```
 
-The helper create must return the same Card ID and version `1` created on the candidate URL. That proves the promoted public origin and protected candidate used the same artifact and store. The stale update must fail with the stale-version message; the automated API test verifies the underlying `409`. Use a new release run ID for every smoke run.
+The helper create must return a new Card for the post-promotion run with version `1`. The archived candidate Card must retain its prior ID and version `4`; together those reads prove the promoted public origin retained the candidate's Postgres state. The stale update must fail with the stale-version message; the automated API test verifies the underlying `409`. Use a new release run ID for every smoke run.
 
 Reload the production browser. Confirm the Card and API-labeled Activity appear. The current browser does not update an already-open Project automatically. Then archive the temporary Card using the current version:
 
@@ -317,6 +410,14 @@ vercel logs --environment production --level error --since 15m --no-branch
 ```
 
 Record the commit SHA, candidate URL, production verification result, and the rollback URL captured before promotion.
+
+Update the evidence snapshot with the exact deployment now serving `kanban.cards` and the repeated readiness, provider, compatibility, and unchanged-data proofs. Then run:
+
+```bash
+npm run release:gate -- --snapshot "$KANBAN_CARDS_EVIDENCE_PATH" --phase post-promotion --live
+```
+
+Do not describe the release as complete until this post-promotion gate passes. If it fails, report the exact blocker and keep the recorded rollback target available. Do not roll back automatically; rollback remains a separately authorized production mutation.
 
 ## Retire the compatibility API key
 
@@ -420,6 +521,9 @@ Do not log either key during comparison. Never use an old-key deployment as a ro
 - `428`: the caller omitted the required `X-Kanban-Version` revision or version on an edit.
 - `503`: inspect both readiness endpoints. Required provider/database configuration may be missing, the access registry may be unavailable, the required `default` state may be missing or invalid, the legacy binding may be pending or mismatched, or global sign-out revocation may be incomplete.
 - `/api/health` or `/api/access/health` fails: stop promotion. Do not initialize or replace legacy storage as a shortcut.
+- `main-git-deployments-enabled` or `auto-domain-assignment-enabled`: stop. Restore both release controls before creating another candidate; a merge is never promotion authorization.
+- `Workspace unavailable` on an immutable generated deployment hostname: that hostname cannot prove canonical provider or compatibility access. Configure and verify an approved protected candidate root and tenant route pinned to the exact deployment; do not weaken host validation.
+- Any `npm run release:gate` blocker: leave the current production deployment serving. Correct and re-run the failed proof against the same candidate, or build and record a new candidate if its artifact or environment changed.
 - `Global sign-out could not be completed`: the current host instructed the browser to clear its cookie, but sibling sessions may remain active. Retry sign-out after the registry recovers and verify the full session family is revoked.
 - Duplicate Card creation: the caller omitted a stable external key and did not reuse the same idempotency key, or server deduplication regressed.
 - Browser and helper disagree: reload the browser, then confirm both clients use the same origin and Project. A repository binding selects context but does not scope authority.

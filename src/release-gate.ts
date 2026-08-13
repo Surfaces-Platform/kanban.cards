@@ -1,0 +1,261 @@
+export const PROMOTION_CONFIRMATION = "PROMOTE EXACT VERIFIED CANDIDATE";
+
+export type CutoverPhase = "pre-promotion" | "post-promotion";
+
+export interface TrustedReleaseTarget {
+  projectId: string;
+  teamId: string;
+  repository: string;
+  productionBranch: string;
+  publicDomain: string;
+}
+
+export interface CutoverBlocker {
+  gate:
+    | "release-policy"
+    | "candidate-identity"
+    | "production-boundary"
+    | "candidate-readiness"
+    | "provider-access"
+    | "compatibility-bridge"
+    | "data-integrity"
+    | "rollback-target"
+    | "evidence-binding"
+    | "explicit-promotion";
+  code: string;
+  message: string;
+}
+
+export interface CutoverEvaluation {
+  phase: CutoverPhase;
+  ok: boolean;
+  blockers: CutoverBlocker[];
+  candidate: { deploymentId: string; url: string; commitSha: string };
+}
+
+export interface PromotionAuthorization extends CutoverEvaluation {
+  authorized: boolean;
+}
+
+export interface PromotionDependencies {
+  promote(deploymentId: string): Promise<void>;
+  readPostPromotionSnapshot(): Promise<unknown>;
+  now?: () => Date;
+}
+
+export interface PromotionResult {
+  status: "blocked" | "promoted" | "post-promotion-failed";
+  promotionCalls: number;
+  evaluation: CutoverEvaluation;
+}
+
+type UnknownRecord = Record<string, unknown>;
+
+const MAX_RECEIPT_AGE_MS = 30 * 60 * 1000;
+
+export function evaluateCutoverSnapshot(
+  snapshot: unknown,
+  phase: CutoverPhase,
+  trustedTarget: TrustedReleaseTarget = trustedReleaseTarget(),
+  now: Date = new Date()
+): CutoverEvaluation {
+  const root = record(snapshot);
+  const policy = record(root.policy);
+  const candidate = record(root.candidate);
+  const currentProduction = record(root.currentProduction);
+  const currentProductionHealth = record(currentProduction.health);
+  const evidence = phaseEvidence(root, phase);
+  const health = record(evidence.health);
+  const healthAccess = record(health.access);
+  const accessHealth = record(evidence.accessHealth);
+  const legacyBinding = record(accessHealth.legacyBinding);
+  const provider = record(evidence.providerProof);
+  const compatibility = record(evidence.compatibilityProof);
+  const retirement = record(evidence.retirementProof);
+  const data = record(evidence.dataIntegrityProof);
+  const rollback = record(phase === "pre-promotion" ? root.rollbackTarget : root.originalRollbackTarget);
+  const promotionReceipt = record(root.promotionReceipt);
+  const receiptRollback = record(promotionReceipt.rollbackTarget);
+  const preEvidence = record(record(root.evidence).prePromotion);
+  const postEvidence = record(record(root.evidence).postPromotion);
+  const blockers: CutoverBlocker[] = [];
+
+  const candidateId = text(candidate.id);
+  const candidateUrl = canonicalDeploymentUrl(candidate.url);
+  const candidateSha = text(candidate.commitSha);
+  const expectedOrigin = phase === "post-promotion" ? canonicalOrigin(trustedTarget.publicDomain) : "";
+
+  requireMatch(blockers, "release-policy", "project-id", text(policy.projectId), trustedTarget.projectId, "Vercel Project id");
+  requireMatch(blockers, "release-policy", "team-id", text(policy.teamId), trustedTarget.teamId, "Vercel team id");
+  requireMatch(blockers, "release-policy", "repository", text(policy.repository), trustedTarget.repository, "linked repository");
+  requireMatch(blockers, "release-policy", "production-branch", text(policy.productionBranch), trustedTarget.productionBranch, "production branch");
+  if (policy.autoAssignCustomDomains !== false) add(blockers, "release-policy", "auto-domain-assignment-enabled", "Auto-assign Custom Production Domains must remain disabled.");
+  if (policy.mainGitDeploymentsEnabled !== false) add(blockers, "release-policy", "main-git-deployments-enabled", "The repository must keep every Git rule that matches main disabled.");
+  if (!new Set(["all_except_custom_domains", "all"]).has(text(policy.deploymentProtection))) add(blockers, "release-policy", "candidate-unprotected", "Generated candidate deployments must remain protected.");
+
+  requireMatch(blockers, "candidate-identity", "project-id", text(candidate.projectId), trustedTarget.projectId, "candidate Project id");
+  requireMatch(blockers, "candidate-identity", "commit-ref", text(candidate.commitRef), trustedTarget.productionBranch, "candidate Git ref");
+  requireMatch(blockers, "candidate-identity", "target", text(candidate.target), "production", "candidate environment target");
+  requireMatch(blockers, "candidate-identity", "ready-state", text(candidate.readyState), "READY", "candidate readiness state");
+  if (!candidateId) add(blockers, "candidate-identity", "deployment-id", "Candidate deployment id is missing.");
+  if (!candidateSha || !/^[0-9a-f]{40}$/i.test(candidateSha)) add(blockers, "candidate-identity", "commit-sha", "Candidate must carry the full Git commit SHA from live deployment metadata.");
+  if (!isGeneratedDeploymentUrl(candidateUrl, trustedTarget.publicDomain)) add(blockers, "candidate-identity", "deployment-url", "Candidate URL must be an immutable generated HTTPS deployment hostname, not the public domain or a branch alias.");
+  if (strings(candidate.aliases).includes(trustedTarget.publicDomain) && phase === "pre-promotion") add(blockers, "production-boundary", "candidate-already-public", "The candidate already owns the public production domain.");
+
+  const productionId = text(currentProduction.id);
+  const productionUrl = canonicalDeploymentUrl(currentProduction.url);
+  const productionAliases = strings(currentProduction.aliases);
+  requireMatch(blockers, "production-boundary", "production-project-id", text(currentProduction.projectId), trustedTarget.projectId, "current production Project id");
+  requireMatch(blockers, "production-boundary", "production-target", text(currentProduction.target), "production", "current production target");
+  requireMatch(blockers, "production-boundary", "production-ready-state", text(currentProduction.readyState), "READY", "current production readiness state");
+  if (!isGeneratedDeploymentUrl(productionUrl, trustedTarget.publicDomain)) add(blockers, "production-boundary", "production-url", "Current production must resolve to an immutable generated deployment URL.");
+  if (!productionAliases.includes(trustedTarget.publicDomain)) add(blockers, "production-boundary", "public-domain-missing", "The inspected production deployment does not own the public domain.");
+  if (phase === "pre-promotion" && productionId === candidateId) add(blockers, "production-boundary", "candidate-already-current", "The candidate must remain unpromoted while pre-promotion gates run.");
+  if (phase === "post-promotion" && productionId !== candidateId) add(blockers, "production-boundary", "candidate-not-current", "The public production target does not match the verified candidate deployment.");
+  if (currentProductionHealth.status !== 200 || currentProductionHealth.ok !== true || text(currentProductionHealth.store) !== "postgres") add(blockers, "production-boundary", "production-unhealthy", "The deployment currently serving production is not a healthy Postgres runtime.");
+
+  requireReceiptBinding(blockers, evidence, phase, candidateId, candidateUrl, candidateSha, expectedOrigin, trustedTarget.publicDomain, now);
+
+  if (health.status !== 200 || health.ok !== true) add(blockers, "candidate-readiness", "health-not-ready", "The phase readiness receipt must report HTTP 200 with ok:true.");
+  if (text(health.store) !== "postgres") add(blockers, "candidate-readiness", "store-not-postgres", "The phase readiness receipt must report the Postgres store.");
+  if (strings(health.missingConfiguration).length) add(blockers, "candidate-readiness", "missing-configuration", "The phase readiness receipt reports missing configuration.");
+  requireReadyValue(blockers, "candidate-readiness", "registry-not-ready", healthAccess.registry, "Registry");
+  requireReadyValue(blockers, "candidate-readiness", "legacy-state-not-ready", healthAccess.legacyState, "Legacy state");
+  requireReadyValue(blockers, "candidate-readiness", "legacy-binding-not-ready", healthAccess.legacyBinding, "Legacy binding");
+  if (accessHealth.status !== 200 || accessHealth.ok !== true) add(blockers, "candidate-readiness", "access-health-not-ready", "The phase /api/access/health receipt must report HTTP 200 with ok:true.");
+  if (strings(accessHealth.missingConfiguration).length) add(blockers, "candidate-readiness", "access-missing-configuration", "The phase access receipt reports missing configuration.");
+  requireReadyValue(blockers, "candidate-readiness", "access-registry-not-ready", accessHealth.registryState, "Access registry");
+  requireReadyValue(blockers, "candidate-readiness", "access-legacy-state-not-ready", accessHealth.legacyState, "Access legacy state");
+  requireReadyValue(blockers, "candidate-readiness", "access-legacy-binding-not-ready", legacyBinding.status, "Access legacy binding");
+  if (legacyBinding.present !== true) add(blockers, "candidate-readiness", "legacy-binding-absent", "The phase access receipt must report the exact legacy binding as present.");
+
+  requirePassed(blockers, "provider-access", provider, "login", "provider-login", "Provider login");
+  requirePassed(blockers, "provider-access", provider, "callback", "provider-callback", "Provider callback");
+  requirePassed(blockers, "provider-access", provider, "exactLegacyBinding", "exact-legacy-binding", "Exact legacy owner binding");
+  requirePassed(blockers, "provider-access", provider, "canonicalHandoff", "canonical-handoff", "Canonical tenant handoff");
+  requirePassed(blockers, "provider-access", provider, "tenantProjectAccess", "tenant-project-access", "Tenant Project access");
+  requirePassed(blockers, "provider-access", provider, "tenantProjectWrite", "tenant-project-write", "Tenant Project write");
+
+  const bridgeMode = text(accessHealth.legacyBridge);
+  if (bridgeMode === "enabled") {
+    if (compatibility.required !== true) add(blockers, "compatibility-bridge", "proof-not-required", "An enabled compatibility bridge must require the bounded bearer proof.");
+    for (const field of ["read", "create", "comment", "move", "archive"] as const) requirePassed(blockers, "compatibility-bridge", compatibility, field, `${field}-failed`, `Compatibility ${field}`);
+    if (!text(compatibility.cardId) || compatibility.finalCardVersion !== 4) add(blockers, "compatibility-bridge", "lifecycle-receipt-missing", "Compatibility proof must record the lifecycle Card id and final version 4.");
+  } else if (bridgeMode === "disabled") {
+    if (retirement.required !== true) add(blockers, "compatibility-bridge", "retirement-proof-not-required", "A disabled bridge must require explicit retirement proof.");
+    for (const field of ["public401", "legacy401", "sibling401", "oldDeploymentsClosed"] as const) requirePassed(blockers, "compatibility-bridge", retirement, field, `retirement-${field}`, `Retirement ${field}`);
+  } else {
+    add(blockers, "candidate-readiness", "legacy-bridge-unknown", "Legacy bridge must be enabled or disabled.");
+  }
+
+  if (data.realPostgres !== true) add(blockers, "data-integrity", "not-real-postgres", "Data preservation proof must run against the real candidate Postgres store.");
+  requireSameNonEmpty(blockers, "data-integrity", "state-digest-changed", data.beforeDigest, data.afterDigest, "Default Workspace canonical digest");
+  requireSameNonEmpty(blockers, "data-integrity", "resource-fingerprint-changed", data.beforeResourceFingerprint, data.afterResourceFingerprint, "Default Workspace resource fingerprint");
+  if (phase === "post-promotion") requireDistinctPostEvidence(blockers, preEvidence, postEvidence);
+
+  requireMatch(blockers, "rollback-target", "project-id", text(rollback.projectId), trustedTarget.projectId, "rollback Project id");
+  if (!/^[0-9a-f]{40}$/i.test(text(rollback.commitSha))) add(blockers, "rollback-target", "commit-sha", "Rollback requires the full live deployment commit SHA.");
+  if (phase === "pre-promotion" && (text(rollback.id) !== productionId || canonicalDeploymentUrl(rollback.url) !== productionUrl || text(rollback.commitSha) !== text(currentProduction.commitSha) || text(rollback.target) !== text(currentProduction.target) || text(rollback.readyState) !== text(currentProduction.readyState))) add(blockers, "rollback-target", "identity-mismatch", "Rollback id, immutable URL, SHA, target, and readiness must match the live current production deployment.");
+  if (phase === "post-promotion") {
+    requireMatch(blockers, "rollback-target", "receipt-candidate-id", text(promotionReceipt.candidateDeploymentId), candidateId, "promotion receipt candidate id");
+    requireMatch(blockers, "rollback-target", "receipt-candidate-url", canonicalDeploymentUrl(promotionReceipt.candidateUrl), candidateUrl, "promotion receipt candidate URL");
+    requireMatch(blockers, "rollback-target", "receipt-candidate-sha", text(promotionReceipt.candidateCommitSha), candidateSha, "promotion receipt candidate SHA");
+    if (!Number.isFinite(Date.parse(text(promotionReceipt.promotedAt)))) add(blockers, "rollback-target", "promotion-time-missing", "The controller-generated promotion receipt must record successful promotion time.");
+    if (!sameDeploymentIdentity(rollback, receiptRollback)) add(blockers, "rollback-target", "predecessor-mismatch", "The live rollback deployment must exactly match the pre-authorized production predecessor recorded by the promotion controller.");
+    if (!text(rollback.id) || text(rollback.id) === candidateId || !isGeneratedDeploymentUrl(canonicalDeploymentUrl(rollback.url), trustedTarget.publicDomain) || !/^[0-9a-f]{40}$/i.test(text(rollback.commitSha)) || text(rollback.target) !== "production" || text(rollback.readyState) !== "READY") add(blockers, "rollback-target", "identity-mismatch", "The original rollback record must retain a distinct immutable id, URL, full SHA, production target, and READY state after promotion.");
+  }
+  if (text(rollback.id) === candidateId && phase === "pre-promotion") add(blockers, "rollback-target", "same-as-candidate", "The rollback deployment must differ from the candidate before promotion.");
+  if (rollback.verified !== true) add(blockers, "rollback-target", "not-verified", "The rollback target must have a recent health and compatibility verification receipt.");
+
+  return { phase, ok: blockers.length === 0, blockers, candidate: { deploymentId: candidateId, url: candidateUrl, commitSha: candidateSha } };
+}
+
+export function authorizePromotion(snapshot: unknown, confirmation: string, trustedTarget?: TrustedReleaseTarget, now?: Date): PromotionAuthorization {
+  const evaluation = evaluateCutoverSnapshot(snapshot, "pre-promotion", trustedTarget, now);
+  const blockers = [...evaluation.blockers];
+  if (confirmation !== PROMOTION_CONFIRMATION) add(blockers, "explicit-promotion", "confirmation-required", `Promotion requires the literal confirmation: ${PROMOTION_CONFIRMATION}`);
+  return { ...evaluation, ok: blockers.length === 0, authorized: blockers.length === 0, blockers };
+}
+
+export async function promoteVerifiedCandidate(snapshot: unknown, confirmation: string, dependencies: PromotionDependencies, trustedTarget?: TrustedReleaseTarget): Promise<PromotionResult> {
+  const now = dependencies.now?.() ?? new Date();
+  const authorization = authorizePromotion(snapshot, confirmation, trustedTarget, now);
+  if (!authorization.authorized) return { status: "blocked", promotionCalls: 0, evaluation: authorization };
+  await dependencies.promote(authorization.candidate.deploymentId);
+  const postSnapshot = await dependencies.readPostPromotionSnapshot();
+  const postPromotion = evaluateCutoverSnapshot(postSnapshot, "post-promotion", trustedTarget, dependencies.now?.() ?? new Date());
+  return { status: postPromotion.ok ? "promoted" : "post-promotion-failed", promotionCalls: 1, evaluation: postPromotion };
+}
+
+export function trustedReleaseTarget(): TrustedReleaseTarget {
+  return {
+    projectId: "prj_5DC7osq9fL2Ju8NMp6dgVz7dUas1",
+    teamId: "team_Kw6YLfcGtRy40u9UEvifOh1r",
+    repository: "Surfaces-Platform/kanban.cards",
+    productionBranch: "main",
+    publicDomain: "kanban.cards"
+  };
+}
+
+function phaseEvidence(root: UnknownRecord, phase: CutoverPhase): UnknownRecord {
+  const evidence = record(root.evidence);
+  return record(evidence[phase === "pre-promotion" ? "prePromotion" : "postPromotion"]);
+}
+
+function requireReceiptBinding(blockers: CutoverBlocker[], proof: UnknownRecord, phase: CutoverPhase, id: string, url: string, sha: string, expectedOrigin: string, publicDomain: string, now: Date): void {
+  requireMatch(blockers, "evidence-binding", "proof-phase", text(proof.phase), phase, "proof phase");
+  requireMatch(blockers, "evidence-binding", "proof-deployment-id", text(proof.deploymentId), id, "proof deployment id");
+  requireMatch(blockers, "evidence-binding", "proof-deployment-url", canonicalDeploymentUrl(proof.deploymentUrl), url, "proof deployment URL");
+  requireMatch(blockers, "evidence-binding", "proof-commit-sha", text(proof.commitSha), sha, "proof commit SHA");
+  const origin = canonicalOrigin(proof.origin);
+  if (phase === "post-promotion") {
+    requireMatch(blockers, "evidence-binding", "proof-origin", origin, expectedOrigin, "proof origin");
+  } else if (!origin || origin === url || origin === canonicalOrigin(publicDomain)) {
+    add(blockers, "evidence-binding", "proof-origin", "Pre-promotion provider proof requires a distinct approved candidate root origin; the generated deployment URL and public domain do not qualify.");
+  }
+  requireMatch(blockers, "evidence-binding", "proof-route-deployment-id", text(proof.routeDeploymentId), id, "proof route deployment id");
+  if (proof.routePinned !== "passed") add(blockers, "evidence-binding", "proof-route-not-pinned", "The exercised origin must be live-inspected as pinned to the exact deployment.");
+  if (proof.callbackRegistered !== "passed") add(blockers, "evidence-binding", "proof-callback-unregistered", "The exercised origin must have an approved registered provider callback.");
+  requireMatch(blockers, "evidence-binding", "proof-tenant-route-deployment-id", text(proof.tenantRouteDeploymentId), id, "proof tenant route deployment id");
+  if (proof.tenantRoutePinned !== "passed") add(blockers, "evidence-binding", "proof-tenant-route-not-pinned", "The exercised tenant origin must be live-inspected as pinned to the exact deployment.");
+  if (proof.sameArtifactCanonicalHost !== "passed") add(blockers, "evidence-binding", "canonical-host-not-proven", "The same immutable artifact must be proven compatible with the canonical production root and tenant hosts before promotion.");
+  const runId = text(proof.runId);
+  if (!runId) add(blockers, "evidence-binding", "proof-run-id", "Proof requires a unique run id.");
+  const observedAt = Date.parse(text(proof.observedAt));
+  if (!Number.isFinite(observedAt) || observedAt > now.getTime() + 60_000 || now.getTime() - observedAt > MAX_RECEIPT_AGE_MS) add(blockers, "evidence-binding", "proof-stale", "Proof must have a valid observedAt no more than 30 minutes old.");
+}
+
+function requireDistinctPostEvidence(blockers: CutoverBlocker[], pre: UnknownRecord, post: UnknownRecord): void {
+  if (!text(pre.runId) || text(pre.runId) === text(post.runId)) add(blockers, "evidence-binding", "post-run-reused", "Post-promotion proof requires a distinct run id.");
+  const preObserved = Date.parse(text(pre.observedAt));
+  const postObserved = Date.parse(text(post.observedAt));
+  if (!Number.isFinite(preObserved) || !Number.isFinite(postObserved) || postObserved <= preObserved) add(blockers, "evidence-binding", "post-not-after-pre", "Post-promotion proof must be observed after pre-promotion proof.");
+  const preCompatibility = record(pre.compatibilityProof);
+  const postCompatibility = record(post.compatibilityProof);
+  if (text(preCompatibility.cardId) && text(preCompatibility.cardId) === text(postCompatibility.cardId)) add(blockers, "evidence-binding", "post-card-reused", "Post-promotion compatibility proof requires a distinct lifecycle Card.");
+  const preData = record(pre.dataIntegrityProof);
+  const postData = record(post.dataIntegrityProof);
+  requireMatch(blockers, "data-integrity", "promotion-baseline-digest", text(postData.beforeDigest), text(preData.finalCandidateDigest), "post-promotion baseline digest");
+  requireMatch(blockers, "data-integrity", "promotion-baseline-fingerprint", text(postData.beforeResourceFingerprint), text(preData.finalCandidateResourceFingerprint), "post-promotion baseline fingerprint");
+}
+
+function sameDeploymentIdentity(actual: UnknownRecord, expected: UnknownRecord): boolean {
+  return text(actual.id) === text(expected.id)
+    && canonicalDeploymentUrl(actual.url) === canonicalDeploymentUrl(expected.url)
+    && text(actual.projectId) === text(expected.projectId)
+    && text(actual.commitSha) === text(expected.commitSha)
+    && text(actual.target) === text(expected.target)
+    && text(actual.readyState) === text(expected.readyState);
+}
+
+function record(value: unknown): UnknownRecord { return value && typeof value === "object" && !Array.isArray(value) ? value as UnknownRecord : {}; }
+function text(value: unknown): string { return typeof value === "string" ? value.trim() : ""; }
+function strings(value: unknown): string[] { return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string").map((entry) => entry.trim()) : []; }
+function canonicalOrigin(value: unknown): string { const raw = text(value); if (!raw) return ""; try { const parsed = new URL(raw.includes("://") ? raw : `https://${raw}`); return parsed.protocol === "https:" && !parsed.username && !parsed.password && parsed.pathname === "/" && !parsed.search && !parsed.hash ? parsed.origin : ""; } catch { return ""; } }
+function canonicalDeploymentUrl(value: unknown): string { return canonicalOrigin(value); }
+function isGeneratedDeploymentUrl(value: string, publicDomain: string): boolean { if (!value) return false; const host = new URL(value).hostname; return host.endsWith(".vercel.app") && host !== publicDomain && !host.includes("-git-"); }
+function add(blockers: CutoverBlocker[], gate: CutoverBlocker["gate"], code: string, message: string): void { blockers.push({ gate, code, message }); }
+function requireMatch(blockers: CutoverBlocker[], gate: CutoverBlocker["gate"], code: string, actual: string, expected: string, label: string): void { if (!actual || !expected || actual !== expected) add(blockers, gate, code, `${label} does not match the trusted release target.`); }
+function requireReadyValue(blockers: CutoverBlocker[], gate: CutoverBlocker["gate"], code: string, value: unknown, label: string): void { if (text(value) !== "ready") add(blockers, gate, code, `${label} must be ready; not-required, pending, mismatch, missing, invalid, and unavailable all block promotion.`); }
+function requirePassed(blockers: CutoverBlocker[], gate: CutoverBlocker["gate"], proof: UnknownRecord, field: string, code: string, label: string): void { if (proof[field] !== "passed") add(blockers, gate, code, `${label} must be recorded as passed in the phase-bound receipt.`); }
+function requireSameNonEmpty(blockers: CutoverBlocker[], gate: CutoverBlocker["gate"], code: string, beforeValue: unknown, afterValue: unknown, label: string): void { const before = text(beforeValue); const after = text(afterValue); if (!before || !after || before !== after) add(blockers, gate, code, `${label} must be present and unchanged.`); }

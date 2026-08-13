@@ -114,18 +114,21 @@ npm run build
 npm run check
 npm test
 npm run test:browser
+npm run check:release-policy
+npm run release:preflight
 ```
 
-`npm run check` verifies compilation plus the primary UI contract. `npm test` verifies authentication, authorization, idempotency, optimistic version conflicts, file persistence, the Postgres adapter through an isolated fake, and CLI configuration. `npm run test:browser` builds the production client and exercises the Context Dock against a temporary real server and store in Chromium at desktop and narrow-screen sizes; install its browser once with `npx playwright install chromium` if needed. A passing automated suite means the implementation contract holds; it does not prove connectivity to the production database or replace candidate-deployment verification before promotion.
+`npm run check` verifies compilation, the primary UI contract, and the repository release boundary. `npm run check:release-policy` specifically proves that a merge to `main` cannot trigger a Vercel deployment and that the runbook preserves staged production deployment plus explicit promotion. `npm run release:preflight` additionally checks the linked live Vercel Project, production branch, remote domain auto-assignment, and generated-deployment protection without changing them. `npm test` verifies authentication, authorization, idempotency, optimistic version conflicts, file persistence, the Postgres adapter through an isolated fake, CLI configuration, and the cutover gate's failure matrix. `npm run test:browser` builds the production client and exercises the Context Dock against a temporary real server and store in Chromium at desktop and narrow-screen sizes; install its browser once with `npx playwright install chromium` if needed. A passing automated suite means the implementation contract holds; it does not prove connectivity to the production database or replace exact candidate-deployment verification before promotion.
 
 ## Deployment
 
-The repository deploys to Vercel as an Express function through `api/index.ts`.
+The repository deploys to Vercel as an Express function through `api/index.ts`. Automatic Vercel deployments from `main` are disabled in `vercel.json`, so a merge and a production traffic change are distinct events. The Vercel Project must also keep **Auto-assign Custom Production Domains** disabled as a remotely verified defense in depth.
 
 1. Configure provider auth, the explicit legacy Workspace mapping, Postgres, and—only while required—the Workspace-bound compatibility key.
 2. Deploy the exact validated commit to a protected production-target candidate without moving the public domain.
-3. Confirm `/api/health` and `/api/access/health` are ready. Legacy cutover refuses a missing or invalid `kanban_v2_workspaces:default` row before it writes the access mapping; it does not initialize replacement legacy data.
-4. Verify the rendered provider root and tenant flow. While the bridge is enabled, also verify a skill-created Card, comment, movement, and Activity before promoting that exact artifact.
+3. Verify provider sign-in, callback, exact binding, and canonical tenant handoff on an approved protected candidate hostname pinned to the exact deployment. The generated deployment hostname does not satisfy provider or bearer routing; if no separate registered candidate route exists, stop. Legacy cutover refuses a missing or invalid `kanban_v2_workspaces:default` row before it writes the access mapping; it does not initialize replacement legacy data.
+4. Confirm `/api/health` and `/api/access/health` are ready after the callback has created the exact binding. While the bridge is enabled, also complete the bounded read, Card create, comment, move, and archive proof before promotion.
+5. Record distinct, artifact-bound pre/post receipts without credentials. Promote through `npm run release:gate -- --snapshot <evidence.json> --live --authorize-promotion --confirmation "PROMOTE EXACT VERIFIED CANDIDATE" --promote`; the controller live-verifies and supplies the evaluated deployment ID itself. Repeat the complete gate with `--phase post-promotion --live`.
 
 `npm run db:init` is an optional manual initializer only when a production database URL is already present in the current process. Treat it as successful production proof only when it reports `Initialized V2 postgres workspace at kanban_v2_workspaces:default`; a `file` result initialized local storage instead. Follow [the runbook](docs/runbook.md) for the complete candidate, promotion, rotation, and rollback procedure.
 

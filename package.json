@@ -14,7 +14,10 @@
     "build:cli": "esbuild src/cli/kanban-cards-client.ts --bundle --platform=node --format=esm --target=node20 --banner:js='#!/usr/bin/env node' --outfile=.agents/skills/kanban-cards/scripts/kanban-cards-client.mjs && chmod +x .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs",
     "build:static": "cp judgmentkit.css public/judgmentkit.css && cp styles.css public/styles.css && cp robots.txt public/robots.txt",
     "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.client.json --noEmit && tsc -p tsconfig.cli.json --noEmit && tsc -p tsconfig.test.json --noEmit",
-    "check": "npm run typecheck && npm run build && tsx scripts/check-ui-contract.ts",
+    "check:release-policy": "tsx scripts/check-release-policy.ts",
+    "release:preflight": "tsx scripts/check-live-release-policy.ts",
+    "release:gate": "tsx scripts/check-workspace-cutover.ts",
+    "check": "npm run typecheck && npm run build && tsx scripts/check-ui-contract.ts && npm run check:release-policy",
     "test": "npm run build && node --import tsx --test tests/*.test.ts",
     "test:browser": "npm run build && playwright test --config playwright.config.ts"
   },
