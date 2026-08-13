@@ -25,6 +25,7 @@ interface Session {
 interface SessionEnvelope {
   authenticated: boolean;
   context: AccessContext;
+  rootUrl: string;
   loginUrl: string;
   logoutUrl: string;
   session: Session | null;
@@ -218,6 +219,7 @@ const cardOnlyQuery = window.matchMedia("(max-width: 56rem)");
 
 let session: Session | null = null;
 let accessContext: AccessContext = "local";
+let rootUrl = window.location.origin;
 let loginUrl = "/auth/login";
 let logoutUrl = "";
 let workspaceChoices: WorkspaceAccess[] = [];
@@ -418,14 +420,15 @@ function normalizeProject(value: unknown): Project {
 function normalizeSession(value: unknown): SessionEnvelope {
   const result = objectValue(value);
   const context = result.context === "root" || result.context === "workspace" ? result.context : "local";
-  const nextLoginUrl = safeAccessUrl(result.loginUrl, true) || "/auth/login";
-  const nextLogoutUrl = safeAccessUrl(result.logoutUrl, true, undefined, "/auth/logout") || "";
+  const nextRootUrl = safeOrigin(result.rootUrl) || (context === "local" ? window.location.origin : "");
+  const nextLoginUrl = safeRootAccessUrl(result.loginUrl, nextRootUrl, "/auth/login") || (context === "local" ? "/auth/login" : "");
+  const nextLogoutUrl = safeRootAccessUrl(result.logoutUrl, nextRootUrl, "/auth/logout") || "";
   if (result.authenticated === false) {
-    return { authenticated: false, context, loginUrl: nextLoginUrl, logoutUrl: nextLogoutUrl, session: null };
+    return { authenticated: false, context, rootUrl: nextRootUrl, loginUrl: nextLoginUrl, logoutUrl: nextLogoutUrl, session: null };
   }
   const source = objectValue(result.session ?? result.user ?? result.actor ?? result);
   if (result.authenticated !== true && !source.label && !source.name && !source.email) {
-    return { authenticated: false, context, loginUrl: nextLoginUrl, logoutUrl: nextLogoutUrl, session: null };
+    return { authenticated: false, context, rootUrl: nextRootUrl, loginUrl: nextLoginUrl, logoutUrl: nextLogoutUrl, session: null };
   }
   const workspaceSource = objectValue(result.workspace ?? source.workspace);
   const workspace = workspaceSource.id && workspaceSource.slug
@@ -434,6 +437,7 @@ function normalizeSession(value: unknown): SessionEnvelope {
   return {
     authenticated: true,
     context,
+    rootUrl: nextRootUrl,
     loginUrl: nextLoginUrl,
     logoutUrl: nextLogoutUrl,
     session: {
@@ -446,34 +450,45 @@ function normalizeSession(value: unknown): SessionEnvelope {
   };
 }
 
-function safeAccessUrl(value: unknown, rootOnly: boolean, expectedSlug?: string, rootPath = "/auth/login"): string | null {
-  if (typeof value !== "string" || !value.trim() || value.includes("\\")) return null;
+function safeOrigin(value: unknown): string | null {
+  if (typeof value !== "string" || !value.trim() || value !== value.trim() || value.includes("\\")) return null;
   try {
-    const parsed = new URL(value, window.location.origin);
+    const parsed = new URL(value);
     if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && isLoopbackHostname(parsed.hostname))) return null;
-    const currentRoot = rootHostname(window.location.hostname);
-    const destinationRoot = rootHostname(parsed.hostname);
-    if (destinationRoot !== currentRoot) return null;
-    const expectedPort = window.location.port;
-    if (parsed.port !== expectedPort || parsed.username || parsed.password || parsed.search || parsed.hash) return null;
-    if (rootOnly && (parsed.hostname !== currentRoot || parsed.pathname !== rootPath)) return null;
-    if (!rootOnly && expectedSlug && (parsed.hostname !== `${expectedSlug}.${currentRoot}` || parsed.pathname !== "/api/workspace-handoff")) return null;
+    if (parsed.username || parsed.password || parsed.pathname !== "/" || parsed.search || parsed.hash) return null;
+    return parsed.origin;
+  } catch {
+    return null;
+  }
+}
+
+function safeRootAccessUrl(value: unknown, expectedRootUrl: string, expectedPath: "/auth/login" | "/auth/logout"): string | null {
+  if (!expectedRootUrl || typeof value !== "string" || !value.trim() || value !== value.trim() || value.includes("\\")) return null;
+  try {
+    const parsed = new URL(value);
+    if (parsed.origin !== expectedRootUrl || parsed.pathname !== expectedPath) return null;
+    if (parsed.username || parsed.password || parsed.search || parsed.hash) return null;
     return parsed.toString();
   } catch {
     return null;
   }
 }
 
-function rootHostname(hostname: string): string {
-  const normalized = hostname.toLowerCase();
-  if (normalized === "localhost" || normalized.endsWith(".localhost")) return "localhost";
-  if (isLoopbackHostname(normalized)) return normalized;
-  const labels = normalized.split(".");
-  return labels.length > 2 ? labels.slice(-2).join(".") : normalized;
+function safeWorkspaceHandoffUrl(value: unknown, workspaceUrl: string): string | null {
+  const expectedOrigin = safeOrigin(workspaceUrl);
+  if (!expectedOrigin || typeof value !== "string" || !value.trim() || value !== value.trim() || value.includes("\\")) return null;
+  try {
+    const parsed = new URL(value);
+    if (parsed.origin !== expectedOrigin || parsed.pathname !== "/api/workspace-handoff") return null;
+    if (parsed.username || parsed.password || parsed.search || parsed.hash) return null;
+    return parsed.toString();
+  } catch {
+    return null;
+  }
 }
 
 function isLoopbackHostname(hostname: string): boolean {
-  return hostname === "localhost" || hostname.endsWith(".localhost") || hostname === "::1" || hostname.startsWith("127.");
+  return hostname === "localhost" || hostname.endsWith(".localhost") || hostname === "::1" || hostname === "[::1]" || /^127(?:\.\d{1,3}){3}$/.test(hostname);
 }
 
 function normalizeWorkspaceAccess(value: unknown): WorkspaceAccess {
@@ -482,7 +497,7 @@ function normalizeWorkspaceAccess(value: unknown): WorkspaceAccess {
     id: String(workspace.id || ""),
     slug: String(workspace.slug || ""),
     name: String(workspace.name || "Workspace"),
-    url: String(workspace.url || "")
+    url: safeOrigin(workspace.url) || ""
   };
 }
 
@@ -761,7 +776,7 @@ function renderSignIn(): string {
     const retry = authNotice?.kind === "sign-out-incomplete" && logoutUrl
       ? `<button class="jk-button" data-priority="primary" type="button" data-action="retry-global-sign-out"${disabledAttribute()}>Retry global sign-out</button>`
       : "";
-    return `<main class="access-view"><section class="access-card jk-panel" aria-labelledby="access-title"><p class="product-name">kanban.cards</p><div><p class="eyebrow">Private workspaces</p><h1 id="access-title">Sign in to continue</h1><p class="access-description">Use your verified account to open only the Workspaces connected to you.</p></div>${notice}${retry}<button id="provider-sign-in" class="jk-button" data-priority="${retry ? "secondary" : "primary"}" type="button" data-action="provider-sign-in"${disabledAttribute()}>Continue to sign in</button></section></main>`;
+    return `<main class="access-view"><section class="access-card jk-panel" aria-labelledby="access-title"><p class="product-name">kanban.cards</p><div><p class="eyebrow">Private workspaces</p><h1 id="access-title">Sign in to continue</h1><p class="access-description">Use your verified account to open only the Workspaces connected to you.</p></div>${notice}${retry}<button id="provider-sign-in" class="jk-button" data-priority="${retry ? "secondary" : "primary"}" type="button" data-action="provider-sign-in"${disabledAttribute(!loginUrl)}>Continue to sign in</button></section></main>`;
   }
   return `<main class="access-view"><section class="access-card jk-panel" aria-labelledby="access-title"><p class="product-name">kanban.cards</p><div><p class="eyebrow">Local workspace</p><h1 id="access-title">Open your workspace</h1><p class="access-description">Use the local owner key to open this development workspace.</p></div>${notice}<form data-form="sign-in" class="access-form" novalidate>${renderField({
     id: "owner-key",
@@ -1406,6 +1421,7 @@ async function loadSession(): Promise<void> {
   try {
     const result = normalizeSession(await api("/session"));
     accessContext = result.context;
+    rootUrl = result.rootUrl;
     loginUrl = result.loginUrl;
     logoutUrl = result.logoutUrl;
     session = result.session;
@@ -1417,18 +1433,24 @@ async function loadSession(): Promise<void> {
 
 async function loadWorkspaceChoices(): Promise<void> {
   const payload = objectValue(await api("/workspaces"));
-  workspaceChoices = arrayValue(payload.workspaces).map(normalizeWorkspaceAccess).filter((workspace) => workspace.id && workspace.slug);
+  workspaceChoices = arrayValue(payload.workspaces).map(normalizeWorkspaceAccess).filter((workspace) => workspace.id && workspace.slug && workspace.url);
 }
 
-async function openWorkspace(slug: string): Promise<void> {
+async function openWorkspace(slug: string, selectedWorkspace?: WorkspaceAccess): Promise<void> {
   if (!slug) return;
+  const workspace = selectedWorkspace || workspaceChoices.find((candidate) => candidate.slug === slug);
+  if (!workspace || workspace.slug !== slug || !workspace.url) {
+    accessFailure = { title: "Workspace did not open", message: "The Workspace route was incomplete." };
+    render();
+    return;
+  }
   setWorkspaceMutationsDisabled(true, "workspace");
   render();
   try {
     const payload = objectValue(await api("/workspace-handoffs", { method: "POST", body: { slug } }));
     const destination = String(payload.destination || "");
     const token = String(payload.handoffToken || "");
-    const safeDestination = safeAccessUrl(destination, false, slug);
+    const safeDestination = safeWorkspaceHandoffUrl(destination, workspace.url);
     if (!safeDestination || !token) throw new Error("The Workspace handoff was incomplete.");
     const parsed = new URL(safeDestination);
     submitWorkspaceHandoff(parsed, token);
@@ -1473,7 +1495,7 @@ async function createWorkspace(form: HTMLFormElement): Promise<void> {
     accessFailure = null;
     const payload = objectValue(await api("/workspaces", { method: "POST", body: { name, slug } }));
     const workspace = normalizeWorkspaceAccess(payload.workspace);
-    await openWorkspace(workspace.slug);
+    await openWorkspace(workspace.slug, workspace);
   } catch (error) {
     accessFailure = { title: "Workspace was not created", message: error instanceof Error ? error.message : "Try again." };
     throw error;
@@ -1604,7 +1626,7 @@ async function signOut(): Promise<void> {
   };
   try {
     const response = objectValue(await api("/session", { method: "DELETE" }));
-    const next = safeAccessUrl(response.logoutUrl, true, undefined, "/auth/logout") || "";
+    const next = safeRootAccessUrl(response.logoutUrl, rootUrl, "/auth/logout") || "";
     if (next) {
       window.location.assign(next);
       return;
@@ -2721,7 +2743,7 @@ function handlePrivateError(error: unknown): boolean {
 
 async function handleAction(button: HTMLElement): Promise<void> {
   const action = button.dataset.action || "";
-  if (action === "provider-sign-in") {
+  if (action === "provider-sign-in" && loginUrl) {
     window.location.assign(loginUrl);
     return;
   }

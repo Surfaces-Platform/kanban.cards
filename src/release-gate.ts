@@ -197,6 +197,40 @@ export function trustedReleaseTarget(): TrustedReleaseTarget {
   };
 }
 
+export function isVercelSsoProtectionRedirect(
+  status: number,
+  location: unknown,
+  requestedUrl: unknown,
+  setCookie: unknown
+): boolean {
+  if (![302, 307].includes(status) || typeof location !== "string" || typeof requestedUrl !== "string" || typeof setCookie !== "string") return false;
+  try {
+    const requested = new URL(requestedUrl);
+    const destination = new URL(location);
+    const returnUrl = destination.searchParams.get("url");
+    const nonce = destination.searchParams.get("nonce");
+    const queryKeys = [...destination.searchParams.keys()].sort();
+    return requested.protocol === "https:"
+      && !requested.username
+      && !requested.password
+      && destination.origin === "https://vercel.com"
+      && destination.pathname === "/sso-api"
+      && !destination.hash
+      && queryKeys.length === 2
+      && queryKeys[0] === "nonce"
+      && queryKeys[1] === "url"
+      && returnUrl === requested.href
+      && typeof nonce === "string"
+      && /^[0-9a-f]{64}$/i.test(nonce)
+      && /(?:^|,\s*)_vercel_sso_nonce=[A-Za-z0-9_-]{32,128}(?:;|,|$)/i.test(setCookie)
+      && /;\s*Path=\//i.test(setCookie)
+      && /;\s*Secure(?:;|,|$)/i.test(setCookie)
+      && /;\s*HttpOnly(?:;|,|$)/i.test(setCookie);
+  } catch {
+    return false;
+  }
+}
+
 function phaseEvidence(root: UnknownRecord, phase: CutoverPhase): UnknownRecord {
   const evidence = record(root.evidence);
   return record(evidence[phase === "pre-promotion" ? "prePromotion" : "postPromotion"]);
@@ -208,21 +242,50 @@ function requireReceiptBinding(blockers: CutoverBlocker[], proof: UnknownRecord,
   requireMatch(blockers, "evidence-binding", "proof-deployment-url", canonicalDeploymentUrl(proof.deploymentUrl), url, "proof deployment URL");
   requireMatch(blockers, "evidence-binding", "proof-commit-sha", text(proof.commitSha), sha, "proof commit SHA");
   const origin = canonicalOrigin(proof.origin);
+  const tenantOrigin = canonicalOrigin(proof.tenantOrigin);
   if (phase === "post-promotion") {
     requireMatch(blockers, "evidence-binding", "proof-origin", origin, expectedOrigin, "proof origin");
+    if (!isDirectTenantOrigin(tenantOrigin, publicDomain)) {
+      add(blockers, "evidence-binding", "proof-post-tenant-origin", "Post-promotion proof requires an exact one-label tenant origin beneath the canonical public root.");
+    }
   } else if (!origin || origin === url || origin === canonicalOrigin(publicDomain)) {
     add(blockers, "evidence-binding", "proof-origin", "Pre-promotion provider proof requires a distinct approved candidate root origin; the generated deployment URL and public domain do not qualify.");
+  } else if (!isVercelAppOrigin(origin)) {
+    add(blockers, "evidence-binding", "proof-origin-platform", "Pre-promotion proof requires an exact vercel.app candidate root so the live Project protection policy applies to the inspected route.");
+  }
+  if (phase === "pre-promotion") {
+    if (!tenantOrigin) {
+      add(blockers, "evidence-binding", "proof-tenant-origin", "Pre-promotion proof requires an exact HTTPS tenant origin without a path, query, or fragment.");
+    } else if (tenantOrigin === origin || tenantOrigin === url || tenantOrigin === canonicalOrigin(publicDomain)) {
+      add(blockers, "evidence-binding", "proof-tenant-origin-reused", "Pre-promotion tenant proof requires a distinct tenant origin; the candidate root, immutable deployment URL, and public domain do not qualify.");
+    } else if (!isVercelAppOrigin(tenantOrigin)) {
+      add(blockers, "evidence-binding", "proof-tenant-origin-platform", "Pre-promotion proof requires an exact vercel.app candidate tenant so the live Project protection policy applies to the inspected route.");
+    }
   }
   requireMatch(blockers, "evidence-binding", "proof-route-deployment-id", text(proof.routeDeploymentId), id, "proof route deployment id");
   if (proof.routePinned !== "passed") add(blockers, "evidence-binding", "proof-route-not-pinned", "The exercised origin must be live-inspected as pinned to the exact deployment.");
+  if (phase === "pre-promotion" && proof.routeProtected !== "passed") add(blockers, "evidence-binding", "proof-route-unprotected", "The candidate root origin must return an unauthenticated Vercel SSO redirect before promotion.");
   if (proof.callbackRegistered !== "passed") add(blockers, "evidence-binding", "proof-callback-unregistered", "The exercised origin must have an approved registered provider callback.");
   requireMatch(blockers, "evidence-binding", "proof-tenant-route-deployment-id", text(proof.tenantRouteDeploymentId), id, "proof tenant route deployment id");
   if (proof.tenantRoutePinned !== "passed") add(blockers, "evidence-binding", "proof-tenant-route-not-pinned", "The exercised tenant origin must be live-inspected as pinned to the exact deployment.");
+  if (phase === "pre-promotion" && proof.tenantRouteProtected !== "passed") add(blockers, "evidence-binding", "proof-tenant-route-unprotected", "The candidate tenant origin must return an unauthenticated Vercel SSO redirect before promotion.");
   if (proof.sameArtifactCanonicalHost !== "passed") add(blockers, "evidence-binding", "canonical-host-not-proven", "The same immutable artifact must be proven compatible with the canonical production root and tenant hosts before promotion.");
   const runId = text(proof.runId);
   if (!runId) add(blockers, "evidence-binding", "proof-run-id", "Proof requires a unique run id.");
   const observedAt = Date.parse(text(proof.observedAt));
   if (!Number.isFinite(observedAt) || observedAt > now.getTime() + 60_000 || now.getTime() - observedAt > MAX_RECEIPT_AGE_MS) add(blockers, "evidence-binding", "proof-stale", "Proof must have a valid observedAt no more than 30 minutes old.");
+}
+
+function isVercelAppOrigin(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "https:"
+      && parsed.hostname.endsWith(".vercel.app")
+      && parsed.hostname !== "vercel.app"
+      && parsed.origin === parsed.href.replace(/\/$/, "");
+  } catch {
+    return false;
+  }
 }
 
 function requireDistinctPostEvidence(blockers: CutoverBlocker[], pre: UnknownRecord, post: UnknownRecord): void {
@@ -252,6 +315,17 @@ function record(value: unknown): UnknownRecord { return value && typeof value ==
 function text(value: unknown): string { return typeof value === "string" ? value.trim() : ""; }
 function strings(value: unknown): string[] { return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string").map((entry) => entry.trim()) : []; }
 function canonicalOrigin(value: unknown): string { const raw = text(value); if (!raw) return ""; try { const parsed = new URL(raw.includes("://") ? raw : `https://${raw}`); return parsed.protocol === "https:" && !parsed.username && !parsed.password && parsed.pathname === "/" && !parsed.search && !parsed.hash ? parsed.origin : ""; } catch { return ""; } }
+function isDirectTenantOrigin(origin: string, publicDomain: string): boolean {
+  const publicOrigin = canonicalOrigin(publicDomain);
+  if (!origin || !publicOrigin || origin === publicOrigin) return false;
+  const tenantUrl = new URL(origin);
+  const publicUrl = new URL(publicOrigin);
+  if (tenantUrl.port) return false;
+  const suffix = `.${publicUrl.hostname}`;
+  if (!tenantUrl.hostname.endsWith(suffix)) return false;
+  const tenantLabel = tenantUrl.hostname.slice(0, -suffix.length);
+  return /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(tenantLabel);
+}
 function canonicalDeploymentUrl(value: unknown): string { return canonicalOrigin(value); }
 function isGeneratedDeploymentUrl(value: string, publicDomain: string): boolean { if (!value) return false; const host = new URL(value).hostname; return host.endsWith(".vercel.app") && host !== publicDomain && !host.includes("-git-"); }
 function add(blockers: CutoverBlocker[], gate: CutoverBlocker["gate"], code: string, message: string): void { blockers.push({ gate, code, message }); }

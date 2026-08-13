@@ -25,6 +25,8 @@ The legacy owner profile is copied only from the verified provider result at adm
 
 Root and tenant sessions are signed, expiring, host-only cookies. Their shared session-family identifier has a durable revocation record so sign-out invalidates root and sibling-Workspace cookies from the same provider sign-in. Any later persisted owner-authority skill credential must likewise store only a hash plus its explicit owner, Workspace, expiry, and revocation state. The bounded legacy bearer remains a deployment secret during cutover; it is not converted into an identity by adding it to the registry.
 
+The same immutable release may expose two finite host families during pre-promotion proof: the canonical root and derived tenant hosts, plus one explicitly configured candidate root and exactly one candidate tenant host mapped to the legacy Workspace slug. The candidate family never derives arbitrary sibling hosts or accepts additional Workspace routes beyond the single route covered by cutover evidence. Each OIDC state, root session, tenant session, logout retry, and one-time handoff is bound to its exact family origin or destination, so no credential can cross from candidate to canonical hosts. Candidate routes are removed after the post-promotion proof.
+
 The legacy mapping has one exact state-row binding:
 
 ```text
@@ -100,6 +102,7 @@ Do not copy new-tenant data into `default`, merge tenant rows, or add a catch-al
 - [ ] While enabled, the legacy bearer reaches only the legacy Workspace.
 - [ ] Retirement proof shows provider access still works, `/api/access/health` reports `legacyBridge: disabled` and `ok: true`, and the retired bearer returns `401`.
 - [ ] Candidate browser proof covers root routing and the canonical tenant hostname through an approved protected candidate route pinned to the exact deployment. The generated immutable hostname alone does not satisfy provider callback or tenant-host proof.
+- [ ] Candidate and canonical host-family proof selects the correct registered redirect, rejects unknown hosts, and rejects cross-family OAuth state, root-session, tenant-session, and handoff replay.
 - [ ] `npm run release:gate` passes the complete pre-promotion snapshot and the literal explicit-promotion confirmation.
 - [ ] The exact candidate artifact is promoted; production checks repeat the identity and isolation proofs.
 

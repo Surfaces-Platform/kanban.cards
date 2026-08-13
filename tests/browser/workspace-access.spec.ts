@@ -31,7 +31,8 @@ const ROOT_SESSION: RootSession = {
   providerSubject: "oidc|workspace-browser-owner",
   email: "browser-owner@example.com",
   displayName: "Browser Owner",
-  sessionId: "root-session-browser-workspace-access"
+  sessionId: "root-session-browser-workspace-access",
+  rootOrigin: "http://localhost"
 };
 
 interface WorkspaceAccessHarness {
@@ -39,12 +40,91 @@ interface WorkspaceAccessHarness {
   rootHost: string;
   rootOrigin: string;
   rootSessionCookie: string;
+  candidateTenantOrigin?: string;
   setRevocationFailure(value: boolean): void;
   stop(): Promise<void>;
 }
 
 test.beforeAll(async () => {
   await assertChromiumInstalled();
+});
+
+test("the single exact candidate route automatically opens its Workspace on the server-supplied tenant alias", async ({ page, context }) => {
+  const harness = await startWorkspaceAccessHarness({ candidateAliases: true });
+  const errors = monitorBrowserErrors(page);
+
+  try {
+    await Promise.all([
+      harness.accessStore.createWorkspace({ ...ROOT_SESSION, slug: "studio", name: "Studio" }),
+      harness.accessStore.createWorkspace({ ...ROOT_SESSION, slug: "research", name: "Research" })
+    ]);
+    await seedRootSession(context, harness);
+    const handoffRequest = page.waitForRequest((request) =>
+      request.method() === "POST" && new URL(request.url()).pathname === "/api/workspace-handoff"
+    );
+    await page.goto(`${harness.rootOrigin}/`);
+
+    expect(harness.candidateTenantOrigin).toBeTruthy();
+    expect((await handoffRequest).url()).toBe(`${harness.candidateTenantOrigin}/api/workspace-handoff`);
+    await expect(page).toHaveURL(`${harness.candidateTenantOrigin}/`);
+    await expect(page.getByRole("heading", { name: "Create the first Project" })).toBeVisible();
+    expectNoUnexpectedBrowserErrors(errors);
+  } finally {
+    await harness.stop();
+  }
+});
+
+test("candidate sign-in uses only the exact server-supplied root alias", async ({ page }) => {
+  const harness = await startWorkspaceAccessHarness({ candidateAliases: true });
+
+  try {
+    const expectedLoginUrl = `${harness.rootOrigin}/auth/login`;
+    await page.route(expectedLoginUrl, (route) => route.abort());
+    await page.goto(`${harness.rootOrigin}/`);
+    await expect(page.getByRole("heading", { name: "Sign in to continue" })).toBeVisible();
+    const loginRequest = page.waitForRequest((request) => request.url() === expectedLoginUrl);
+
+    await page.getByRole("button", { name: "Continue to sign in" }).click();
+
+    expect((await loginRequest).url()).toBe(expectedLoginUrl);
+  } finally {
+    await harness.stop();
+  }
+});
+
+test("unsafe Workspace origins are not rendered as navigation choices", async ({ page, context }) => {
+  const harness = await startWorkspaceAccessHarness();
+  const errors = monitorBrowserErrors(page);
+
+  try {
+    await Promise.all([
+      harness.accessStore.createWorkspace({ ...ROOT_SESSION, slug: "studio", name: "Studio" }),
+      harness.accessStore.createWorkspace({ ...ROOT_SESSION, slug: "research", name: "Research" })
+    ]);
+    await seedRootSession(context, harness);
+    await page.route("**/api/workspaces", async (route) => {
+      const response = await route.fetch();
+      const payload = await response.json() as { workspaces: Array<Record<string, unknown>> };
+      payload.workspaces.push(
+        { id: "unsafe-scheme", slug: "unsafe-scheme", name: "Unsafe scheme", url: "javascript:alert(1)" },
+        { id: "unsafe-http", slug: "unsafe-http", name: "Unsafe HTTP", url: "http://example.com" },
+        { id: "unsafe-credentials", slug: "unsafe-credentials", name: "Unsafe credentials", url: `http://owner:secret@unsafe.localhost:${new URL(harness.rootOrigin).port}` },
+        { id: "unsafe-path", slug: "unsafe-path", name: "Unsafe path", url: `http://unsafe.localhost:${new URL(harness.rootOrigin).port}/private` },
+        { id: "unsafe-query", slug: "unsafe-query", name: "Unsafe query", url: `http://unsafe.localhost:${new URL(harness.rootOrigin).port}/?next=evil` },
+        { id: "unsafe-hash", slug: "unsafe-hash", name: "Unsafe hash", url: `http://unsafe.localhost:${new URL(harness.rootOrigin).port}/#evil` }
+      );
+      await route.fulfill({ response, json: payload });
+    });
+
+    await page.goto(`${harness.rootOrigin}/`);
+
+    await expect(page.getByRole("heading", { name: "Choose a Workspace" })).toBeVisible();
+    await expect(page.locator(".workspace-choice")).toHaveCount(2);
+    await expect(page.getByText(/^Unsafe /)).toHaveCount(0);
+    expectNoUnexpectedBrowserErrors(errors);
+  } finally {
+    await harness.stop();
+  }
 });
 
 test("zero Workspaces create through a cross-host form handoff into an empty tenant", async ({ page, context }) => {
@@ -235,15 +315,20 @@ test("root logout outage preserves a non-authorizing retry path and completes af
   }
 });
 
-async function startWorkspaceAccessHarness(): Promise<WorkspaceAccessHarness> {
+async function startWorkspaceAccessHarness(options: { candidateAliases?: boolean } = {}): Promise<WorkspaceAccessHarness> {
   const temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-workspace-access-browser-"));
   const port = await availablePort();
-  const rootHost = `localhost:${port}`;
+  const primaryPort = options.candidateAliases ? await availablePort() : port;
+  const primaryRootHost = `localhost:${primaryPort}`;
+  const candidateRootHost = `localhost:${port}`;
+  const candidateTenantHost = `candidate-studio.localhost:${port}`;
+  const rootHost = options.candidateAliases ? candidateRootHost : primaryRootHost;
   const rootOrigin = `http://${rootHost}`;
+  const rootSession = { ...ROOT_SESSION, rootOrigin };
   const platformAuthConfig: PlatformAuthConfig = {
     issuer: "https://identity.example.com",
     clientId: "workspace-access-browser",
-    redirectUri: `${rootOrigin}/auth/callback`,
+    redirectUri: `http://${primaryRootHost}/auth/callback`,
     postLogoutRedirectUri: "/",
     sessionSecret: SESSION_SECRET,
     surfaceId: "kanban.cards",
@@ -267,8 +352,16 @@ async function startWorkspaceAccessHarness(): Promise<WorkspaceAccessHarness> {
   const repositoryRoot = path.resolve(__dirname, "../..");
   const server = createServer(createApp({
     accessStore: applicationAccessStore,
+    candidateHostFamily: options.candidateAliases ? {
+      rootHost: candidateRootHost,
+      redirectUri: `${rootOrigin}/auth/callback`,
+      tenantHosts: { studio: candidateTenantHost }
+    } : undefined,
     dataPath: path.join(temporaryDirectory, "legacy-workspace.json"),
     host: "localhost",
+    legacyOwnerSubject: options.candidateAliases ? ROOT_SESSION.providerSubject : undefined,
+    legacyWorkspaceSlug: options.candidateAliases ? "studio" : undefined,
+    legacyWorkspaceName: options.candidateAliases ? "Studio" : undefined,
     platformAuthConfig,
     requireDatabase: false,
     staticDir: repositoryRoot,
@@ -278,7 +371,7 @@ async function startWorkspaceAccessHarness(): Promise<WorkspaceAccessHarness> {
   try {
     await listen(server, port);
     const rootSessionCookie = await createRootSessionCookie(
-      ROOT_SESSION,
+      rootSession,
       SESSION_SECRET,
       false,
       platformAuthConfig.rootSessionTtlSeconds
@@ -288,6 +381,7 @@ async function startWorkspaceAccessHarness(): Promise<WorkspaceAccessHarness> {
       rootHost,
       rootOrigin,
       rootSessionCookie,
+      ...(options.candidateAliases ? { candidateTenantOrigin: `http://${candidateTenantHost}` } : {}),
       setRevocationFailure(value: boolean) {
         revocationFailure = value;
       },

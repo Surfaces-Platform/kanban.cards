@@ -37,6 +37,7 @@ Optional:
 - `KANBAN_CARDS_OWNER_LABEL`
 - `KANBAN_CARDS_SESSION_TTL_SECONDS`
 - `OIDC_CLIENT_SECRET`, `OIDC_POST_LOGOUT_REDIRECT_URI`, `OIDC_SCOPE`, `ROOT_SESSION_TTL_SECONDS`, and `TENANT_SESSION_TTL_SECONDS`
+- the bounded pre-promotion family: `KANBAN_CARDS_CANDIDATE_ROOT_HOST`, `KANBAN_CARDS_CANDIDATE_TENANT_HOSTS`, and `OIDC_CANDIDATE_REDIRECT_URI`; set all three together. `OIDC_CANDIDATE_POST_LOGOUT_REDIRECT_URI` is optional. `KANBAN_CARDS_CANDIDATE_TENANT_HOSTS` is a JSON object containing exactly the configured legacy Workspace slug and its one exact candidate tenant host. Extra mappings are rejected because the cutover proves exactly one tenant route.
 
 Local operator controls:
 
@@ -163,13 +164,15 @@ vercel curl /api/health --deployment "$KANBAN_CARDS_DEPLOYMENT_URL"
 vercel curl /api/access/health --deployment "$KANBAN_CARDS_DEPLOYMENT_URL"
 ```
 
-Provider sign-in on a protected hostname pinned to the exact candidate is the action that creates and proves the binding. The generated immutable `*.vercel.app` hostname is useful for readiness calls but is not a valid provider or bearer proof: provider routes and the bounded bearer accept only the configured root or canonical tenant hosts. `/auth/login` on the generated hostname correctly returns `Workspace unavailable`.
+Provider sign-in on a protected hostname pinned to the exact candidate is the action that creates and proves the binding. The generated immutable `*.vercel.app` hostname is useful for readiness calls but is not a valid provider or bearer proof: provider routes and the bounded bearer accept only an explicit root or tenant host. `/auth/login` on the generated hostname correctly returns `Workspace unavailable`.
 
-Before continuing, establish an approved candidate root and tenant routing mechanism with all of these properties: it is distinct from `kanban.cards`, `vercel inspect` resolves it to the recorded candidate deployment ID, it remains behind the intended protection boundary, its callback is registered with the provider, and the same immutable artifact remains valid when later served on the canonical production hosts. The current application and Vercel configuration do not supply that route automatically. Do not temporarily point `kanban.cards` at the candidate to manufacture proof. Until such a route exists, this cutover is deliberately blocked.
+Before continuing, establish an approved candidate root and tenant routing mechanism with all of these properties: both are exact `*.vercel.app` aliases distinct from `kanban.cards`; `vercel inspect` resolves both exact routes to the recorded candidate deployment ID; the live Project protection policy covers generated deployment URLs; an unauthenticated nonce-path probe on each route returns Vercel's SSO redirect bound back to that exact probe URL; the root callback is registered with the provider; and the same immutable artifact remains valid when later served on the canonical production hosts. Configure the finite candidate host family in the candidate environment; do not infer sibling `*.vercel.app` hosts or use a wildcard. OAuth state, root and tenant sessions, and handoffs are origin-bound, so candidate credentials cannot replay on canonical hosts or vice versa. Do not temporarily point `kanban.cards` at the candidate to manufacture proof. Until the exact routes and callback exist, this cutover is deliberately blocked.
 
 ```bash
 KANBAN_CARDS_CANDIDATE_ROOT_URL='https://paste-approved-candidate-root'
+KANBAN_CARDS_CANDIDATE_TENANT_URL='https://paste-approved-candidate-tenant'
 vercel inspect "$KANBAN_CARDS_CANDIDATE_ROOT_URL" --format=json
+vercel inspect "$KANBAN_CARDS_CANDIDATE_TENANT_URL" --format=json
 ```
 
 Capture the canonical digest and resource fingerprint of `kanban_v2_workspaces:default` immediately before the first provider callback. Complete provider sign-in and callback on that exact route, verify the owner binding, root Workspace list, canonical handoff, and tenant Project read. Immediately re-read the state before any tenant or compatibility write; the digest and fingerprint must equal the pre-callback values. This pair proves that access binding did not change default Workspace data. Only after capturing equality, perform and record a bounded tenant-session write.
@@ -273,7 +276,7 @@ unset KANBAN_CARDS_API_TOKEN
 
 The first Card request must return `201` with version `1`. The second uses a different idempotency key and the same external key; it must return `200`, `deduplicated: true`, and the same Card ID. Comment must return version `2`, Move version `3`, and archive version `4`. Re-read the Project with archived Cards included and confirm the same Card, Comment, move Activity, and archive Activity. This is the bounded compatibility-bridge proof that the candidate can read and complete create, comment, move, and archive against the mapped Postgres row before promotion.
 
-Open the approved exact-deployment candidate hostname in a browser authenticated with Vercel when Deployment Protection requires it. Complete provider sign-in and callback, verify the root route lists only the owner's Workspaces, open the canonical candidate tenant through the one-time handoff, and confirm the archived verification Card remains present in the Project and Activity evidence. Repeat at a narrow viewport. If the browser cannot cross the Vercel protection boundary or the hostname/callback is not pinned to the exact deployment ID, stop. API checks do not replace rendered candidate verification.
+Open both approved exact-deployment candidate hostnames in the same browser and complete Vercel Authentication on each before beginning provider sign-in. Protection cookies are host-specific; warming the tenant route first prevents its protection redirect from consuming the later cross-host form POST and losing the one-time handoff body. Return to the candidate root, complete provider sign-in and callback, verify the root route lists only the owner's routed Workspaces, open the exact candidate tenant through the one-time handoff, and confirm the archived verification Card remains present in the Project and Activity evidence. Repeat at a narrow viewport. If either hostname cannot cross the Vercel protection boundary or is not pinned to the exact deployment ID, stop. API checks do not replace rendered candidate verification.
 
 After the candidate smoke mutations, capture a new canonical digest and resource fingerprint in `prePromotion.dataIntegrityProof.finalCandidateDigest` and `finalCandidateResourceFingerprint`. This is the pre-promotion baseline for the post-promotion receipt; do not compare it with the pre-binding digest because the bounded verification Card intentionally changed the Workspace.
 
@@ -418,6 +421,15 @@ npm run release:gate -- --snapshot "$KANBAN_CARDS_EVIDENCE_PATH" --phase post-pr
 ```
 
 Do not describe the release as complete until this post-promotion gate passes. If it fails, report the exact blocker and keep the recorded rollback target available. Do not roll back automatically; rollback remains a separately authorized production mutation.
+
+After the post-promotion gate passes, remove the two candidate aliases from the deployment and verify that neither route resolves. This closes the temporary host family without rebuilding or changing the promoted artifact. Do not remove `kanban.cards` or the canonical tenant domain:
+
+```bash
+vercel alias rm "$(node -p 'new URL(process.env.KANBAN_CARDS_CANDIDATE_ROOT_URL).hostname')"
+vercel alias rm "$(node -p 'new URL(process.env.KANBAN_CARDS_CANDIDATE_TENANT_URL).hostname')"
+```
+
+Re-list aliases and record their absence in the cutover evidence. The candidate host-family environment values remain inert in the immutable artifact once no route points to them; remove those values from the Project environment before the next deployment.
 
 ## Retire the compatibility API key
 

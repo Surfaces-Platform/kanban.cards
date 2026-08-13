@@ -71,6 +71,7 @@ export interface CreateAppOptions extends StateStoreOptions {
   workspaceStoreResolver?: WorkspaceStoreResolver;
   platformAuthConfig?: PlatformAuthConfig | null;
   rootHost?: string;
+  candidateHostFamily?: CandidateHostFamilyOptions | null;
   legacyApiWorkspaceId?: string;
   legacyWorkspaceSlug?: string;
   legacyWorkspaceName?: string;
@@ -79,6 +80,13 @@ export interface CreateAppOptions extends StateStoreOptions {
   fetch?: typeof fetch;
   host?: string;
   port?: string | number;
+}
+
+export interface CandidateHostFamilyOptions {
+  rootHost: string;
+  redirectUri: string;
+  postLogoutRedirectUri?: string;
+  tenantHosts: Record<string, string>;
 }
 
 interface HttpError extends Error {
@@ -96,6 +104,21 @@ interface ResolvedAccessContext {
   auth: OwnerAuth | null;
   identity: RootSession | null;
   workspace: AccessWorkspace | null;
+  hostFamily: HostFamily | null;
+}
+
+interface HostFamily {
+  rootHost: string;
+  rootOrigin: string;
+  deriveTenantHosts: boolean;
+  tenantHosts: ReadonlyMap<string, string>;
+  authConfig: PlatformAuthConfig | null;
+}
+
+interface ResolvedHostContext {
+  kind: "root" | "workspace";
+  family: HostFamily;
+  workspace: AccessWorkspace | null;
 }
 
 interface AccessContextConfig {
@@ -105,7 +128,8 @@ interface AccessContextConfig {
   legacyStore: StateStore;
   ownerLabel: string;
   platformAuthConfig: PlatformAuthConfig | null;
-  rootHost: string;
+  hostFamilies: readonly HostFamily[];
+  primaryHostFamily: HostFamily;
   trustForwardedHost: boolean;
   workspaceStoreResolver: WorkspaceStoreResolver;
 }
@@ -161,14 +185,12 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     process.env.KANBAN_CARDS_ROOT_HOST ||
     (platformAuthConfig ? new URL(platformAuthConfig.redirectUri).host : production ? PRODUCT_NAME : configuredHost)
   );
-  const rootOrigin = `${publicProtocol(rootHost)}://${rootHost}`;
+  const rootOrigin = originForHost(rootHost);
   const rootHostname = new URL(`http://${rootHost}`).hostname.replace(/^\[|\]$/g, "");
   if (platformAuthConfig && isIP(rootHostname)) {
     throw new Error("Provider mode requires a DNS root host such as localhost or kanban.cards; numeric-IP tenant hosts are unsupported.");
   }
-  if (platformAuthConfig && new URL(platformAuthConfig.redirectUri).origin.toLowerCase() !== rootOrigin) {
-    throw new Error("OIDC_REDIRECT_URI must use the configured kanban.cards root origin.");
-  }
+  if (platformAuthConfig) requireFamilyRedirect(platformAuthConfig.redirectUri, rootOrigin, "OIDC_REDIRECT_URI");
   if (
     platformAuthConfig &&
     !platformAuthConfig.postLogoutRedirectUri.startsWith("/") &&
@@ -176,6 +198,21 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
   ) {
     throw new Error("OIDC_POST_LOGOUT_REDIRECT_URI must stay on the configured kanban.cards root origin.");
   }
+  const primaryHostFamily: HostFamily = {
+    rootHost,
+    rootOrigin,
+    deriveTenantHosts: true,
+    tenantHosts: new Map(),
+    authConfig: platformAuthConfig
+  };
+  const candidateHostFamilyInput = options.candidateHostFamily === null
+    ? null
+    : options.candidateHostFamily || candidateHostFamilyFromEnv();
+  const candidateHostFamily = candidateHostFamilyInput
+    ? createCandidateHostFamily(candidateHostFamilyInput, platformAuthConfig)
+    : null;
+  const hostFamilies = candidateHostFamily ? [primaryHostFamily, candidateHostFamily] : [primaryHostFamily];
+  validateHostFamilies(hostFamilies);
   const legacyApiWorkspaceId = String(options.legacyApiWorkspaceId ?? process.env.KANBAN_CARDS_API_WORKSPACE_ID ?? DEFAULT_WORKSPACE_ID).trim();
   if (legacyApiWorkspaceId !== DEFAULT_WORKSPACE_ID) {
     throw new Error(`KANBAN_CARDS_API_WORKSPACE_ID must remain ${DEFAULT_WORKSPACE_ID} during the compatibility bridge.`);
@@ -188,6 +225,12 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       workspaceSlug(legacyWorkspaceSlug);
     } catch {
       throw new Error("KANBAN_CARDS_LEGACY_WORKSPACE_SLUG must be a valid, non-reserved Workspace hostname label.");
+    }
+  }
+  if (candidateHostFamily) {
+    const candidateSlugs = [...candidateHostFamily.tenantHosts.values()];
+    if (!legacyWorkspaceSlug || candidateSlugs.length !== 1 || candidateSlugs[0] !== legacyWorkspaceSlug) {
+      throw new Error("KANBAN_CARDS_CANDIDATE_TENANT_HOSTS must contain exactly the configured legacy Workspace slug and one exact candidate host.");
     }
   }
   const sessionTtlSeconds = positiveInteger(
@@ -367,29 +410,29 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
   }));
 
   app.get("/auth/login", asyncHandler(async (req, res) => {
-    if (!platformAuthConfig) throw httpError(503, "Provider sign-in is not configured.");
-    requireRootRequest(req, rootHost, trustForwardedHost);
-    sendAuthRoute(res, await startOwnerLogin(webRequest(req, trustForwardedHost), platformAuthConfig, authFetch));
+    const family = requireRootRequest(req, hostFamilies, trustForwardedHost);
+    if (!family.authConfig) throw httpError(503, "Provider sign-in is not configured.");
+    sendAuthRoute(res, await startOwnerLogin(webRequest(req, trustForwardedHost), family.authConfig, authFetch));
   }));
 
   app.get("/auth/callback", asyncHandler(async (req, res) => {
-    if (!platformAuthConfig) throw httpError(503, "Provider sign-in is not configured.");
-    requireRootRequest(req, rootHost, trustForwardedHost);
-    const completed = await finishOwnerLogin(webRequest(req, trustForwardedHost), platformAuthConfig, authFetch);
+    const family = requireRootRequest(req, hostFamilies, trustForwardedHost);
+    if (!family.authConfig) throw httpError(503, "Provider sign-in is not configured.");
+    const completed = await finishOwnerLogin(webRequest(req, trustForwardedHost), family.authConfig, authFetch);
     if (!completed.completion) {
       sendAuthRoute(res, completed);
       return;
     }
     const { identity, returnTo } = completed.completion;
-    const rootSession: RootSession = { ...identity, sessionId: crypto.randomUUID() };
+    const rootSession: RootSession = { ...identity, sessionId: crypto.randomUUID(), rootOrigin: family.rootOrigin };
     await ensureLegacyBinding(rootSession);
     const platformRequest = webRequest(req, trustForwardedHost);
     const productionRequest = isProductionRequest(platformRequest);
     const cookie = await createRootSessionCookie(
       rootSession,
-      platformAuthConfig.sessionSecret,
+      family.authConfig.sessionSecret,
       productionRequest,
-      platformAuthConfig.rootSessionTtlSeconds
+      family.authConfig.rootSessionTtlSeconds
     );
     const clears = headerValues(completed.headers?.["Set-Cookie"]);
     for (const value of [...clears, cookie]) res.append("Set-Cookie", value);
@@ -397,23 +440,23 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
   }));
 
   app.get("/auth/logout", asyncHandler(async (req, res) => {
-    if (!platformAuthConfig) {
+    const family = requireRootRequest(req, hostFamilies, trustForwardedHost);
+    if (!family.authConfig) {
       res.redirect(303, "/");
       return;
     }
-    requireRootRequest(req, rootHost, trustForwardedHost);
     const platformRequest = webRequest(req, trustForwardedHost);
     const productionRequest = isProductionRequest(platformRequest);
     res.append("Set-Cookie", clearRootSessionCookie(productionRequest));
-    const identity = await verifyRootSession(platformRequest, platformAuthConfig.sessionSecret, productionRequest)
-      || await verifyLogoutRetrySession(platformRequest, platformAuthConfig.sessionSecret, productionRequest);
+    const identity = await verifyRootSession(platformRequest, family.authConfig.sessionSecret, productionRequest)
+      || await verifyLogoutRetrySession(platformRequest, family.authConfig.sessionSecret, productionRequest);
     try {
       if (identity) await accessStore.revokeSession(identity.providerSubject, identity.sessionId);
     } catch {
       if (identity) {
         res.append("Set-Cookie", await createLogoutRetryCookie(
-          identity,
-          platformAuthConfig.sessionSecret,
+          logoutRetrySession(identity, family.rootOrigin, requestOrigin(platformRequest)),
+          family.authConfig.sessionSecret,
           productionRequest
         ));
       }
@@ -421,7 +464,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       return;
     }
     res.append("Set-Cookie", clearLogoutRetryCookie(productionRequest));
-    res.redirect(303, platformAuthConfig.postLogoutRedirectUri || "/");
+    res.redirect(303, family.authConfig.postLogoutRedirectUri || "/");
   }));
 
   app.get("/api/session", asyncHandler(async (req, res) => {
@@ -433,27 +476,32 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       legacyStore,
       ownerLabel,
       platformAuthConfig,
-      rootHost,
+      hostFamilies,
+      primaryHostFamily,
       trustForwardedHost,
       workspaceStoreResolver
     });
     if (!requestContext.auth) {
+      const family = requestContext.hostFamily || primaryHostFamily;
       res.json({
         authenticated: false,
         context: requestContext.kind,
-        loginUrl: rootLoginUrl(rootHost),
-        ...(platformAuthConfig ? { logoutUrl: rootLogoutUrl(rootHost) } : {})
+        rootUrl: family.rootOrigin,
+        loginUrl: rootLoginUrl(family),
+        ...(platformAuthConfig ? { logoutUrl: rootLogoutUrl(family) } : {})
       });
       return;
     }
+    const family = requestContext.hostFamily || primaryHostFamily;
     res.json({
       authenticated: true,
       context: requestContext.kind,
-      loginUrl: rootLoginUrl(rootHost),
-      logoutUrl: rootLogoutUrl(rootHost),
+      rootUrl: family.rootOrigin,
+      loginUrl: rootLoginUrl(family),
+      logoutUrl: rootLogoutUrl(family),
       label: requestContext.auth.actor.label,
       email: requestContext.identity?.email,
-      ...(requestContext.workspace ? { workspace: publicAccessWorkspace(requestContext.workspace, rootHost) } : {})
+      ...(requestContext.workspace ? { workspace: publicAccessWorkspace(requestContext.workspace, family) } : {})
     });
   }));
 
@@ -482,10 +530,12 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     if (platformAuthConfig) {
       const platformRequest = webRequest(req, trustForwardedHost);
       const productionRequest = isProductionRequest(platformRequest);
+      const family = requireKnownHost(req, hostFamilies, trustForwardedHost).family;
+      if (!family.authConfig) throw httpError(404, "Workspace unavailable.");
       const [rootSession, tenantSession, retrySession] = await Promise.all([
-        verifyRootSession(platformRequest, platformAuthConfig.sessionSecret, productionRequest),
-        verifyTenantSession(platformRequest, platformAuthConfig.sessionSecret, productionRequest),
-        verifyLogoutRetrySession(platformRequest, platformAuthConfig.sessionSecret, productionRequest)
+        verifyRootSession(platformRequest, family.authConfig.sessionSecret, productionRequest),
+        verifyTenantSession(platformRequest, family.authConfig.sessionSecret, productionRequest),
+        verifyLogoutRetrySession(platformRequest, family.authConfig.sessionSecret, productionRequest)
       ]);
       res.append("Set-Cookie", clearRootSessionCookie(productionRequest));
       res.append("Set-Cookie", clearTenantSessionCookie(productionRequest));
@@ -495,8 +545,8 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       } catch {
         if (session) {
           res.append("Set-Cookie", await createLogoutRetryCookie(
-            session,
-            platformAuthConfig.sessionSecret,
+            logoutRetrySession(session, family.rootOrigin, requestOrigin(platformRequest)),
+            family.authConfig.sessionSecret,
             productionRequest
           ));
         }
@@ -511,7 +561,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       res.json({
         signedOutHere: true,
         globalSignOutComplete: true,
-        logoutUrl: rootLogoutUrl(rootHost)
+        logoutUrl: rootLogoutUrl(family)
       });
       return;
     }
@@ -519,23 +569,24 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
   }));
 
   app.get("/api/workspaces", asyncHandler(async (req, res) => {
-    requireRootRequest(req, rootHost, trustForwardedHost);
-    if (!platformAuthConfig) throw httpError(404, "API route not found.");
-    const identity = await verifiedRootIdentity(req, platformAuthConfig, trustForwardedHost, accessStore);
+    const family = requireRootRequest(req, hostFamilies, trustForwardedHost);
+    if (!family.authConfig) throw httpError(404, "API route not found.");
+    const identity = await verifiedRootIdentity(req, family.authConfig, trustForwardedHost, accessStore);
     if (!identity) throw httpError(401, "Owner sign-in required.");
     const workspaces = await accessStore.listWorkspacesForOwner(identity.providerSubject);
-    res.json({ workspaces: workspaces.map((workspace) => publicAccessWorkspace(workspace, rootHost)) });
+    res.json({ workspaces: workspaces.filter((workspace) => supportsWorkspace(family, workspace.slug)).map((workspace) => publicAccessWorkspace(workspace, family)) });
   }));
 
   app.post("/api/workspaces", asyncHandler(async (req, res) => {
-    requireRootRequest(req, rootHost, trustForwardedHost);
+    const family = requireRootRequest(req, hostFamilies, trustForwardedHost);
     assertRequestOrigin(req, true, trustForwardedHost);
-    if (!platformAuthConfig) throw httpError(404, "API route not found.");
-    const identity = await verifiedRootIdentity(req, platformAuthConfig, trustForwardedHost, accessStore);
+    if (!family.authConfig) throw httpError(404, "API route not found.");
+    const identity = await verifiedRootIdentity(req, family.authConfig, trustForwardedHost, accessStore);
     if (!identity) throw httpError(401, "Owner sign-in required.");
     rejectWorkspaceSelectors(req, true);
     const body = asRecord(req.body);
     const slug = workspaceSlug(body.slug);
+    workspaceHost(slug, family);
     if (legacyMigrationConfigured && slug === legacyWorkspaceSlug) {
       throw httpError(409, "Workspace address is reserved for the configured legacy migration.");
     }
@@ -554,19 +605,19 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       }
       throw error;
     }
-    res.status(201).json({ workspace: publicAccessWorkspace(workspace, rootHost) });
+    res.status(201).json({ workspace: publicAccessWorkspace(workspace, family) });
   }));
 
   app.post("/api/workspace-handoffs", asyncHandler(async (req, res) => {
-    requireRootRequest(req, rootHost, trustForwardedHost);
+    const family = requireRootRequest(req, hostFamilies, trustForwardedHost);
     assertRequestOrigin(req, true, trustForwardedHost);
-    if (!platformAuthConfig) throw httpError(404, "API route not found.");
-    const identity = await verifiedRootIdentity(req, platformAuthConfig, trustForwardedHost, accessStore);
+    if (!family.authConfig) throw httpError(404, "API route not found.");
+    const identity = await verifiedRootIdentity(req, family.authConfig, trustForwardedHost, accessStore);
     if (!identity) throw httpError(401, "Owner sign-in required.");
     const slug = workspaceSlug(asRecord(req.body).slug);
     const workspace = (await accessStore.listWorkspacesForOwner(identity.providerSubject)).find((candidate) => candidate.slug === slug);
     if (!workspace) throw httpError(404, "Workspace unavailable.");
-    const destinationHost = workspaceHost(workspace.slug, rootHost);
+    const destinationHost = workspaceHost(workspace.slug, family);
     const handoff = await accessStore.createHandoff({
       providerSubject: identity.providerSubject,
       workspaceId: workspace.id,
@@ -575,17 +626,19 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       ttlSeconds: 120
     });
     res.status(201).json({
-      destination: `${publicProtocol(rootHost)}://${destinationHost}/api/workspace-handoff`,
+      destination: `${originForHost(destinationHost)}/api/workspace-handoff`,
       handoffToken: handoff.token
     });
   }));
 
   app.post("/api/workspace-handoff", asyncHandler(async (req, res) => {
-    if (!platformAuthConfig) throw httpError(404, "API route not found.");
     const host = requestHost(req, trustForwardedHost);
-    const workspace = await resolveTenantWorkspace(host, rootHost, accessStore);
+    const hostContext = await resolveKnownHost(host, hostFamilies, accessStore);
+    const family = hostContext?.family;
+    const workspace = hostContext?.kind === "workspace" ? hostContext.workspace : null;
+    if (!family?.authConfig) throw httpError(404, "API route not found.");
     if (!workspace) throw httpError(404, "Workspace unavailable.");
-    assertExactOrigin(req, `${publicProtocol(rootHost)}://${rootHost}`);
+    assertExactOrigin(req, family.rootOrigin);
     try {
       const consumed = await accessStore.consumeHandoff({ token: requiredString(asRecord(req.body).token, "Handoff token"), destinationHost: host });
       if (consumed.workspace.id !== workspace.id) throw httpError(401, "The sign-in handoff was not accepted.");
@@ -594,19 +647,21 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
         email: consumed.owner.email,
         displayName: consumed.owner.displayName,
         sessionId: consumed.sessionId,
-        workspaceId: workspace.id
+        workspaceId: workspace.id,
+        rootOrigin: family.rootOrigin,
+        tenantOrigin: originForHost(host)
       };
       res.append("Set-Cookie", await createTenantSessionCookie(
         tenantSession,
-        platformAuthConfig.sessionSecret,
+        family.authConfig.sessionSecret,
         isProductionRequest(webRequest(req, trustForwardedHost)),
-        platformAuthConfig.tenantSessionTtlSeconds
+        family.authConfig.tenantSessionTtlSeconds
       ));
       if (req.is("application/x-www-form-urlencoded")) {
         res.redirect(303, "/");
         return;
       }
-      res.json({ authenticated: true, workspace: publicAccessWorkspace(workspace, rootHost) });
+      res.json({ authenticated: true, workspace: publicAccessWorkspace(workspace, family) });
     } catch (error) {
       if (error instanceof AccessStoreError) throw httpError(401, "The sign-in handoff was not accepted.");
       throw error;
@@ -632,7 +687,8 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
         legacyStore,
         ownerLabel,
         platformAuthConfig,
-        rootHost,
+        hostFamilies,
+        primaryHostFamily,
         trustForwardedHost,
         workspaceStoreResolver
       });
@@ -897,15 +953,22 @@ function authenticateLocal(
 
 async function resolveAccessContext(req: Request, config: AccessContextConfig): Promise<ResolvedAccessContext> {
   const host = requestHost(req, config.trustForwardedHost);
-  const tenantWorkspace = await resolveTenantWorkspace(host, config.rootHost, config.accessStore);
+  const hostContext = await resolveKnownHost(host, config.hostFamilies, config.accessStore);
+  const hostFamily = hostContext?.family || null;
+  const tenantWorkspace = hostContext?.kind === "workspace" ? hostContext.workspace : null;
 
   if (!config.platformAuthConfig) {
     return {
       kind: "local",
       auth: authenticateLocal(req, { apiToken: config.apiToken, ownerLabel: config.ownerLabel, store: config.legacyStore }),
       identity: null,
-      workspace: null
+      workspace: null,
+      hostFamily: config.primaryHostFamily
     };
+  }
+
+  if (!hostContext || !hostFamily?.authConfig) {
+    throw httpError(404, "Workspace unavailable.");
   }
 
   const authorization = req.get("authorization") || "";
@@ -913,21 +976,23 @@ async function resolveAccessContext(req: Request, config: AccessContextConfig): 
     const bearer = /^Bearer\s+(\S+)$/.exec(authorization)?.[1] || "";
     if (!config.apiToken || !safeEqual(bearer, config.apiToken)) {
       return {
-        kind: host === config.rootHost ? "root" : "workspace",
+        kind: hostContext.kind,
         auth: null,
         identity: null,
-        workspace: tenantWorkspace
+        workspace: tenantWorkspace,
+        hostFamily
       };
     }
-    const bearerWorkspace = host === config.rootHost
+    const bearerWorkspace = hostContext.kind === "root"
       ? (await config.accessStore.read()).workspaces.find((workspace) => workspace.storageId === config.legacyApiWorkspaceId) || null
       : tenantWorkspace;
-    if (bearerWorkspace?.storageId !== config.legacyApiWorkspaceId) {
+    if (bearerWorkspace?.storageId !== config.legacyApiWorkspaceId || !supportsWorkspace(hostFamily, bearerWorkspace.slug)) {
       return {
-        kind: host === config.rootHost ? "root" : "workspace",
+        kind: hostContext.kind,
         auth: null,
         identity: null,
-        workspace: bearerWorkspace
+        workspace: bearerWorkspace,
+        hostFamily
       };
     }
     return {
@@ -939,12 +1004,13 @@ async function resolveAccessContext(req: Request, config: AccessContextConfig): 
         store: config.workspaceStoreResolver.resolve(bearerWorkspace.storageId)
       },
       identity: null,
-      workspace: bearerWorkspace
+      workspace: bearerWorkspace,
+      hostFamily
     };
   }
 
-  if (host === config.rootHost) {
-    const identity = await verifiedRootIdentity(req, config.platformAuthConfig, config.trustForwardedHost, config.accessStore);
+  if (hostContext.kind === "root") {
+    const identity = await verifiedRootIdentity(req, hostFamily.authConfig, config.trustForwardedHost, config.accessStore);
     return {
       kind: "root",
       auth: identity ? {
@@ -954,23 +1020,24 @@ async function resolveAccessContext(req: Request, config: AccessContextConfig): 
         store: config.legacyStore
       } : null,
       identity,
-      workspace: null
+      workspace: null,
+      hostFamily
     };
   }
 
-  if (!tenantWorkspace) return { kind: "workspace", auth: null, identity: null, workspace: null };
+  if (!tenantWorkspace) return { kind: "workspace", auth: null, identity: null, workspace: null, hostFamily };
 
   const platformRequest = webRequest(req, config.trustForwardedHost);
-  const tenantSession = await verifyTenantSession(platformRequest, config.platformAuthConfig.sessionSecret, isProductionRequest(platformRequest));
+  const tenantSession = await verifyTenantSession(platformRequest, hostFamily.authConfig.sessionSecret, isProductionRequest(platformRequest));
   if (!tenantSession || tenantSession.workspaceId !== tenantWorkspace.id) {
-    return { kind: "workspace", auth: null, identity: null, workspace: tenantWorkspace };
+    return { kind: "workspace", auth: null, identity: null, workspace: tenantWorkspace, hostFamily };
   }
   if (await config.accessStore.isSessionRevoked(tenantSession.providerSubject, tenantSession.sessionId)) {
-    return { kind: "workspace", auth: null, identity: null, workspace: tenantWorkspace };
+    return { kind: "workspace", auth: null, identity: null, workspace: tenantWorkspace, hostFamily };
   }
   const ownerAccess = await config.accessStore.resolveOwner(tenantSession.providerSubject);
   if (!ownerAccess || !ownerAccess.workspaces.some((workspace) => workspace.id === tenantWorkspace.id)) {
-    return { kind: "workspace", auth: null, identity: null, workspace: tenantWorkspace };
+    return { kind: "workspace", auth: null, identity: null, workspace: tenantWorkspace, hostFamily };
   }
   return {
     kind: "workspace",
@@ -984,9 +1051,11 @@ async function resolveAccessContext(req: Request, config: AccessContextConfig): 
       providerSubject: ownerAccess.owner.providerSubject,
       email: ownerAccess.owner.email,
       displayName: ownerAccess.owner.displayName,
-      sessionId: tenantSession.sessionId
+      sessionId: tenantSession.sessionId,
+      rootOrigin: tenantSession.rootOrigin
     },
-    workspace: tenantWorkspace
+    workspace: tenantWorkspace,
+    hostFamily
   };
 }
 
@@ -1029,6 +1098,19 @@ function webRequest(req: Request, trustForwardedHost: boolean): globalThis.Reque
   return new globalThis.Request(`${protocol}://${host}${req.originalUrl}`, { method: req.method, headers });
 }
 
+function requestOrigin(request: globalThis.Request): string {
+  return new URL(request.url).origin;
+}
+
+function logoutRetrySession(
+  session: { providerSubject: string; sessionId: string; rootOrigin: string },
+  rootOrigin: string,
+  cookieOrigin: string
+): { providerSubject: string; sessionId: string; rootOrigin: string; cookieOrigin: string } {
+  if (session.rootOrigin !== rootOrigin) throw httpError(401, "Authentication required.");
+  return { providerSubject: session.providerSubject, sessionId: session.sessionId, rootOrigin, cookieOrigin };
+}
+
 function sendAuthRoute(res: Response, route: AuthRouteResponse): void {
   for (const [name, raw] of Object.entries(route.headers || {})) {
     const values = headerValues(raw);
@@ -1054,6 +1136,82 @@ function canonicalConfiguredHost(raw: string): string {
   }
 }
 
+function candidateHostFamilyFromEnv(env: Record<string, string | undefined> = process.env): CandidateHostFamilyOptions | null {
+  const rootHost = env.KANBAN_CARDS_CANDIDATE_ROOT_HOST?.trim() || "";
+  const redirectUri = env.OIDC_CANDIDATE_REDIRECT_URI?.trim() || "";
+  const postLogoutRedirectUri = env.OIDC_CANDIDATE_POST_LOGOUT_REDIRECT_URI?.trim() || "";
+  const tenantHostsJson = env.KANBAN_CARDS_CANDIDATE_TENANT_HOSTS?.trim() || "";
+  if (![rootHost, redirectUri, postLogoutRedirectUri, tenantHostsJson].some(Boolean)) return null;
+  if (!rootHost || !redirectUri || !tenantHostsJson) {
+    throw new Error("KANBAN_CARDS_CANDIDATE_ROOT_HOST, OIDC_CANDIDATE_REDIRECT_URI, and KANBAN_CARDS_CANDIDATE_TENANT_HOSTS must be set together.");
+  }
+  let tenantHosts: Record<string, string>;
+  try {
+    const parsed = JSON.parse(tenantHostsJson) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
+    tenantHosts = parsed as Record<string, string>;
+  } catch {
+    throw new Error("KANBAN_CARDS_CANDIDATE_TENANT_HOSTS must be a JSON object mapping Workspace slugs to exact hosts.");
+  }
+  return { rootHost, redirectUri, ...(postLogoutRedirectUri ? { postLogoutRedirectUri } : {}), tenantHosts };
+}
+
+function createCandidateHostFamily(input: CandidateHostFamilyOptions, primaryAuthConfig: PlatformAuthConfig | null): HostFamily {
+  if (!primaryAuthConfig) throw new Error("A candidate host family requires provider authentication.");
+  const candidateRootHost = canonicalConfiguredHost(input.rootHost);
+  const candidateRootOrigin = originForHost(candidateRootHost);
+  const redirectUri = String(input.redirectUri || "").trim();
+  const postLogoutRedirectUri = String(input.postLogoutRedirectUri || "/").trim();
+  const authConfig = validatePlatformAuthConfig({
+    ...primaryAuthConfig,
+    redirectUri,
+    postLogoutRedirectUri
+  });
+  requireFamilyRedirect(authConfig.redirectUri, candidateRootOrigin, "OIDC_CANDIDATE_REDIRECT_URI");
+  if (!authConfig.postLogoutRedirectUri.startsWith("/") && new URL(authConfig.postLogoutRedirectUri).origin.toLowerCase() !== candidateRootOrigin) {
+    throw new Error("OIDC_CANDIDATE_POST_LOGOUT_REDIRECT_URI must stay on the candidate root origin.");
+  }
+  const tenantHosts = new Map<string, string>();
+  const tenantSlugs = new Set<string>();
+  for (const [rawSlug, rawHost] of Object.entries(input.tenantHosts || {})) {
+    const slug = workspaceSlug(rawSlug);
+    const host = canonicalConfiguredHost(rawHost);
+    if (host === candidateRootHost || tenantHosts.has(host) || tenantSlugs.has(slug)) {
+      throw new Error("Candidate tenant hosts and normalized Workspace slugs must be unique and must differ from the candidate root host.");
+    }
+    tenantHosts.set(host, slug);
+    tenantSlugs.add(slug);
+  }
+  if (tenantHosts.size !== 1) throw new Error("KANBAN_CARDS_CANDIDATE_TENANT_HOSTS must contain exactly one legacy Workspace route for this cutover.");
+  return {
+    rootHost: candidateRootHost,
+    rootOrigin: candidateRootOrigin,
+    deriveTenantHosts: false,
+    tenantHosts,
+    authConfig
+  };
+}
+
+function requireFamilyRedirect(redirectUri: string, rootOrigin: string, label: string): void {
+  const redirect = new URL(redirectUri);
+  if (redirect.origin.toLowerCase() !== rootOrigin || redirect.pathname !== "/auth/callback" || redirect.search || redirect.hash) {
+    throw new Error(`${label} must use the exact configured root origin and /auth/callback path without a query or fragment.`);
+  }
+}
+
+function validateHostFamilies(families: readonly HostFamily[]): void {
+  const hosts = new Set<string>();
+  for (const family of families) {
+    for (const host of [family.rootHost, ...family.tenantHosts.keys()]) {
+      if (hosts.has(host)) throw new Error("Configured root and tenant hosts must be unique across host families.");
+      if (families.some((other) => other !== family && other.deriveTenantHosts && isDerivedTenantHost(host, other.rootHost))) {
+        throw new Error("Configured host families must not overlap a derived tenant host.");
+      }
+      hosts.add(host);
+    }
+  }
+}
+
 function requestHost(req: Request, trustForwardedHost: boolean): string {
   const raw = trustForwardedHost ? req.get("x-forwarded-host") || req.get("host") : req.get("host");
   const value = String(raw || "").trim().toLowerCase().replace(/\.$/, "");
@@ -1072,49 +1230,89 @@ function requestProtocol(req: Request, trustForwardedHost: boolean): "http" | "h
   return req.protocol === "https" ? "https" : "http";
 }
 
-function requireRootRequest(req: Request, rootHost: string, trustForwardedHost: boolean): void {
-  if (requestHost(req, trustForwardedHost) !== rootHost) throw httpError(404, "Workspace unavailable.");
+function requireRootRequest(req: Request, families: readonly HostFamily[], trustForwardedHost: boolean): HostFamily {
+  const host = requestHost(req, trustForwardedHost);
+  const family = families.find((candidate) => candidate.rootHost === host);
+  if (!family) throw httpError(404, "Workspace unavailable.");
+  return family;
 }
 
-async function resolveTenantWorkspace(host: string, rootHost: string, accessStore: AccessStore): Promise<AccessWorkspace | null> {
-  if (!host || host === rootHost) return null;
-  const hostname = new URL(`http://${host}`).hostname;
-  const rootHostname = new URL(`http://${rootHost}`).hostname;
-  const suffix = `.${rootHostname}`;
-  if (!hostname.endsWith(suffix)) return null;
-  const slug = hostname.slice(0, -suffix.length);
-  if (!slug || slug.includes(".") || RESERVED_WORKSPACE_SLUGS.has(slug)) return null;
-  try {
-    return await accessStore.getWorkspaceBySlug(slug);
-  } catch {
-    throw httpError(503, "Workspace registry is unavailable.");
+function requireKnownHost(req: Request, families: readonly HostFamily[], trustForwardedHost: boolean): ResolvedHostContext {
+  const host = requestHost(req, trustForwardedHost);
+  const family = families.find((candidate) => candidate.rootHost === host || candidate.tenantHosts.has(host) || candidate.deriveTenantHosts && isDerivedTenantHost(host, candidate.rootHost));
+  if (!family) throw httpError(404, "Workspace unavailable.");
+  if (family.rootHost === host) return { kind: "root", family, workspace: null };
+  return { kind: "workspace", family, workspace: null };
+}
+
+async function resolveKnownHost(host: string, families: readonly HostFamily[], accessStore: AccessStore): Promise<ResolvedHostContext | null> {
+  for (const family of families) {
+    if (host === family.rootHost) return { kind: "root", family, workspace: null };
+    const explicitSlug = family.tenantHosts.get(host);
+    const slug = explicitSlug || (family.deriveTenantHosts ? derivedTenantSlug(host, family.rootHost) : null);
+    if (!slug) continue;
+    try {
+      return { kind: "workspace", family, workspace: await accessStore.getWorkspaceBySlug(slug) };
+    } catch {
+      throw httpError(503, "Workspace registry is unavailable.");
+    }
   }
+  return null;
 }
 
-function workspaceHost(slug: string, rootHost: string): string {
-  const parsed = new URL(`http://${rootHost}`);
+function isDerivedTenantHost(host: string, rootHost: string): boolean {
+  return Boolean(derivedTenantSlug(host, rootHost));
+}
+
+function derivedTenantSlug(host: string, rootHost: string): string | null {
+  if (!host || host === rootHost) return null;
+  const parsedHost = new URL(`http://${host}`);
+  const parsedRoot = new URL(`http://${rootHost}`);
+  if (parsedHost.port !== parsedRoot.port) return null;
+  const suffix = `.${parsedRoot.hostname}`;
+  if (!parsedHost.hostname.endsWith(suffix)) return null;
+  const slug = parsedHost.hostname.slice(0, -suffix.length);
+  if (!slug || slug.includes(".") || RESERVED_WORKSPACE_SLUGS.has(slug)) return null;
+  return slug;
+}
+
+function workspaceHost(slug: string, family: HostFamily): string {
+  if (!family.deriveTenantHosts) {
+    const exact = [...family.tenantHosts].find(([, mappedSlug]) => mappedSlug === slug)?.[0];
+    if (!exact) throw httpError(503, "This Workspace does not have an approved route in the current host family.");
+    return exact;
+  }
+  const parsed = new URL(`http://${family.rootHost}`);
   return `${slug}.${parsed.hostname}${parsed.port ? `:${parsed.port}` : ""}`;
 }
 
-function publicAccessWorkspace(workspace: AccessWorkspace, rootHost: string): UnknownRecord {
+function supportsWorkspace(family: HostFamily, slug: string): boolean {
+  return family.deriveTenantHosts || [...family.tenantHosts.values()].includes(slug);
+}
+
+function publicAccessWorkspace(workspace: AccessWorkspace, family: HostFamily): UnknownRecord {
   return {
     id: workspace.id,
     slug: workspace.slug,
     name: workspace.name,
-    url: `${publicProtocol(rootHost)}://${workspaceHost(workspace.slug, rootHost)}`
+    url: originForHost(workspaceHost(workspace.slug, family))
   };
 }
 
-function rootLoginUrl(rootHost: string): string {
-  return `${publicProtocol(rootHost)}://${rootHost}/auth/login`;
+function rootLoginUrl(family: HostFamily): string {
+  return `${family.rootOrigin}/auth/login`;
 }
 
-function rootLogoutUrl(rootHost: string): string {
-  return `${publicProtocol(rootHost)}://${rootHost}/auth/logout`;
+function rootLogoutUrl(family: HostFamily): string {
+  return `${family.rootOrigin}/auth/logout`;
 }
 
 function publicProtocol(rootHost: string): "http" | "https" {
   return isLoopbackHost(new URL(`http://${rootHost}`).hostname) ? "http" : "https";
+}
+
+function originForHost(host: string): string {
+  return `${publicProtocol(host)}://${host}`;
 }
 
 function workspaceSlug(value: unknown): string {

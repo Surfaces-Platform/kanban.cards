@@ -1,9 +1,10 @@
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { authorizePromotion, evaluateCutoverSnapshot, trustedReleaseTarget, type CutoverPhase } from "../src/release-gate";
+import { authorizePromotion, evaluateCutoverSnapshot, isVercelSsoProtectionRedirect, trustedReleaseTarget, type CutoverPhase } from "../src/release-gate";
 import { mainGitDeploymentsAreDisabled } from "../src/release-policy";
 import { parseReleaseControllerArguments } from "../src/release-controller";
 
@@ -106,6 +107,17 @@ async function hydrateWithLiveFacts(snapshot: unknown, phase: CutoverPhase): Pro
   receipt.routePinned = receipt.routeDeploymentId === candidateId ? "passed" : "failed";
   receipt.tenantRouteDeploymentId = stringValue(tenantRouted.id);
   receipt.tenantRoutePinned = receipt.tenantRouteDeploymentId === candidateId ? "passed" : "failed";
+  if (phase === "pre-promotion") {
+    const [routeProtected, tenantRouteProtected] = await Promise.all([
+      unauthenticatedRouteIsProtected(proofOrigin),
+      unauthenticatedRouteIsProtected(tenantOrigin)
+    ]);
+    receipt.routeProtected = routeProtected ? "passed" : "failed";
+    receipt.tenantRouteProtected = tenantRouteProtected ? "passed" : "failed";
+  } else {
+    receipt.routeProtected = "not-required";
+    receipt.tenantRouteProtected = "not-required";
+  }
   const runtimeOrigin = phase === "pre-promotion" ? stringValue(record(root.candidate).url) : `https://${target.publicDomain}`;
   const [health, accessHealth] = phase === "pre-promotion"
     ? await Promise.all([vercelRuntimeJson(runtimeOrigin, "/api/health"), vercelRuntimeJson(runtimeOrigin, "/api/access/health")])
@@ -178,6 +190,20 @@ async function publicJson(url: string): Promise<Record<string, unknown>> {
   const body = record(await response.json());
   body.status = response.status;
   return body;
+}
+
+async function unauthenticatedRouteIsProtected(origin: string): Promise<boolean> {
+  // A nonce path prevents an application-level root redirect from masquerading as
+  // platform protection. Live hydration also corroborates this response with the
+  // Vercel Project protection policy and an exact route-to-deployment inspection.
+  const probeUrl = new URL(`/__kanban_cards_protection_probe__/${randomUUID()}`, origin).href;
+  const response = await fetch(probeUrl, { cache: "no-store", redirect: "manual" });
+  return isVercelSsoProtectionRedirect(
+    response.status,
+    response.headers.get("location"),
+    probeUrl,
+    response.headers.get("set-cookie")
+  );
 }
 
 function record(value: unknown): Record<string, unknown> {

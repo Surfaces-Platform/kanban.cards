@@ -23,12 +23,15 @@ import { createWorkspaceStoreResolver, freshWorkspaceState } from "../src/state-
 const ROOT_HOST = "kanban.cards";
 const LEGACY_HOST = "legacy.kanban.cards";
 const BETA_HOST = "beta.kanban.cards";
+const CANDIDATE_ROOT_HOST = "kanban-candidate-root.vercel.app";
+const CANDIDATE_LEGACY_HOST = "kanban-candidate-legacy.vercel.app";
 const LEGACY_BEARER = "legacy-owner-key";
 const OWNER: RootSession = {
   providerSubject: "provider|legacy-owner",
   email: "owner@example.com",
   displayName: "Verified Owner",
-  sessionId: "root-session-security-test"
+  sessionId: "root-session-security-test",
+  rootOrigin: `https://${ROOT_HOST}`
 };
 const AUTH_CONFIG: PlatformAuthConfig = {
   issuer: "https://identity.example.com",
@@ -174,7 +177,8 @@ test("legacy bearer is explicitly mapped to default and cannot enter a sibling W
       providerSubject: "provider|unknown-owner",
       email: "unknown@example.com",
       displayName: "Unknown Owner",
-      sessionId: "unknown-root-session"
+      sessionId: "unknown-root-session",
+      rootOrigin: `https://${ROOT_HOST}`
     }, AUTH_CONFIG.sessionSecret, true, 3_600));
     const unknownWorkspaces = await client.get("/api/workspaces", { host: ROOT_HOST, cookie: unknownCookie });
     assert.equal(unknownWorkspaces.status, 200);
@@ -243,6 +247,97 @@ test("Workspace handoffs reject wrong destinations, replay, and expiry without s
     });
     assert.equal(expired.status, 401);
     assert.equal(expired.headers.get("set-cookie"), null);
+  });
+});
+
+test("an explicit candidate host family selects its callback and rejects cross-family state, sessions, and handoffs", async () => {
+  const discoveryFetch = async (input: RequestInfo | URL): Promise<Response> => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    if (url === `${AUTH_CONFIG.issuer}/.well-known/openid-configuration`) {
+      return jsonResponse({
+        issuer: AUTH_CONFIG.issuer,
+        authorization_endpoint: `${AUTH_CONFIG.issuer}/authorize`,
+        token_endpoint: `${AUTH_CONFIG.issuer}/token`,
+        jwks_uri: `${AUTH_CONFIG.issuer}/jwks`
+      });
+    }
+    throw new Error(`Unexpected provider request: ${url}`);
+  };
+  await withApp(async ({ client }) => {
+    const candidateRootOrigin = `https://${CANDIDATE_ROOT_HOST}`;
+    const candidateTenantOrigin = `https://${CANDIDATE_LEGACY_HOST}`;
+    const candidateRootCookie = cookieHeader(await createRootSessionCookie({
+      ...OWNER,
+      sessionId: "candidate-root-session",
+      rootOrigin: candidateRootOrigin
+    }, AUTH_CONFIG.sessionSecret, true, 3_600));
+
+    const login = await client.get("/auth/login", { host: CANDIDATE_ROOT_HOST });
+    assert.equal(login.status, 302);
+    const authorization = new URL(String(login.headers.get("location")));
+    assert.equal(authorization.searchParams.get("redirect_uri"), `${candidateRootOrigin}/auth/callback`);
+    const state = String(authorization.searchParams.get("state") || "");
+    const loginCookies = login.headers.getAll("set-cookie").map(cookieHeader).join("; ");
+    const crossFamilyCallback = await client.get(`/auth/callback?code=replay&state=${encodeURIComponent(state)}`, {
+      host: ROOT_HOST,
+      cookie: loginCookies
+    });
+    assert.equal(crossFamilyCallback.status, 400);
+    assert.equal(crossFamilyCallback.data.error, "AUTH_INVALID_STATE");
+
+    assert.equal((await client.get("/api/workspaces", { host: ROOT_HOST, cookie: candidateRootCookie })).status, 401);
+    const candidateWorkspaces = await client.get("/api/workspaces", {
+      host: CANDIDATE_ROOT_HOST,
+      cookie: candidateRootCookie
+    });
+    assert.equal(candidateWorkspaces.status, 200);
+    assert.deepEqual(candidateWorkspaces.data.workspaces, [{
+      id: candidateWorkspaces.data.workspaces[0].id,
+      slug: "legacy",
+      name: "Legacy Workspace",
+      url: candidateTenantOrigin
+    }]);
+
+    const issued = await client.post("/api/workspace-handoffs", {
+      host: CANDIDATE_ROOT_HOST,
+      cookie: candidateRootCookie,
+      origin: candidateRootOrigin,
+      json: { slug: "legacy" }
+    });
+    assert.equal(issued.status, 201);
+    assert.equal(issued.data.destination, `${candidateTenantOrigin}/api/workspace-handoff`);
+
+    const wrongFamily = await client.post("/api/workspace-handoff", {
+      host: LEGACY_HOST,
+      origin: `https://${ROOT_HOST}`,
+      json: { token: issued.data.handoffToken }
+    });
+    assert.equal(wrongFamily.status, 401);
+    const candidateExchange = await client.post("/api/workspace-handoff", {
+      host: CANDIDATE_LEGACY_HOST,
+      origin: candidateRootOrigin,
+      json: { token: issued.data.handoffToken }
+    });
+    assert.equal(candidateExchange.status, 200);
+    const candidateTenantCookie = cookieHeader(candidateExchange.headers.get("set-cookie") || "");
+    assert.equal((await client.get("/api/projects", {
+      host: LEGACY_HOST,
+      cookie: candidateTenantCookie
+    })).status, 401);
+    assert.equal((await client.get("/api/projects", {
+      host: CANDIDATE_LEGACY_HOST,
+      cookie: candidateTenantCookie
+    })).status, 200);
+
+    assert.equal((await client.get("/auth/login", { host: "unapproved-candidate.vercel.app" })).status, 404);
+    assert.equal((await client.get("/api/projects", { host: "unapproved-candidate.vercel.app", bearer: LEGACY_BEARER })).status, 404);
+  }, {
+    candidateHostFamily: {
+      rootHost: CANDIDATE_ROOT_HOST,
+      redirectUri: `https://${CANDIDATE_ROOT_HOST}/auth/callback`,
+      tenantHosts: { legacy: CANDIDATE_LEGACY_HOST }
+    },
+    fetch: discoveryFetch as typeof fetch
   });
 });
 
@@ -479,7 +574,8 @@ test("verified legacy binding refuses an absent default row and preserves its di
       providerSubject: "provider|unrelated-owner",
       email: "unrelated@example.com",
       displayName: "Unrelated Owner",
-      sessionId: "unrelated-root-session"
+      sessionId: "unrelated-root-session",
+      rootOrigin: `https://${ROOT_HOST}`
     }, AUTH_CONFIG.sessionSecret, true, 3_600));
     const reservedSlug = await client.post("/api/workspaces", {
       host: ROOT_HOST,
@@ -561,6 +657,70 @@ test("legacy migration rejects reserved tenant slugs at startup", () => {
     requireDatabase: false,
     rootHost: "localhost:4317"
   }), /must be a valid, non-reserved Workspace hostname label/);
+});
+
+test("candidate host-family configuration rejects overlap, redirect ambiguity, extra routes, and missing legacy routes", () => {
+  const base = {
+    host: "0.0.0.0",
+    platformAuthConfig: AUTH_CONFIG,
+    requireDatabase: false,
+    rootHost: ROOT_HOST
+  };
+  assert.throws(() => createApp({
+    ...base,
+    candidateHostFamily: {
+      rootHost: `candidate.${ROOT_HOST}`,
+      redirectUri: `https://candidate.${ROOT_HOST}/auth/callback`,
+      tenantHosts: { legacy: CANDIDATE_LEGACY_HOST }
+    }
+  }), /must not overlap a derived tenant host/);
+  assert.throws(() => createApp({
+    ...base,
+    candidateHostFamily: {
+      rootHost: CANDIDATE_ROOT_HOST,
+      redirectUri: `https://${CANDIDATE_ROOT_HOST}/auth/callback?ambiguous=true`,
+      tenantHosts: { legacy: CANDIDATE_LEGACY_HOST }
+    }
+  }), /without a query or fragment/);
+  assert.throws(() => createApp({
+    ...base,
+    candidateHostFamily: {
+      rootHost: CANDIDATE_ROOT_HOST,
+      redirectUri: `https://${CANDIDATE_ROOT_HOST}/auth/callback`,
+      tenantHosts: {
+        legacy: CANDIDATE_LEGACY_HOST,
+        LEGACY: `candidate-legacy-duplicate.example.net`
+      }
+    },
+    legacyOwnerSubject: OWNER.providerSubject,
+    legacyWorkspaceSlug: "legacy",
+    legacyWorkspaceName: "Legacy Workspace"
+  }), /normalized Workspace slugs must be unique/);
+  assert.throws(() => createApp({
+    ...base,
+    candidateHostFamily: {
+      rootHost: CANDIDATE_ROOT_HOST,
+      redirectUri: `https://${CANDIDATE_ROOT_HOST}/auth/callback`,
+      tenantHosts: {
+        legacy: CANDIDATE_LEGACY_HOST,
+        studio: `candidate-studio.example.net`
+      }
+    },
+    legacyOwnerSubject: OWNER.providerSubject,
+    legacyWorkspaceSlug: "legacy",
+    legacyWorkspaceName: "Legacy Workspace"
+  }), /exactly one legacy Workspace route/);
+  assert.throws(() => createApp({
+    ...base,
+    candidateHostFamily: {
+      rootHost: CANDIDATE_ROOT_HOST,
+      redirectUri: `https://${CANDIDATE_ROOT_HOST}/auth/callback`,
+      tenantHosts: { studio: CANDIDATE_LEGACY_HOST }
+    },
+    legacyOwnerSubject: OWNER.providerSubject,
+    legacyWorkspaceSlug: "legacy",
+    legacyWorkspaceName: "Legacy Workspace"
+  }), /must contain exactly the configured legacy Workspace slug/);
 });
 
 test("Workspace creation returns recoverable validation and conflict responses", async () => {
@@ -652,6 +812,12 @@ interface AppFixture {
 interface AppFixtureOptions {
   apiToken?: string;
   seedLegacyState?: boolean;
+  candidateHostFamily?: {
+    rootHost: string;
+    redirectUri: string;
+    tenantHosts: Record<string, string>;
+  };
+  fetch?: typeof fetch;
 }
 
 async function withApp(operation: (fixture: AppFixture) => Promise<void>, options: AppFixtureOptions = {}): Promise<void> {
@@ -697,6 +863,8 @@ async function withApp(operation: (fixture: AppFixture) => Promise<void>, option
   const app = createApp({
     accessStore: applicationAccessStore,
     apiToken: options.apiToken === undefined ? LEGACY_BEARER : options.apiToken,
+    candidateHostFamily: options.candidateHostFamily,
+    fetch: options.fetch,
     host: "0.0.0.0",
     legacyApiWorkspaceId: "default",
     legacyOwnerSubject: OWNER.providerSubject,

@@ -8,15 +8,19 @@ export interface VerifiedOwnerIdentity {
 
 export interface RootSession extends VerifiedOwnerIdentity {
   sessionId: string;
+  rootOrigin: string;
 }
 
 export interface TenantSession extends RootSession {
   workspaceId: string;
+  tenantOrigin: string;
 }
 
 export interface LogoutRetrySession {
   providerSubject: string;
   sessionId: string;
+  rootOrigin: string;
+  cookieOrigin: string;
 }
 
 export interface PlatformAuthConfig {
@@ -110,6 +114,7 @@ interface StatePayload extends JwtPayload {
   nonce: string;
   returnTo: string;
   surface: string;
+  rootOrigin: string;
 }
 
 interface TokenResponse {
@@ -204,6 +209,8 @@ export async function startOwnerLogin(
 
   try {
     config = validatePlatformAuthConfig(config);
+    const rootOrigin = new URL(config.redirectUri).origin;
+    if (new URL(request.url).origin !== rootOrigin) return errorResponse(AUTH_INVALID_STATE, 400);
     const discovery = await fetchDiscovery(config, fetchImpl);
     const verifier = randomToken();
     const challenge = crypto.createHash("sha256").update(verifier).digest("base64url");
@@ -220,7 +227,7 @@ export async function startOwnerLogin(
     authorizationUrl.searchParams.set("code_challenge", challenge);
     authorizationUrl.searchParams.set("code_challenge_method", "S256");
 
-    const stateCookie = await createStateCookie({ state, nonce, returnTo, surface: config.surfaceId }, config, production);
+    const stateCookie = await createStateCookie({ state, nonce, returnTo, surface: config.surfaceId, rootOrigin }, config, production);
     const pkceCookie = createCookie(pkceCookieName(production), verifier, EPHEMERAL_COOKIE_TTL_SECONDS, production);
     return redirectResponse(authorizationUrl.toString(), [pkceCookie, stateCookie]);
   } catch (error) {
@@ -294,7 +301,8 @@ export async function verifyRootSession(request: Request, secret: string, produc
   if (!token) return null;
   try {
     const payload = await verifySessionToken(token, secret, ROOT_SESSION_AUDIENCE);
-    return requireRootSession(payload);
+    const session = requireRootSession(payload);
+    return new URL(request.url).origin === session.rootOrigin ? session : null;
   } catch {
     return null;
   }
@@ -324,7 +332,8 @@ export async function verifyLogoutRetrySession(
   if (!token) return null;
   try {
     const payload = await verifySessionToken(token, secret, LOGOUT_RETRY_AUDIENCE);
-    return requireLogoutRetrySession(payload);
+    const session = requireLogoutRetrySession(payload);
+    return new URL(request.url).origin === session.cookieOrigin ? session : null;
   } catch {
     return null;
   }
@@ -350,7 +359,8 @@ export async function verifyTenantSession(request: Request, secret: string, prod
   if (!token) return null;
   try {
     const payload = await verifySessionToken(token, secret, TENANT_SESSION_AUDIENCE);
-    return requireTenantSession(payload);
+    const session = requireTenantSession(payload);
+    return new URL(request.url).origin === session.tenantOrigin ? session : null;
   } catch {
     return null;
   }
@@ -465,12 +475,13 @@ async function verifyIdToken(
 }
 
 async function createStateCookie(
-  payload: Pick<StatePayload, "state" | "nonce" | "returnTo" | "surface">,
+  payload: Pick<StatePayload, "state" | "nonce" | "returnTo" | "surface" | "rootOrigin">,
   config: PlatformAuthConfig,
   production: boolean
 ): Promise<string> {
   const jose = await loadJose();
-  const token = await new jose.SignJWT(payload)
+  const rootOrigin = strictOriginClaim(payload.rootOrigin, "rootOrigin");
+  const token = await new jose.SignJWT({ ...payload, rootOrigin })
     .setProtectedHeader({ alg: SESSION_ALGORITHM, typ: "JWT" })
     .setIssuer(SESSION_ISSUER)
     .setAudience("kanban.cards:oidc-state")
@@ -494,7 +505,12 @@ async function verifyStateCookie(request: Request, config: PlatformAuthConfig, p
     const nonce = strictClaim(payload.nonce, "nonce");
     const returnTo = strictClaim(payload.returnTo, "returnTo");
     const surface = strictClaim(payload.surface, "surface");
-    return { ...payload, state, nonce, returnTo, surface };
+    const rootOrigin = strictOriginClaim(payload.rootOrigin, "rootOrigin");
+    if (
+      rootOrigin !== new URL(config.redirectUri).origin ||
+      rootOrigin !== new URL(request.url).origin
+    ) return null;
+    return { ...payload, state, nonce, returnTo, surface, rootOrigin };
   } catch {
     return null;
   }
@@ -538,19 +554,27 @@ function requireRootSession(value: unknown): RootSession {
     providerSubject: strictClaim(session.providerSubject, "providerSubject"),
     email: strictClaim(session.email, "email"),
     displayName: strictClaim(session.displayName, "displayName"),
-    sessionId: strictClaim(session.sessionId, "sessionId")
+    sessionId: strictClaim(session.sessionId, "sessionId"),
+    rootOrigin: strictOriginClaim(session.rootOrigin, "rootOrigin")
   };
 }
 
 function requireTenantSession(value: unknown): TenantSession {
-  return { ...requireRootSession(value), workspaceId: strictClaim(recordValue(value).workspaceId, "workspaceId") };
+  const session = recordValue(value);
+  return {
+    ...requireRootSession(session),
+    workspaceId: strictClaim(session.workspaceId, "workspaceId"),
+    tenantOrigin: strictOriginClaim(session.tenantOrigin, "tenantOrigin")
+  };
 }
 
 function requireLogoutRetrySession(value: unknown): LogoutRetrySession {
   const session = recordValue(value);
   return {
     providerSubject: strictClaim(session.providerSubject, "providerSubject"),
-    sessionId: strictClaim(session.sessionId, "sessionId")
+    sessionId: strictClaim(session.sessionId, "sessionId"),
+    rootOrigin: strictOriginClaim(session.rootOrigin, "rootOrigin"),
+    cookieOrigin: strictOriginClaim(session.cookieOrigin, "cookieOrigin")
   };
 }
 
@@ -564,6 +588,30 @@ function strictClaim(value: unknown, label: string): string {
     throw new ProviderClaimError(`${label} must be a non-empty scalar string`);
   }
   return value;
+}
+
+function strictOriginClaim(value: unknown, label: string): string {
+  const origin = strictClaim(value, label);
+  let parsed: URL;
+  try {
+    parsed = new URL(origin);
+  } catch {
+    throw new ProviderClaimError(`${label} must be an exact secure origin`);
+  }
+  if (
+    parsed.origin !== origin ||
+    parsed.username ||
+    parsed.password ||
+    (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && isLocalSessionHostname(parsed.hostname)))
+  ) {
+    throw new ProviderClaimError(`${label} must be an exact secure origin`);
+  }
+  return origin;
+}
+
+function isLocalSessionHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  return normalized.endsWith(".localhost") || isExplicitLoopbackHostname(normalized);
 }
 
 function createCookie(name: string, value: string, maxAge: number, production: boolean): string {
