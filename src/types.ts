@@ -78,6 +78,7 @@ export interface WorkspaceState {
 export interface StateStore {
   kind: "file" | "postgres";
   path: string;
+  readExisting(): Promise<WorkspaceState | null>;
   read(): Promise<WorkspaceState>;
   write(nextState: unknown): Promise<WorkspaceState>;
   update<T>(mutator: (state: WorkspaceState) => T): Promise<{ state: WorkspaceState; result: T }>;
@@ -93,6 +94,12 @@ export interface PostgresOptions {
 export interface StateStoreOptions extends PostgresOptions {
   dataPath?: string;
   workspaceId?: string;
+  workspaceDirectory?: string;
+}
+
+export interface WorkspaceStoreResolver {
+  kind: "file" | "postgres";
+  resolve(storageId: string): StateStore;
 }
 
 export type PostgresClient = Pool | PoolClient;

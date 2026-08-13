@@ -60,6 +60,29 @@ test("file storage persists only normalized V2 state", async () => {
   }
 });
 
+test("file readExisting validates without creating or rewriting state", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-cards-v2-preflight-"));
+  const dataPath = path.join(directory, "workspace.json");
+  const store = createFileStateStore(dataPath);
+
+  try {
+    assert.equal(await store.readExisting(), null);
+    await assert.rejects(() => fs.stat(dataPath), (error: unknown) => {
+      return Boolean(error && typeof error === "object" && "code" in error && error.code === "ENOENT");
+    });
+
+    await fs.writeFile(dataPath, JSON.stringify({ schemaVersion: 1, projects: [], idempotencyRecords: [] }));
+    await assert.rejects(() => store.readExisting(), /Unsupported workspace schema/);
+    assert.equal(JSON.parse(await fs.readFile(dataPath, "utf8")).schemaVersion, 1);
+
+    const expected = freshWorkspaceState();
+    await fs.writeFile(dataPath, JSON.stringify(expected));
+    assert.deepEqual(await store.readExisting(), expected);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("Postgres storage initializes and updates V2 state in a locked transaction", async () => {
   const database = new FakePostgresPool();
   const store = createPostgresStateStore({ pool: database as unknown as Pool, workspaceId: "test-workspace" });
@@ -82,6 +105,22 @@ test("Postgres storage initializes and updates V2 state in a locked transaction"
   assert.ok(database.queries.some((query) => query === "COMMIT"));
   assert.equal(database.queries.filter((query) => query.startsWith("CREATE TABLE")).length, 1);
   assert.equal(database.releaseCount, 1);
+});
+
+test("Postgres readExisting performs a non-creating SELECT and validates the stored row", async () => {
+  const database = new FakePostgresPool();
+  const store = createPostgresStateStore({ pool: database as unknown as Pool, workspaceId: "default" });
+
+  assert.equal(await store.readExisting(), null);
+  assert.deepEqual(database.queries, ["SELECT state FROM kanban_v2_workspaces WHERE id = $1"]);
+
+  database.state = { schemaVersion: 1, projects: [], idempotencyRecords: [] };
+  await assert.rejects(() => store.readExisting(), /Unsupported workspace schema/);
+  assert.equal(database.queries.filter((query) => query.startsWith("SELECT state")).length, 2);
+  assert.equal(database.queries.some((query) => query.startsWith("CREATE TABLE") || query.startsWith("INSERT INTO")), false);
+
+  database.state = freshWorkspaceState();
+  assert.deepEqual(await store.readExisting(), freshWorkspaceState());
 });
 
 function workspaceWithProject(now: string): unknown {

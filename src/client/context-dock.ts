@@ -7,15 +7,39 @@ declare global {
 }
 
 type Revision = string | number;
+type AccessContext = "local" | "root" | "workspace";
 type ProjectEditorMode = "create" | "edit" | null;
 type InspectorTab = "card" | "activity";
 type DescriptionView = "write" | "preview";
-type MutationKind = "sign-in" | "refresh" | "project" | "card" | "move" | "comment" | "archive" | "undo" | null;
+type MutationKind = "sign-in" | "workspace" | "refresh" | "project" | "card" | "move" | "comment" | "archive" | "undo" | null;
 type StatusTone = "neutral" | "success" | "warning" | "error" | "receipt";
 
 interface Session {
   authenticated: boolean;
   label: string;
+  context: AccessContext;
+  email?: string;
+  workspace?: WorkspaceAccess;
+}
+
+interface SessionEnvelope {
+  authenticated: boolean;
+  context: AccessContext;
+  loginUrl: string;
+  logoutUrl: string;
+  session: Session | null;
+}
+
+interface AccessFailure {
+  title: string;
+  message: string;
+}
+
+interface WorkspaceAccess {
+  id: string;
+  slug: string;
+  name: string;
+  url: string;
 }
 
 interface ProjectSummary {
@@ -71,7 +95,7 @@ interface Project extends ProjectSummary {
 }
 
 interface AuthNotice {
-  kind: "invalid-key" | "service-unavailable" | "session-expired" | "signed-out";
+  kind: "invalid-key" | "service-unavailable" | "session-expired" | "signed-out" | "sign-out-incomplete";
   title: string;
   message: string;
 }
@@ -167,7 +191,7 @@ const API_BASE_URL = (window.KANBAN_CARDS_API_BASE_URL || "/api").replace(/\/$/,
 const DEFAULT_COLUMNS = ["Next", "Doing", "Done"];
 const CONFIRMATION_DURATION_MS = 5_000;
 const UI_CONTRACT_STATES = [
-  "opening", "signed-out", "invalid-key", "empty-workspace", "empty-project", "populated", "selected",
+  "opening", "signed-out", "invalid-key", "workspace-route", "empty-workspace", "empty-project", "populated", "selected",
   "refreshing", "refresh-success", "refresh-failure", "saving", "validation-error", "stale",
   "session-expired", "service-unavailable", "archived", "sign-out-success"
 ] as const;
@@ -177,6 +201,11 @@ if (!rootElement) throw new Error("The kanban.cards application shell is missing
 const root: HTMLElement = rootElement;
 
 let session: Session | null = null;
+let accessContext: AccessContext = "local";
+let loginUrl = "/auth/login";
+let logoutUrl = "";
+let workspaceChoices: WorkspaceAccess[] = [];
+let accessFailure: AccessFailure | null = null;
 let projects: ProjectSummary[] = [];
 let activeProject: Project | null = null;
 let initialLoading = true;
@@ -365,12 +394,75 @@ function normalizeProject(value: unknown): Project {
   };
 }
 
-function normalizeSession(value: unknown): Session | null {
+function normalizeSession(value: unknown): SessionEnvelope {
   const result = objectValue(value);
-  if (result.authenticated === false) return null;
+  const context = result.context === "root" || result.context === "workspace" ? result.context : "local";
+  const nextLoginUrl = safeAccessUrl(result.loginUrl, true) || "/auth/login";
+  const nextLogoutUrl = safeAccessUrl(result.logoutUrl, true, undefined, "/auth/logout") || "";
+  if (result.authenticated === false) {
+    return { authenticated: false, context, loginUrl: nextLoginUrl, logoutUrl: nextLogoutUrl, session: null };
+  }
   const source = objectValue(result.session ?? result.user ?? result.actor ?? result);
-  if (result.authenticated !== true && !source.label && !source.name && !source.email) return null;
-  return { authenticated: true, label: String(source.label || source.name || source.email || "Owner") };
+  if (result.authenticated !== true && !source.label && !source.name && !source.email) {
+    return { authenticated: false, context, loginUrl: nextLoginUrl, logoutUrl: nextLogoutUrl, session: null };
+  }
+  const workspaceSource = objectValue(result.workspace ?? source.workspace);
+  const workspace = workspaceSource.id && workspaceSource.slug
+    ? normalizeWorkspaceAccess(workspaceSource)
+    : undefined;
+  return {
+    authenticated: true,
+    context,
+    loginUrl: nextLoginUrl,
+    logoutUrl: nextLogoutUrl,
+    session: {
+      authenticated: true,
+      label: String(source.label || source.displayName || source.name || source.email || "Owner"),
+      context,
+      ...(source.email ? { email: String(source.email) } : {}),
+      ...(workspace ? { workspace } : {})
+    }
+  };
+}
+
+function safeAccessUrl(value: unknown, rootOnly: boolean, expectedSlug?: string, rootPath = "/auth/login"): string | null {
+  if (typeof value !== "string" || !value.trim() || value.includes("\\")) return null;
+  try {
+    const parsed = new URL(value, window.location.origin);
+    if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && isLoopbackHostname(parsed.hostname))) return null;
+    const currentRoot = rootHostname(window.location.hostname);
+    const destinationRoot = rootHostname(parsed.hostname);
+    if (destinationRoot !== currentRoot) return null;
+    const expectedPort = window.location.port;
+    if (parsed.port !== expectedPort || parsed.username || parsed.password || parsed.search || parsed.hash) return null;
+    if (rootOnly && (parsed.hostname !== currentRoot || parsed.pathname !== rootPath)) return null;
+    if (!rootOnly && expectedSlug && (parsed.hostname !== `${expectedSlug}.${currentRoot}` || parsed.pathname !== "/api/workspace-handoff")) return null;
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
+function rootHostname(hostname: string): string {
+  const normalized = hostname.toLowerCase();
+  if (normalized === "localhost" || normalized.endsWith(".localhost")) return "localhost";
+  if (isLoopbackHostname(normalized)) return normalized;
+  const labels = normalized.split(".");
+  return labels.length > 2 ? labels.slice(-2).join(".") : normalized;
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  return hostname === "localhost" || hostname.endsWith(".localhost") || hostname === "::1" || hostname.startsWith("127.");
+}
+
+function normalizeWorkspaceAccess(value: unknown): WorkspaceAccess {
+  const workspace = objectValue(value);
+  return {
+    id: String(workspace.id || ""),
+    slug: String(workspace.slug || ""),
+    name: String(workspace.name || "Workspace"),
+    url: String(workspace.url || "")
+  };
 }
 
 async function api<T = unknown>(path: string, options: RequestOptions = {}): Promise<T> {
@@ -643,7 +735,13 @@ function renderSignIn(): string {
       }, "access-status")
     : renderStatus(null, "access-status");
   const errorId = authNotice?.kind === "invalid-key" ? "access-status" : undefined;
-  return `<main class="access-view"><section class="access-card jk-panel" aria-labelledby="access-title"><p class="product-name">kanban.cards</p><div><p class="eyebrow">Private workspace</p><h1 id="access-title">Open your workspace</h1><p class="access-description">One owner key opens the whole workspace.</p></div>${notice}<form data-form="sign-in" class="access-form" novalidate>${renderField({
+  if (accessContext !== "local") {
+    const retry = authNotice?.kind === "sign-out-incomplete" && logoutUrl
+      ? `<button class="jk-button" data-priority="primary" type="button" data-action="retry-global-sign-out"${disabledAttribute()}>Retry global sign-out</button>`
+      : "";
+    return `<main class="access-view"><section class="access-card jk-panel" aria-labelledby="access-title"><p class="product-name">kanban.cards</p><div><p class="eyebrow">Private workspaces</p><h1 id="access-title">Sign in to continue</h1><p class="access-description">Use your verified account to open only the Workspaces connected to you.</p></div>${notice}${retry}<button id="provider-sign-in" class="jk-button" data-priority="${retry ? "secondary" : "primary"}" type="button" data-action="provider-sign-in"${disabledAttribute()}>Continue to sign in</button></section></main>`;
+  }
+  return `<main class="access-view"><section class="access-card jk-panel" aria-labelledby="access-title"><p class="product-name">kanban.cards</p><div><p class="eyebrow">Local workspace</p><h1 id="access-title">Open your workspace</h1><p class="access-description">Use the local owner key to open this development workspace.</p></div>${notice}<form data-form="sign-in" class="access-form" novalidate>${renderField({
     id: "owner-key",
     label: "Owner key",
     control: renderTextInput({
@@ -660,6 +758,27 @@ function renderSignIn(): string {
   })}<p id="owner-key-help" class="jk-help">The key is never stored in the browser.</p><button class="jk-button" data-priority="primary" type="submit"${disabledAttribute()}>${mutationKind === "sign-in" ? "Opening…" : "Open workspace"}</button></form></section></main>`;
 }
 
+function renderWorkspaceRoute(): string {
+  const failure = accessFailure ? renderStatus({ tone: "error", ...accessFailure }, "workspace-route-status") : renderStatus(null, "workspace-route-status");
+  const choices = workspaceChoices.map((workspace) => `<li class="workspace-choice"><div><strong>${escapeHtml(workspace.name)}</strong><p class="quiet">${escapeHtml(workspace.slug)}</p></div>${renderButton("Open", "open-workspace", {
+    disabled: mutationInFlight,
+    data: `data-workspace-slug="${escapeHtml(workspace.slug)}"`
+  })}</li>`).join("");
+  const chooser = choices
+    ? `<div><p class="eyebrow">Your Workspaces</p><h1 id="workspace-route-title">Choose a Workspace</h1><p class="access-description">Each Workspace has its own private address and stored Projects.</p></div><ul class="workspace-choices">${choices}</ul>`
+    : `<div><p class="eyebrow">Your first Workspace</p><h1 id="workspace-route-title">Create a Workspace</h1><p class="access-description">Give this private work surface a name and address.</p></div><form data-form="workspace" class="access-form" novalidate>${renderField({
+      id: "workspace-name",
+      label: "Workspace name",
+      control: renderTextInput({ id: "workspace-name", name: "name", required: true, autofocus: true })
+    })}${renderField({
+      id: "workspace-slug",
+      label: "Workspace address",
+      control: renderTextInput({ id: "workspace-slug", name: "slug", required: true, placeholder: "example" }),
+      hint: "Use lowercase letters, numbers, and hyphens."
+    })}<button class="jk-button" data-priority="primary" type="submit"${disabledAttribute()}>${mutationKind === "workspace" ? "Creating…" : "Create Workspace"}</button></form>`;
+  return `<main class="access-view"><section class="access-card workspace-route-card jk-panel" aria-labelledby="workspace-route-title"><p class="product-name">kanban.cards</p>${chooser}${failure}<div class="workspace-route-footer"><span>${escapeHtml(ownerName())}</span>${renderButton("Sign out", "sign-out")}</div></section></main>`;
+}
+
 function renderHeader(): string {
   const name = ownerName();
   return `<header class="app-header"><div class="header-primary"><span class="product-name">kanban.cards</span>${renderProjectContext()}</div><div class="profile-menu"><button class="avatar-button" type="button" data-action="toggle-account-panel" aria-label="${accountPanelOpen ? "Close" : "Open"} account panel" aria-expanded="${accountPanelOpen ? "true" : "false"}" aria-controls="account-panel"${disabledAttribute(projectEditorMode !== null)}><span aria-hidden="true">${escapeHtml(ownerInitial())}</span></button>${accountPanelOpen ? `<section id="account-panel" class="menu-panel account-panel" aria-labelledby="account-name"><strong id="account-name">${escapeHtml(name)}</strong>${renderButton("Sign out", "sign-out", { disabled: projectEditorMode !== null })}</section>` : ""}</div></header>`;
@@ -671,7 +790,10 @@ function renderProjectContext(): string {
   const choices = projects.length
     ? projects.map((candidate) => ({ value: candidate.id, label: candidate.name }))
     : [{ value: "", label: "No Projects yet" }];
-  return `<div class="header-project-switcher jk-field"><label class="jk-visually-hidden" for="project-select">Project</label>${renderSelect({
+  const workspaceLabel = !projects.length && session?.workspace?.name
+    ? `<span class="header-workspace-label"><span class="jk-visually-hidden">Current Workspace: </span>${escapeHtml(session.workspace.name)}</span>`
+    : "";
+  return `${workspaceLabel}<div class="header-project-switcher jk-field"><label class="jk-visually-hidden" for="project-select">Project</label>${renderSelect({
     id: "project-select",
     name: "projectId",
     value: project?.id || "",
@@ -767,7 +889,8 @@ function renderProjectEditor(): string {
 }
 
 function renderEmptyWorkspace(): string {
-  return `<section class="empty-state jk-panel" aria-labelledby="empty-workspace-title"><p class="eyebrow">Workspace ready</p><h1 id="empty-workspace-title">Create the first Project</h1><p>A Project holds the Columns and Cards you share with the skill. Start here, or ask the skill to create one.</p>${renderButton("Create Project", "new-project", { priority: "primary" })}</section>`;
+  const workspaceName = session?.workspace?.name || "Workspace";
+  return `<section class="empty-state jk-panel" aria-labelledby="empty-workspace-title"><div class="empty-state-copy"><p class="eyebrow">${escapeHtml(workspaceName)} Workspace</p><h1 id="empty-workspace-title">Create the first Project</h1><p>A Project holds a workflow and its work items.</p></div>${renderButton("Create Project", "new-project", { priority: "primary" })}</section>`;
 }
 
 function selectedMobileColumn(project: Project): string {
@@ -1010,9 +1133,10 @@ function currentUiState(): string {
     if (authNotice?.kind === "signed-out") return "sign-out-success";
     if (authNotice?.kind === "invalid-key") return "invalid-key";
     if (authNotice?.kind === "session-expired") return "session-expired";
-    if (authNotice?.kind === "service-unavailable") return "service-unavailable";
+    if (authNotice?.kind === "service-unavailable" || authNotice?.kind === "sign-out-incomplete") return "service-unavailable";
     return "signed-out";
   }
+  if (accessContext === "root") return "workspace-route";
   if (mutationKind === "refresh") return "refreshing";
   if (mutationInFlight) return "saving";
   if (cardConflict || moveConflict) return "stale";
@@ -1070,7 +1194,11 @@ function render(): void {
     clearConfirmation();
   }
   document.body.dataset.state = currentUiState();
-  root.innerHTML = initialLoading ? renderLoading() : session ? renderWorkspace() : renderSignIn();
+  root.innerHTML = initialLoading
+    ? renderLoading()
+    : session
+      ? accessContext === "root" ? renderWorkspaceRoute() : renderWorkspace()
+      : renderSignIn();
   restoreDescriptionSelection();
   restorePendingContext();
 }
@@ -1158,6 +1286,7 @@ function captureCardDraft(form: HTMLFormElement): CardDraft | null {
 
 function clearPrivateState(notice: AuthNotice): void {
   session = null;
+  workspaceChoices = [];
   projects = [];
   activeProject = null;
   selectedCardId = null;
@@ -1197,12 +1326,85 @@ function clearPrivateState(notice: AuthNotice): void {
 
 async function loadSession(): Promise<void> {
   try {
-    session = normalizeSession(await api("/session"));
+    const result = normalizeSession(await api("/session"));
+    accessContext = result.context;
+    loginUrl = result.loginUrl;
+    logoutUrl = result.logoutUrl;
+    session = result.session;
   } catch (error) {
     if (error instanceof ApiError && error.status === 401) session = null;
     else throw error;
   }
 }
+
+async function loadWorkspaceChoices(): Promise<void> {
+  const payload = objectValue(await api("/workspaces"));
+  workspaceChoices = arrayValue(payload.workspaces).map(normalizeWorkspaceAccess).filter((workspace) => workspace.id && workspace.slug);
+}
+
+async function openWorkspace(slug: string): Promise<void> {
+  if (!slug) return;
+  setWorkspaceMutationsDisabled(true, "workspace");
+  render();
+  try {
+    const payload = objectValue(await api("/workspace-handoffs", { method: "POST", body: { slug } }));
+    const destination = String(payload.destination || "");
+    const token = String(payload.handoffToken || "");
+    const safeDestination = safeAccessUrl(destination, false, slug);
+    if (!safeDestination || !token) throw new Error("The Workspace handoff was incomplete.");
+    const parsed = new URL(safeDestination);
+    submitWorkspaceHandoff(parsed, token);
+  } catch (error) {
+    accessFailure = { title: "Workspace did not open", message: error instanceof Error ? error.message : "Try again." };
+    throw error;
+  } finally {
+    setWorkspaceMutationsDisabled(false);
+  }
+}
+
+function submitWorkspaceHandoff(destination: URL, token: string): void {
+  const form = document.createElement("form");
+  form.method = "POST";
+  form.action = destination.toString();
+  form.hidden = true;
+  const input = document.createElement("input");
+  input.type = "hidden";
+  input.name = "token";
+  input.value = token;
+  form.append(input);
+  document.body.append(form);
+  try {
+    form.submit();
+  } finally {
+    form.remove();
+  }
+}
+
+async function createWorkspace(form: HTMLFormElement): Promise<void> {
+  const data = formData(form);
+  const name = cleanValue(formValue(data, "name"));
+  const slug = cleanValue(formValue(data, "slug")).toLowerCase();
+  if (!name || !slug) {
+    accessFailure = { title: "Workspace details needed", message: "Enter a Workspace name and lowercase address." };
+    render();
+    return;
+  }
+  setWorkspaceMutationsDisabled(true, "workspace");
+  render();
+  try {
+    accessFailure = null;
+    const payload = objectValue(await api("/workspaces", { method: "POST", body: { name, slug } }));
+    const workspace = normalizeWorkspaceAccess(payload.workspace);
+    await openWorkspace(workspace.slug);
+  } catch (error) {
+    accessFailure = { title: "Workspace was not created", message: error instanceof Error ? error.message : "Try again." };
+    throw error;
+  } finally {
+    setWorkspaceMutationsDisabled(false);
+    render();
+  }
+}
+
 
 async function fetchProject(projectId: string): Promise<Project> {
   const [projectPayload, activityPayload] = await Promise.all([
@@ -1317,12 +1519,37 @@ async function signOut(): Promise<void> {
   setWorkspaceMutationsDisabled(true, "sign-in");
   projectStatus = { tone: "neutral", title: "Signing out", message: "Conflicting actions are unavailable while private workspace data is cleared." };
   render();
+  let notice: AuthNotice = {
+    kind: "signed-out",
+    title: "Signed out",
+    message: "Private Project and Card data left the screen."
+  };
   try {
-    await api("/session", { method: "DELETE" });
+    const response = objectValue(await api("/session", { method: "DELETE" }));
+    const next = safeAccessUrl(response.logoutUrl, true, undefined, "/auth/logout") || "";
+    if (next) {
+      window.location.assign(next);
+      return;
+    }
+  } catch (error) {
+    const incompleteGlobalSignOut = error instanceof ApiError &&
+      error.status === 503 &&
+      error.message === "Global sign-out could not be completed.";
+    notice = incompleteGlobalSignOut
+      ? {
+          kind: "sign-out-incomplete",
+          title: "Sign-out incomplete",
+          message: "Private data left this screen and this Workspace session was cleared, but another Workspace session may still be active. Try signing out again when the service recovers."
+        }
+      : {
+          kind: "service-unavailable",
+          title: "Sign-out could not be confirmed",
+          message: "Private data left this screen, but the service did not confirm session revocation. Try signing out again before leaving this device."
+        };
   } finally {
-    clearPrivateState({ kind: "signed-out", title: "Signed out", message: "Private Project and Card data left the screen." });
+    clearPrivateState(notice);
     render();
-    pendingFocusId = "owner-key";
+    pendingFocusId = accessContext === "local" ? "owner-key" : "provider-sign-in";
     restorePendingContext();
   }
 }
@@ -2229,14 +2456,26 @@ async function switchProject(projectId: string): Promise<void> {
 
 function handlePrivateError(error: unknown): boolean {
   if (!(error instanceof ApiError) || error.status !== 401) return false;
-  clearPrivateState({ kind: "session-expired", title: "Your session ended", message: "Private Project and Card data left the screen. Enter your owner key to continue." });
-  pendingFocusId = "owner-key";
+  clearPrivateState({ kind: "session-expired", title: "Your session ended", message: "Private Project and Card data left the screen. Sign in again to continue." });
+  pendingFocusId = accessContext === "local" ? "owner-key" : "provider-sign-in";
   render();
   return true;
 }
 
 async function handleAction(button: HTMLElement): Promise<void> {
   const action = button.dataset.action || "";
+  if (action === "provider-sign-in") {
+    window.location.assign(loginUrl);
+    return;
+  }
+  if (action === "retry-global-sign-out" && logoutUrl) {
+    if (accessContext === "workspace") {
+      await signOut();
+      return;
+    }
+    window.location.assign(logoutUrl);
+    return;
+  }
   if (action === "show-description-write" || action === "show-description-preview") {
     showDescriptionView(action === "show-description-preview" ? "preview" : "write");
     return;
@@ -2294,6 +2533,7 @@ async function handleAction(button: HTMLElement): Promise<void> {
     await flushCardAutosaves();
     return signOut();
   }
+  if (action === "open-workspace") return openWorkspace(button.dataset.workspaceSlug || "");
 }
 
 root.addEventListener("click", (event) => {
@@ -2368,6 +2608,8 @@ root.addEventListener("submit", (event) => {
   }
   const operation = form.dataset.form === "sign-in"
     ? signIn(form)
+    : form.dataset.form === "workspace"
+      ? createWorkspace(form)
     : form.dataset.form === "project"
       ? saveProject(form)
       : form.dataset.form === "card"
@@ -2429,10 +2671,24 @@ root.addEventListener("keydown", (event) => {
 });
 
 async function boot(): Promise<void> {
+  const signOutState = new URLSearchParams(window.location.search).get("signout");
+  if (signOutState === "incomplete") {
+    window.history.replaceState(null, "", `${window.location.pathname}${window.location.hash}`);
+    clearPrivateState({
+      kind: "sign-out-incomplete",
+      title: "Sign-out incomplete",
+      message: "Private data left this screen and this browser session was cleared, but another Workspace session may still be active. Try signing out again when the service recovers."
+    });
+  }
   render();
   try {
     await loadSession();
-    if (session) await loadProjects();
+    if (session && accessContext === "root") {
+      await loadWorkspaceChoices();
+      if (workspaceChoices.length === 1) await openWorkspace(workspaceChoices[0].slug);
+    } else if (session) {
+      await loadProjects();
+    }
   } catch (error) {
     if (!handlePrivateError(error)) {
       clearPrivateState({ kind: "service-unavailable", title: "kanban.cards is unavailable", message: "The service could not be reached. Try again when it is available." });

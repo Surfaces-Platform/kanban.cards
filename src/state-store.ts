@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { Pool } from "pg";
@@ -13,13 +14,20 @@ import type {
   Project,
   StateStore,
   StateStoreOptions,
-  WorkspaceState
+  WorkspaceState,
+  WorkspaceStoreResolver
 } from "./types";
 
 export const WORKSPACE_SCHEMA_VERSION = 2 as const;
 export const DEFAULT_WORKSPACE_ID = "default";
 export const DEFAULT_TABLE_NAME = "kanban_v2_workspaces";
 export const DEFAULT_DATA_PATH = path.join(process.cwd(), "data", "kanban-cards-v2-state.json");
+
+interface PostgresStoreRuntime {
+  pool: Pool;
+  tableName: string;
+  ensureReady(): Promise<void>;
+}
 
 export function createStateStore(options: StateStoreOptions | string = {}): StateStore {
   if (typeof options === "string") return createFileStateStore(options);
@@ -43,15 +51,21 @@ export function createFileStateStore(dataPath: string): StateStore {
   const resolvedPath = path.resolve(dataPath);
   let writeQueue: Promise<unknown> = Promise.resolve();
 
-  async function read(): Promise<WorkspaceState> {
+  async function readExisting(): Promise<WorkspaceState | null> {
     try {
       return normalizeWorkspace(JSON.parse(await fs.readFile(resolvedPath, "utf8")));
     } catch (error) {
-      if (!isNodeError(error) || error.code !== "ENOENT") throw error;
-      const state = freshWorkspaceState();
-      await write(state);
-      return state;
+      if (isNodeError(error) && error.code === "ENOENT") return null;
+      throw error;
     }
+  }
+
+  async function read(): Promise<WorkspaceState> {
+    const existing = await readExisting();
+    if (existing) return existing;
+    const state = freshWorkspaceState();
+    await write(state);
+    return state;
   }
 
   async function write(nextState: unknown): Promise<WorkspaceState> {
@@ -76,7 +90,7 @@ export function createFileStateStore(dataPath: string): StateStore {
     return nextWrite;
   }
 
-  return { kind: "file", path: resolvedPath, read, write, update };
+  return { kind: "file", path: resolvedPath, readExisting, read, write, update };
 }
 
 export function createPostgresStateStore(options: StateStoreOptions = {}): StateStore {
@@ -88,6 +102,57 @@ export function createPostgresStateStore(options: StateStoreOptions = {}): State
       connectionString: normalizePostgresConnectionString(options.connectionString),
       ssl: resolvePostgresSsl(options)
     });
+  return createPostgresStateStoreForWorkspace(workspaceId, createPostgresStoreRuntime(pool, tableName));
+}
+
+export function createWorkspaceStoreResolver(options: StateStoreOptions = {}): WorkspaceStoreResolver {
+  const connectionString =
+    options.connectionString || process.env.KANBAN_CARDS_DATABASE_URL || process.env.POSTGRES_URL || process.env.DATABASE_URL;
+  const stores = new Map<string, StateStore>();
+
+  if (connectionString || options.pool) {
+    const tableName = validateTableName(options.tableName || DEFAULT_TABLE_NAME);
+    const pool =
+      options.pool ||
+      new Pool({
+        connectionString: normalizePostgresConnectionString(connectionString),
+        ssl: resolvePostgresSsl(options)
+      });
+    const runtime = createPostgresStoreRuntime(pool, tableName);
+    return {
+      kind: "postgres",
+      resolve(storageId: string): StateStore {
+        const normalizedStorageId = validateStorageId(storageId);
+        let store = stores.get(normalizedStorageId);
+        if (!store) {
+          store = createPostgresStateStoreForWorkspace(normalizedStorageId, runtime);
+          stores.set(normalizedStorageId, store);
+        }
+        return store;
+      }
+    };
+  }
+
+  const legacyPath = path.resolve(options.dataPath || process.env.KANBAN_CARDS_DATA_PATH || DEFAULT_DATA_PATH);
+  const workspaceDirectory = path.resolve(options.workspaceDirectory || path.join(path.dirname(legacyPath), "workspaces"));
+  return {
+    kind: "file",
+    resolve(storageId: string): StateStore {
+      const normalizedStorageId = validateStorageId(storageId);
+      let store = stores.get(normalizedStorageId);
+      if (!store) {
+        const dataPath = normalizedStorageId === DEFAULT_WORKSPACE_ID
+          ? legacyPath
+          : path.join(workspaceDirectory, `${storageFileKey(normalizedStorageId)}.json`);
+        store = createFileStateStore(dataPath);
+        stores.set(normalizedStorageId, store);
+      }
+      return store;
+    }
+  };
+}
+
+function createPostgresStoreRuntime(pool: Pool, tableName: string): PostgresStoreRuntime {
   let readyPromise: Promise<void> | null = null;
 
   function ensureReady(): Promise<void> {
@@ -105,6 +170,17 @@ export function createPostgresStateStore(options: StateStoreOptions = {}): State
       });
     }
     return readyPromise;
+  }
+
+  return { pool, tableName, ensureReady };
+}
+
+function createPostgresStateStoreForWorkspace(workspaceId: string, runtime: PostgresStoreRuntime): StateStore {
+  const { pool, tableName, ensureReady } = runtime;
+
+  async function readExisting(): Promise<WorkspaceState | null> {
+    const result = await pool.query<{ state: unknown }>(`SELECT state FROM ${tableName} WHERE id = $1`, [workspaceId]);
+    return result.rows.length ? normalizeWorkspace(result.rows[0].state) : null;
   }
 
   async function read(): Promise<WorkspaceState> {
@@ -164,7 +240,7 @@ export function createPostgresStateStore(options: StateStoreOptions = {}): State
     }
   }
 
-  return { kind: "postgres", path: `${tableName}:${workspaceId}`, read, write, update };
+  return { kind: "postgres", path: `${tableName}:${workspaceId}`, readExisting, read, write, update };
 }
 
 export function freshWorkspaceState(): WorkspaceState {
@@ -299,6 +375,18 @@ function normalizeIdempotencyRecord(value: unknown): IdempotencyRecord {
 function validateTableName(value: string): string {
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) throw new Error("Invalid PostgreSQL table name.");
   return value;
+}
+
+function validateStorageId(value: string): string {
+  const normalized = String(value || "").trim();
+  if (!normalized || normalized.length > 512 || /[\r\n\0]/.test(normalized)) {
+    throw new Error("Workspace storage id is invalid.");
+  }
+  return normalized;
+}
+
+function storageFileKey(storageId: string): string {
+  return `workspace-${crypto.createHash("sha256").update(storageId).digest("hex")}`;
 }
 
 function requireRecord(value: unknown, label: string): Record<string, unknown> {
