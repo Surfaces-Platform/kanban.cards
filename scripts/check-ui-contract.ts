@@ -46,6 +46,7 @@ const requiredRenderFunctions = [
   "renderMoveDisclosure",
   "renderMoveConflict",
   "renderProjectEditor",
+  "renderAddColumnControl",
   "renderMobileColumnSelector",
   "renderComments",
   "renderActivity"
@@ -102,6 +103,7 @@ const requiredApplicationTokenUses = [
 
 const requiredActions: Array<{ capability: string; actions: string[] }> = [
   { capability: "Project creation", actions: ["new-project"] },
+  { capability: "Column creation", actions: ["add-column"] },
   { capability: "Project editing", actions: ["edit-project", "project-settings"] },
   { capability: "explicit Project Refresh", actions: ["refresh-project"] },
   { capability: "Card creation", actions: ["new-card"] },
@@ -440,6 +442,22 @@ function checkApplicationSource(app: SourceFile, violations: Violation[]): void 
   const projectActions = functionSection(app.source, "renderProjectActions");
   if (projectActions && !/refresh-project/.test(projectActions)) {
     addViolation(violations, app.file, app.source, app.source.indexOf(projectActions), "Kanban surface Actions must keep explicit Refresh available");
+  }
+  if (projectActions && /add-column/.test(projectActions)) {
+    addViolation(violations, app.file, app.source, app.source.indexOf(projectActions), "Add Column must be a direct board action rather than an Actions-panel item");
+  }
+
+  const addColumnControl = functionSection(app.source, "renderAddColumnControl");
+  const boardPane = functionSection(app.source, "renderBoardPane");
+  const columns = functionSection(app.source, "renderColumnGrid");
+  if (addColumnControl && !/<button[^>]*data-action=[^>]*add-column[^>]*>/.test(addColumnControl)) {
+    addViolation(violations, app.file, app.source, app.source.indexOf(addColumnControl), "the board-local Column creation surface must expose a native Add Column action");
+  }
+  if (boardPane && !/renderAddColumnControl\(\s*["']narrow["']\s*\)/.test(boardPane)) {
+    addViolation(violations, app.file, app.source, app.source.indexOf(boardPane), "narrow screens must expose Add Column directly within the board surface");
+  }
+  if (columns && !/renderAddColumnControl\(\s*["']desktop["']\s*\)/.test(columns)) {
+    addViolation(violations, app.file, app.source, app.source.indexOf(columns), "desktop Columns must end with the direct Add Column control");
   }
 
   const editor = functionSection(app.source, "renderProjectEditor");

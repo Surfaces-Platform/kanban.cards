@@ -11,7 +11,7 @@ type AccessContext = "local" | "root" | "workspace";
 type ProjectEditorMode = "create" | "edit" | null;
 type InspectorTab = "card" | "activity";
 type DescriptionView = "write" | "preview";
-type MutationKind = "sign-in" | "workspace" | "refresh" | "project" | "card" | "move" | "comment" | "archive" | "undo" | null;
+type MutationKind = "sign-in" | "workspace" | "refresh" | "project" | "column" | "card" | "move" | "comment" | "archive" | "undo" | null;
 type StatusTone = "neutral" | "success" | "warning" | "error" | "receipt";
 
 interface Session {
@@ -121,6 +121,15 @@ interface ProjectEditorDraft {
   columns: Array<{ id: string | null; name: string }>;
 }
 
+interface AddColumnDraft {
+  projectId: string;
+  revision: Revision;
+  columns: ProjectColumn[];
+  id: string;
+  name: string;
+  outcomeUnconfirmed: boolean;
+}
+
 interface StatusMessage {
   tone: StatusTone;
   title: string;
@@ -190,6 +199,11 @@ class ApiError extends Error {
 const API_BASE_URL = (window.KANBAN_CARDS_API_BASE_URL || "/api").replace(/\/$/, "");
 const DEFAULT_COLUMNS = ["Next", "Doing", "Done"];
 const CONFIRMATION_DURATION_MS = 5_000;
+const ADD_COLUMN_PREPARING_STATUS: StatusMessage = {
+  tone: "neutral",
+  title: "Preparing Add Column",
+  message: "Finishing pending Card changes and loading the latest Project before adding a Column."
+};
 const UI_CONTRACT_STATES = [
   "opening", "signed-out", "invalid-key", "workspace-route", "empty-workspace", "empty-project", "populated", "selected",
   "refreshing", "refresh-success", "refresh-failure", "saving", "validation-error", "stale",
@@ -199,6 +213,8 @@ const UI_CONTRACT_STATES = [
 const rootElement = document.querySelector<HTMLElement>("#app");
 if (!rootElement) throw new Error("The kanban.cards application shell is missing.");
 const root: HTMLElement = rootElement;
+const narrowBoardQuery = window.matchMedia("(max-width: 48rem)");
+const cardOnlyQuery = window.matchMedia("(max-width: 56rem)");
 
 let session: Session | null = null;
 let accessContext: AccessContext = "local";
@@ -218,6 +234,10 @@ let creatingCard = false;
 let creatingColumnId = "";
 let projectEditorMode: ProjectEditorMode = null;
 let projectEditorDraft: ProjectEditorDraft | null = null;
+let addColumnPreparing = false;
+let addColumnCommitted = false;
+let addColumnDraft: AddColumnDraft | null = null;
+let addColumnFieldError = "";
 let projectFieldErrors = new Map<string, string>();
 let cardFieldErrors = new Map<string, string>();
 let commentFieldError = "";
@@ -231,6 +251,7 @@ let movePanelOpen = false;
 let moveDestinationId = "";
 let cardReturnFocus: FocusTarget | null = null;
 let projectEditorReturnFocus: FocusTarget | null = null;
+let addColumnReturnFocus: FocusTarget | null = null;
 let pendingFocusRestore: FocusTarget | null = null;
 let pendingFocusId: string | null = null;
 let pendingScrollRestore: number | null = null;
@@ -592,7 +613,7 @@ function outcomeIsUnconfirmed(error: unknown): boolean {
 }
 
 function workspaceLocked(): boolean {
-  return mutationInFlight || projectEditorMode !== null;
+  return mutationInFlight || projectEditorMode !== null || addColumnPreparing || addColumnCommitted || addColumnDraft !== null;
 }
 
 function resetMoveContext(): void {
@@ -680,7 +701,8 @@ function renderButton(
 
 function renderStatus(message: StatusMessage | null, id: string): string {
   if (!message) return `<div id="${escapeHtml(id)}" class="status-slot" role="status" aria-live="polite" aria-atomic="true"></div>`;
-  return `<div id="${escapeHtml(id)}" class="jk-status" data-kind="${escapeHtml(message.tone)}" role="status" aria-live="polite" aria-atomic="true" tabindex="-1"><span class="jk-status-marker" aria-hidden="true">${message.tone === "error" || message.tone === "warning" ? "!" : "✓"}</span><div><strong>${escapeHtml(message.title)}</strong><p>${escapeHtml(message.message)}</p></div></div>`;
+  const marker = message.tone === "error" || message.tone === "warning" ? "!" : message.tone === "neutral" ? "…" : "✓";
+  return `<div id="${escapeHtml(id)}" class="jk-status" data-kind="${escapeHtml(message.tone)}" role="status" aria-live="polite" aria-atomic="true" tabindex="-1"><span class="jk-status-marker" aria-hidden="true">${marker}</span><div><strong>${escapeHtml(message.title)}</strong><p>${escapeHtml(message.message)}</p></div></div>`;
 }
 
 function clearConfirmation(): void {
@@ -781,7 +803,8 @@ function renderWorkspaceRoute(): string {
 
 function renderHeader(): string {
   const name = ownerName();
-  return `<header class="app-header"><div class="header-primary"><span class="product-name">kanban.cards</span>${renderProjectContext()}</div><div class="profile-menu"><button class="avatar-button" type="button" data-action="toggle-account-panel" aria-label="${accountPanelOpen ? "Close" : "Open"} account panel" aria-expanded="${accountPanelOpen ? "true" : "false"}" aria-controls="account-panel"${disabledAttribute(projectEditorMode !== null)}><span aria-hidden="true">${escapeHtml(ownerInitial())}</span></button>${accountPanelOpen ? `<section id="account-panel" class="menu-panel account-panel" aria-labelledby="account-name"><strong id="account-name">${escapeHtml(name)}</strong>${renderButton("Sign out", "sign-out", { disabled: projectEditorMode !== null })}</section>` : ""}</div></header>`;
+  const editingProject = projectEditorMode !== null || addColumnPreparing || addColumnCommitted || addColumnDraft !== null;
+  return `<header class="app-header"><div class="header-primary"><span class="product-name">kanban.cards</span>${renderProjectContext()}</div><div class="profile-menu"><button class="avatar-button" type="button" data-action="toggle-account-panel" aria-label="${accountPanelOpen ? "Close" : "Open"} account panel" aria-expanded="${accountPanelOpen ? "true" : "false"}" aria-controls="account-panel"${disabledAttribute(editingProject)}><span aria-hidden="true">${escapeHtml(ownerInitial())}</span></button>${accountPanelOpen ? `<section id="account-panel" class="menu-panel account-panel" aria-labelledby="account-name"><strong id="account-name">${escapeHtml(name)}</strong>${renderButton("Sign out", "sign-out", { disabled: editingProject })}</section>` : ""}</div></header>`;
 }
 
 function renderProjectContext(): string {
@@ -827,15 +850,16 @@ function renderProjectReceipt(): string {
   const projectId = project?.id || "";
   const archive = projectId ? currentArchiveReceipt(projectId) : null;
   const recoverableDrafts = project ? recoverableArchivedDrafts(project) : [];
-  if (!archive && !projectStatus && !recoverableDrafts.length) return `<div class="project-status-wrap">${renderStatus(null, "project-status")}</div>`;
+  const visibleProjectStatus = addColumnPreparing || addColumnCommitted || addColumnDraft ? null : projectStatus;
+  if (!archive && !visibleProjectStatus && !recoverableDrafts.length) return `<div class="project-status-wrap">${renderStatus(null, "project-status")}</div>`;
   const archiveMarkup = archive
-    ? `<div class="jk-status" data-kind="receipt" role="status" aria-live="polite"><span class="jk-status-marker" aria-hidden="true">✓</span><div><strong>${escapeHtml(archive.cardTitle)} archived</strong><p>The Card left the active Project. It can be restored.</p>${renderButton("Undo archive", "undo-archive", { disabled: mutationInFlight, data: `data-receipt-key="${escapeHtml(archive.key)}"` })}</div></div>`
+    ? `<div class="jk-status" data-kind="receipt" role="status" aria-live="polite"><span class="jk-status-marker" aria-hidden="true">✓</span><div><strong>${escapeHtml(archive.cardTitle)} archived</strong><p>The Card left the active Project. It can be restored.</p>${renderButton("Undo archive", "undo-archive", { disabled: workspaceLocked(), data: `data-receipt-key="${escapeHtml(archive.key)}"` })}</div></div>`
     : "";
   const recoveryMarkup = recoverableDrafts.map(({ card }, index) => {
     const headingId = `draft-recovery-${index}`;
-    return `<section class="jk-status draft-recovery" data-kind="warning" aria-labelledby="${headingId}"><span class="jk-status-marker" aria-hidden="true">!</span><div><strong id="${headingId}">${escapeHtml(card.title)} has a retained draft</strong><p>The stored Card is archived. Review the draft to restore it or discard it.</p>${renderButton("Review retained draft", "recover-draft", { data: `data-card-id="${escapeHtml(card.id)}"` })}</div></section>`;
+    return `<section class="jk-status draft-recovery" data-kind="warning" aria-labelledby="${headingId}"><span class="jk-status-marker" aria-hidden="true">!</span><div><strong id="${headingId}">${escapeHtml(card.title)} has a retained draft</strong><p>The stored Card is archived. Review the draft to restore it or discard it.</p>${renderButton("Review retained draft", "recover-draft", { disabled: workspaceLocked(), data: `data-card-id="${escapeHtml(card.id)}"` })}</div></section>`;
   }).join("");
-  return `<div class="project-status-wrap">${projectStatus ? renderStatus(projectStatus, "project-status") : ""}${archiveMarkup}${recoveryMarkup}</div>`;
+  return `<div class="project-status-wrap">${visibleProjectStatus ? renderStatus(visibleProjectStatus, "project-status") : ""}${archiveMarkup}${recoveryMarkup}</div>`;
 }
 
 function ordinalLabel(index: number): string {
@@ -888,6 +912,41 @@ function renderProjectEditor(): string {
   })}<fieldset class="column-fields"><legend>Ordered Columns</legend><div class="column-field-grid">${columnFields}</div></fieldset><div class="jk-actions"><button class="jk-button" data-priority="primary" type="submit"${disabledAttribute()}>${mutationKind === "project" ? "Saving…" : "Save Project"}</button>${renderButton("Cancel", "cancel-project")}</div></form></section>`;
 }
 
+function renderAddColumnControl(placement: "desktop" | "narrow"): string {
+  const placementClass = placement === "desktop" ? "add-column-desktop" : "add-column-narrow";
+  if (addColumnCommitted) {
+    return `<section id="add-column-editor" class="add-column-control add-column-form-surface ${placementClass} jk-panel" aria-labelledby="add-column-heading"><h3 id="add-column-heading" tabindex="-1">Add Column</h3>${renderStatus({ tone: "neutral", title: "Column added", message: "Refreshing the Project before returning control to the board." }, "add-column-status")}</section>`;
+  }
+  if (addColumnPreparing) {
+    return `<section id="add-column-editor" class="add-column-control add-column-form-surface ${placementClass} jk-panel" aria-labelledby="add-column-heading"><h3 id="add-column-heading" tabindex="-1">Add Column</h3>${renderStatus(ADD_COLUMN_PREPARING_STATUS, "add-column-status")}</section>`;
+  }
+  const draft = addColumnDraft;
+  if (!draft) {
+    return `<div class="add-column-control add-column-entry ${placementClass}"><button class="jk-button add-column-trigger" type="button" data-action="add-column"${disabledAttribute(workspaceLocked())}><span aria-hidden="true">+</span><span>Add Column</span></button></div>`;
+  }
+  const priorColumn = draft.columns.at(-1)?.name || "the current Columns";
+  const errorId = "add-column-name-error";
+  const statusId = projectStatus ? "add-column-status" : undefined;
+  const describedBy = [addColumnFieldError ? errorId : "", statusId || ""].filter(Boolean).join(" ") || undefined;
+  return `<section id="add-column-editor" class="add-column-control add-column-form-surface ${placementClass} jk-panel" aria-labelledby="add-column-heading"><div><h3 id="add-column-heading" tabindex="-1">Add Column</h3><p class="jk-muted">The new Column will appear after ${escapeHtml(priorColumn)}.</p></div>${renderStatus(projectStatus, "add-column-status")}<form class="add-column-form" data-form="add-column" novalidate>${renderField({
+    id: "add-column-name",
+    label: "Column name",
+    control: renderTextInput({
+      id: "add-column-name",
+      name: "name",
+      value: draft.name,
+      required: true,
+      autofocus: true,
+      disabled: draft.outcomeUnconfirmed,
+      invalid: Boolean(addColumnFieldError),
+      ariaDescribedBy: describedBy,
+      ariaErrorMessage: addColumnFieldError ? errorId : undefined
+    }),
+    error: addColumnFieldError,
+    errorId
+  })}<div class="jk-actions add-column-actions"><button class="jk-button" data-priority="primary" type="submit"${disabledAttribute(draft.outcomeUnconfirmed)}>${mutationKind === "column" ? "Adding…" : "Add Column"}</button>${renderButton("Cancel", "cancel-add-column")}</div></form></section>`;
+}
+
 function renderEmptyWorkspace(): string {
   const workspaceName = session?.workspace?.name || "Workspace";
   return `<section class="empty-state jk-panel" aria-labelledby="empty-workspace-title"><div class="empty-state-copy"><p class="eyebrow">${escapeHtml(workspaceName)} Workspace</p><h1 id="empty-workspace-title">Create the first Project</h1><p>A Project holds a workflow and its work items.</p></div>${renderButton("Create Project", "new-project", { priority: "primary" })}</section>`;
@@ -911,27 +970,33 @@ function renderMobileColumnSelector(project: Project): string {
     const count = activeCards(project).filter((card) => card.columnId === column.id).length;
     return { value: column.id, label: `${column.name} · ${count} ${count === 1 ? "Card" : "Cards"}` };
   });
-  return `<div class="mobile-column-control jk-field"><label for="mobile-column">Column</label>${renderSelect({ id: "mobile-column", name: "mobile-column", value: selected, choices, ariaLabel: "Visible Column" })}</div>`;
+  return `<div class="mobile-column-control jk-field"><label for="mobile-column">Column</label>${renderSelect({ id: "mobile-column", name: "mobile-column", value: selected, choices, ariaLabel: "Visible Column", disabled: workspaceLocked() })}</div>`;
 }
 
 function renderBoardCard(card: ProjectCard): string {
   const summary = bodySummary(card.body);
   const hasRetainedDraft = Boolean(activeProject && retainedDrafts.has(draftKey(activeProject.id, card.id)));
-  return `<button class="board-card jk-card" type="button" data-action="open-card" data-card-id="${escapeHtml(card.id)}" aria-current="${card.id === selectedCardId ? "true" : "false"}"${disabledAttribute()}><span class="card-title">${escapeHtml(card.title)}</span>${summary ? `<span class="card-summary">${escapeHtml(summary)}</span>` : ""}<span class="card-meta">${hasRetainedDraft ? `<span class="card-draft-state jk-meta">Draft retained</span>` : ""}<span>${card.comments.length} ${card.comments.length === 1 ? "Comment" : "Comments"}</span><span>${escapeHtml(formatRecency(card.updatedAt || card.createdAt))}</span></span></button>`;
+  return `<button class="board-card jk-card" type="button" data-action="open-card" data-card-id="${escapeHtml(card.id)}" aria-current="${card.id === selectedCardId ? "true" : "false"}"${disabledAttribute(workspaceLocked())}><span class="card-title">${escapeHtml(card.title)}</span>${summary ? `<span class="card-summary">${escapeHtml(summary)}</span>` : ""}<span class="card-meta">${hasRetainedDraft ? `<span class="card-draft-state jk-meta">Draft retained</span>` : ""}<span>${card.comments.length} ${card.comments.length === 1 ? "Comment" : "Comments"}</span><span>${escapeHtml(formatRecency(card.updatedAt || card.createdAt))}</span></span></button>`;
 }
 
 function renderColumnGrid(project: Project): string {
   const mobileColumnId = selectedMobileColumn(project);
+  const desktopAddColumn = !addColumnPreparing && !addColumnCommitted && !addColumnDraft || !narrowBoardQuery.matches
+    ? renderAddColumnControl("desktop")
+    : "";
   return `<div class="columns" aria-label="Project Columns">${project.columns.map((column) => {
     const cards = activeCards(project).filter((card) => card.columnId === column.id).sort((left, right) => left.position - right.position);
     const headingId = `column-${safeId(column.id)}`;
     const cardCountLabel = `${cards.length} ${cards.length === 1 ? "Card" : "Cards"}`;
-    return `<section class="column jk-panel" data-column-id="${escapeHtml(column.id)}" data-mobile-active="${column.id === mobileColumnId ? "true" : "false"}" aria-labelledby="${escapeHtml(headingId)}"><header class="column-header"><h3 id="${escapeHtml(headingId)}" tabindex="-1">${escapeHtml(column.name)}</h3><span class="jk-count" aria-label="${cardCountLabel}">${cards.length}</span></header><div class="card-list">${cards.length ? cards.map(renderBoardCard).join("") : `<div class="column-empty"><p>No Cards in ${escapeHtml(column.name)}.</p>${renderButton("Create Card", "new-card", { data: `data-column-id="${escapeHtml(column.id)}"` })}</div>`}</div></section>`;
-  }).join("")}</div>`;
+    return `<section class="column jk-panel" data-column-id="${escapeHtml(column.id)}" data-mobile-active="${column.id === mobileColumnId ? "true" : "false"}" aria-labelledby="${escapeHtml(headingId)}"><header class="column-header"><h3 id="${escapeHtml(headingId)}" tabindex="-1">${escapeHtml(column.name)}</h3><span class="jk-count" aria-label="${cardCountLabel}">${cards.length}</span></header><div class="card-list">${cards.length ? cards.map(renderBoardCard).join("") : `<div class="column-empty"><p>No Cards in ${escapeHtml(column.name)}.</p>${renderButton("Create Card", "new-card", { disabled: workspaceLocked(), data: `data-column-id="${escapeHtml(column.id)}"` })}</div>`}</div></section>`;
+  }).join("")}${desktopAddColumn}</div>`;
 }
 
 function renderBoardPane(project: Project): string {
-  return `<section class="board-pane" aria-labelledby="cards-heading"><header class="board-toolbar"><h1 id="cards-heading" class="jk-visually-hidden">${escapeHtml(project.name)}</h1>${renderMobileColumnSelector(project)}${renderProjectActions(project)}</header>${projectLoading ? `<div class="jk-status" data-kind="neutral" role="status"><span class="jk-status-marker" aria-hidden="true">…</span><p>Refreshing Project…</p></div>` : renderColumnGrid(project)}</section>`;
+  const narrowAddColumn = addColumnPreparing || addColumnCommitted || addColumnDraft
+    ? narrowBoardQuery.matches ? renderAddColumnControl("narrow") : ""
+    : renderAddColumnControl("narrow");
+  return `<section class="board-pane" aria-labelledby="cards-heading"><header class="board-toolbar"><h1 id="cards-heading" class="jk-visually-hidden">${escapeHtml(project.name)}</h1>${renderMobileColumnSelector(project)}${renderProjectActions(project)}</header>${narrowAddColumn}${projectLoading ? `<div class="jk-status" data-kind="neutral" role="status"><span class="jk-status-marker" aria-hidden="true">…</span><p>Refreshing Project…</p></div>` : renderColumnGrid(project)}</section>`;
 }
 
 function draftKey(projectId: string, cardId: string | null): string {
@@ -1060,7 +1125,7 @@ function renderCardInspector(project: Project): string {
   const titleError = cardFieldErrors.get("title") || "";
   const hasRetainedDraft = retainedDrafts.has(draftKey(project.id, card?.id || null));
   const status = cardStatus;
-  const draftRetentionMarkup = hasRetainedDraft && !cardStatus
+  const draftRetentionMarkup = hasRetainedDraft && !status && !addColumnPreparing
     ? `<p class="draft-retained-note jk-help" role="status"><strong>Draft retained</strong><span>Your unsaved Card changes are restored below and remain available until they save or you discard them.</span></p>`
     : "";
   const pendingCardCreate = card ? "" : renderPendingPostAction(`card:create:${project.id}`);
@@ -1073,7 +1138,7 @@ function renderCardInspector(project: Project): string {
   const staleMarkup = conflict && card ? `<section class="stale-review jk-status" data-kind="warning" aria-labelledby="stale-heading"><span class="jk-status-marker" aria-hidden="true">!</span><div><h3 id="stale-heading" tabindex="-1">${staleHeading}</h3><p>${staleGuidance}</p><dl class="stored-change"><div><dt>${storedLabel} state</dt><dd>${card.archivedAt ? "Archived" : "Active"}</dd></div><div><dt>${storedLabel} title</dt><dd>${escapeHtml(card.title)}</dd></div><div><dt>${storedLabel} Column</dt><dd>${escapeHtml(project.columns.find((candidate) => candidate.id === card.columnId)?.name || "Unknown Column")}</dd></div><div><dt>${storedLabel} body</dt><dd>${escapeHtml(card.body || "No body")}</dd></div></dl><div class="jk-actions">${latestConflictLoaded ? renderButton(retryLabel, "retry-save", { priority: "primary" }) : renderButton("Refresh latest", "refresh-project", { priority: "primary" })}${renderButton("Discard draft", "discard-draft")}</div></div></section>` : "";
   const moveConflictMarkup = card ? renderMoveConflict(project, card) : "";
   const recoveryActive = conflict || Boolean(moveConflictMarkup);
-  const previewBlocked = recoveryActive || Boolean(status && (status.tone === "error" || status.title.includes("outcome unconfirmed")));
+  const previewBlocked = addColumnPreparing || recoveryActive || Boolean(status && (status.tone === "error" || status.title.includes("outcome unconfirmed")));
   if (previewBlocked) descriptionView = "write";
   const cardSelected = inspectorTab === "card" || !card;
   const tabs = `<div class="inspector-tabs" role="tablist" aria-label="Card views"><button id="card-tab" class="inspector-tab" type="button" role="tab" data-action="show-card-tab" aria-selected="${cardSelected ? "true" : "false"}" aria-controls="card-panel" tabindex="${cardSelected ? "0" : "-1"}"${disabledAttribute()}>Card</button>${card ? `<button id="activity-tab" class="inspector-tab" type="button" role="tab" data-action="show-activity-tab" aria-selected="${cardSelected ? "false" : "true"}" aria-controls="activity-panel" tabindex="${cardSelected ? "-1" : "0"}"${disabledAttribute(recoveryActive)}>Activity</button>` : ""}</div>`;
@@ -1110,20 +1175,23 @@ function renderCardInspector(project: Project): string {
   const createDestination = card ? "" : renderCreateDestination(project, draft);
   const editor = `<form class="card-form surface-card-form" data-form="card" data-autosave="${card ? "true" : "false"}" data-card-id="${escapeHtml(card?.id || "")}" novalidate><div class="jk-field surface-field"><label class="jk-visually-hidden" for="card-title-input">Title</label>${titleControl}${titleError ? `<p class="jk-error" id="card-title-error">${escapeHtml(titleError)}</p>` : ""}</div>${draftRetentionMarkup}${descriptionEditor}${createDestination}${conflict || moveConflictMarkup ? "" : card ? `<div class="inspector-actions">${renderButton("Archive", "archive-card", { priority: "risk", data: `data-card-id="${escapeHtml(card.id)}"` })}</div>` : `<div class="inspector-actions"><button class="jk-button" data-priority="primary" type="submit"${disabledAttribute()}>${mutationKind === "card" ? "Creating…" : "Create Card"}</button></div>`}</form>`;
   const cardPanel = `<div id="card-panel" class="inspector-panel" role="tabpanel" aria-labelledby="card-tab">${status ? `<div class="card-status">${renderStatus(status, "card-status")}</div>` : renderStatus(null, "card-status")}${staleMarkup}${moveConflictMarkup}${pendingCardCreate}${editor}${card ? renderComments(card) : ""}</div>`;
+  const preparingStatus = addColumnPreparing && cardOnlyQuery.matches
+    ? `<div class="card-status inspector-preparing-status">${renderStatus(ADD_COLUMN_PREPARING_STATUS, "add-column-preparing-status")}</div>`
+    : "";
   const toolbarActions = `<div class="inspector-toolbar-actions">${card ? renderMoveDisclosure(project, card, conflict) : ""}<button class="close-button inspector-close" type="button" data-action="close-card" aria-label="${escapeHtml(closeLabel)}"${disabledAttribute()}><span aria-hidden="true">×</span></button></div>`;
-  return `<aside class="card-inspector jk-panel" aria-labelledby="card-tab"><div class="inspector-content"><header class="inspector-toolbar">${tabs}${toolbarActions}</header><div id="card-autosave-status" class="jk-visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div>${cardSelected ? cardPanel : card ? renderActivity(card) : cardPanel}</div></aside>`;
+  return `<aside class="card-inspector jk-panel" aria-labelledby="card-tab"><div class="inspector-content"><header class="inspector-toolbar">${tabs}${toolbarActions}</header><div id="card-autosave-status" class="jk-visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div>${preparingStatus}${cardSelected ? cardPanel : card ? renderActivity(card) : cardPanel}</div></aside>`;
 }
 
 function renderWorkspace(): string {
   const project = activeProject;
-  const cardOpen = Boolean(project && (selectedCardId || creatingCard));
+  const cardOpen = Boolean(project && !addColumnDraft && !projectEditorMode && (selectedCardId || creatingCard));
   const content = projectEditorMode
-    ? renderProjectEditor()
-    : !projects.length
-      ? renderEmptyWorkspace()
-      : project
-        ? `${renderBoardPane(project)}${cardOpen ? renderCardInspector(project) : ""}`
-        : renderEmptyWorkspace();
+      ? renderProjectEditor()
+      : !projects.length
+        ? renderEmptyWorkspace()
+        : project
+          ? `${renderBoardPane(project)}${cardOpen ? renderCardInspector(project) : ""}`
+          : renderEmptyWorkspace();
   return `<a class="skip-link" href="#main-content">Skip to workspace</a><div class="workspace" data-card-open="${cardOpen ? "true" : "false"}" data-workspace-locked="${workspaceLocked() ? "true" : "false"}">${renderHeader()}${renderProjectReceipt()}<main id="main-content" class="workbench" tabindex="-1">${content}</main></div>`;
 }
 
@@ -1140,7 +1208,7 @@ function currentUiState(): string {
   if (mutationKind === "refresh") return "refreshing";
   if (mutationInFlight) return "saving";
   if (cardConflict || moveConflict) return "stale";
-  if (projectFieldErrors.size || cardFieldErrors.size || commentFieldError) return "validation-error";
+  if (projectFieldErrors.size || addColumnFieldError || cardFieldErrors.size || commentFieldError) return "validation-error";
   if (!projects.length) return "empty-workspace";
   if (currentArchiveReceipt(activeProject?.id || "")) return "archived";
   if (selectedCardId || creatingCard) return "selected";
@@ -1230,6 +1298,11 @@ function captureProjectDraft(form: HTMLFormElement): void {
   };
 }
 
+function captureAddColumnDraft(form: HTMLFormElement): void {
+  if (!addColumnDraft || addColumnDraft.outcomeUnconfirmed) return;
+  addColumnDraft = { ...addColumnDraft, name: formValue(formData(form), "name") };
+}
+
 function sameDraft(left: CardDraft, right: CardDraft): boolean {
   return cleanValue(left.title) === cleanValue(right.title)
     && cardBodyValue(left.body) === cardBodyValue(right.body)
@@ -1294,6 +1367,10 @@ function clearPrivateState(notice: AuthNotice): void {
   creatingColumnId = "";
   projectEditorMode = null;
   projectEditorDraft = null;
+  addColumnPreparing = false;
+  addColumnCommitted = false;
+  addColumnDraft = null;
+  addColumnFieldError = "";
   projectFieldErrors.clear();
   cardFieldErrors.clear();
   commentFieldError = "";
@@ -1313,6 +1390,7 @@ function clearPrivateState(notice: AuthNotice): void {
   boardScrollPositions.clear();
   cardReturnFocus = null;
   projectEditorReturnFocus = null;
+  addColumnReturnFocus = null;
   pendingFocusRestore = null;
   pendingScrollRestore = null;
   inspectorTab = "card";
@@ -1585,6 +1663,185 @@ function cancelProjectEditor(): void {
   pendingFocusRestore = projectEditorReturnFocus;
   projectEditorReturnFocus = null;
   render();
+}
+
+async function openAddColumnEditor(trigger: HTMLElement): Promise<void> {
+  const projectId = activeProject?.id;
+  if (!projectId) return;
+  addColumnCommitted = false;
+  addColumnReturnFocus = focusTargetFor(trigger);
+  const cardForm = document.querySelector<HTMLFormElement>("form[data-form='card']");
+  if (cardForm) captureCardDraft(cardForm);
+  addColumnPreparing = true;
+  setWorkspaceMutationsDisabled(true, "column");
+  pendingFocusId = selectedCardId || creatingCard
+    ? cardOnlyQuery.matches ? "add-column-preparing-status" : "add-column-status"
+    : "add-column-status";
+  render();
+  await flushCardAutosaves();
+  if (!session) return;
+  const selectedDraftKey = selectedCardId ? draftKey(projectId, selectedCardId) : "";
+  if (cardConflict || moveConflict || (selectedDraftKey && retainedDrafts.has(selectedDraftKey))) {
+    addColumnPreparing = false;
+    setWorkspaceMutationsDisabled(false);
+    inspectorTab = "card";
+    if (!cardStatus) {
+      cardStatus = {
+        tone: "warning",
+        title: "Add Column paused",
+        message: "The Card still has unsaved changes. Correct or retry that save before adding a Column."
+      };
+    }
+    pendingFocusId = selectedCardId || creatingCard ? "card-title-input" : "main-content";
+    addColumnReturnFocus = null;
+    render();
+    return;
+  }
+  try {
+    await loadProject(projectId);
+  } catch (error) {
+    addColumnPreparing = false;
+    setWorkspaceMutationsDisabled(false);
+    if (handlePrivateError(error)) return;
+    const status: StatusMessage = { tone: "error", title: "Add Column did not open", message: `The latest Project could not be loaded. ${error instanceof Error ? error.message : "Try again."}` };
+    if (selectedCardId || creatingCard) {
+      cardStatus = status;
+      inspectorTab = "card";
+      pendingFocusId = "card-status";
+    } else {
+      projectStatus = status;
+      pendingFocusId = "project-status";
+    }
+    addColumnReturnFocus = null;
+    render();
+    return;
+  }
+  const project = activeProject;
+  if (!project || project.id !== projectId) {
+    addColumnPreparing = false;
+    setWorkspaceMutationsDisabled(false);
+    projectStatus = { tone: "warning", title: "Add Column did not open", message: "The active Project changed before the latest Columns could be loaded." };
+    pendingFocusId = "project-status";
+    addColumnReturnFocus = null;
+    render();
+    return;
+  }
+  addColumnPreparing = false;
+  addColumnDraft = {
+    projectId: project.id,
+    revision: project.revision,
+    columns: project.columns.map((column) => ({ ...column })),
+    id: `column-${uniqueKey()}`,
+    name: "",
+    outcomeUnconfirmed: false
+  };
+  addColumnFieldError = "";
+  projectStatus = null;
+  setWorkspaceMutationsDisabled(false);
+  render();
+  pendingFocusId = "add-column-name";
+  restorePendingContext();
+}
+
+function cancelAddColumn(): void {
+  const outcomeUnconfirmed = Boolean(addColumnDraft?.outcomeUnconfirmed);
+  const name = cleanValue(addColumnDraft?.name || "The Column");
+  addColumnPreparing = false;
+  addColumnCommitted = false;
+  addColumnDraft = null;
+  addColumnFieldError = "";
+  if (outcomeUnconfirmed) {
+    projectStatus = { tone: "warning", title: "Column outcome unconfirmed", message: `${name} may already be stored. Refresh the Project before trying again.` };
+  } else {
+    projectStatus = null;
+    showConfirmation("Column unchanged", "No Column was added.");
+  }
+  pendingFocusRestore = null;
+  if ((selectedCardId || creatingCard) && cardOnlyQuery.matches) {
+    pendingFocusId = inspectorTab === "activity" && selectedCardId ? "activity-panel" : "card-title-input";
+  } else {
+    pendingFocusRestore = addColumnReturnFocus;
+  }
+  addColumnReturnFocus = null;
+  render();
+}
+
+function validateAddColumnDraft(draft: AddColumnDraft): boolean {
+  addColumnFieldError = cleanValue(draft.name) ? "" : "Enter a Column name.";
+  if (!addColumnFieldError) return true;
+  pendingFocusId = "add-column-name";
+  projectStatus = { tone: "error", title: "Column needs attention", message: "Enter a name before adding the Column." };
+  render();
+  return false;
+}
+
+async function saveAddColumn(form: HTMLFormElement): Promise<void> {
+  captureAddColumnDraft(form);
+  const draft = addColumnDraft;
+  const project = activeProject;
+  if (!draft || draft.outcomeUnconfirmed || !project || project.id !== draft.projectId || !validateAddColumnDraft(draft)) return;
+  const name = cleanValue(draft.name);
+  const newPosition = Math.max(-1, ...draft.columns.map((column) => column.position)) + 1;
+  const columns = [
+    ...draft.columns.map((column) => ({ id: column.id, name: column.name, position: column.position })),
+    { id: draft.id, name, position: newPosition }
+  ];
+  setWorkspaceMutationsDisabled(true, "column");
+  projectStatus = { tone: "neutral", title: "Adding Column", message: "Conflicting actions are unavailable until the Project update finishes." };
+  pendingFocusId = "add-column-status";
+  render();
+  try {
+    const response = await api(`/projects/${safeId(draft.projectId)}`, {
+      method: "PATCH",
+      revision: draft.revision,
+      body: { columns }
+    });
+    const updated = normalizeProject(response);
+    applyProjectSnapshot(updated);
+    mobileColumns.set(updated.id, draft.id);
+    selectedCardId = null;
+    creatingCard = false;
+    creatingColumnId = "";
+    cardStatus = null;
+    cardConflict = null;
+    resetMoveContext();
+    inspectorTab = "card";
+    resetDescriptionContext();
+    addColumnCommitted = true;
+    addColumnDraft = null;
+    addColumnFieldError = "";
+    addColumnReturnFocus = null;
+    pendingFocusId = "add-column-status";
+    render();
+    const refreshError = await refreshCommittedProject(updated.id);
+    if (session) {
+      addColumnCommitted = false;
+      pendingFocusId = `column-${safeId(draft.id)}`;
+      if (refreshError) {
+        projectStatus = { tone: "warning", title: "Column added; refresh needed", message: `${name} is stored and visible from the write response. Refresh failed: ${refreshError}` };
+      } else {
+        projectStatus = null;
+        showConfirmation("Column added", `${name} is ready for Cards.`);
+      }
+    }
+  } catch (error) {
+    if (handlePrivateError(error)) return;
+    if (error instanceof ApiError && (error.status === 409 || error.status === 412)) {
+      projectStatus = { tone: "warning", title: "Column was not added", message: "This Project changed elsewhere. Your Column name is still here. Cancel, refresh the Project, and try again." };
+      pendingFocusId = "add-column-status";
+    } else if (outcomeIsUnconfirmed(error)) {
+      addColumnDraft = { ...draft, name, outcomeUnconfirmed: true };
+      projectStatus = { tone: "warning", title: "Column outcome unconfirmed", message: "Your Column name is still here. Cancel and refresh the Project before trying again." };
+      pendingFocusId = "add-column-status";
+    } else {
+      projectStatus = { tone: "error", title: "Column was not added", message: `Your Column name is still here. ${error instanceof Error ? error.message : "Try again."}` };
+      pendingFocusId = "add-column-name";
+    }
+  } finally {
+    addColumnCommitted = false;
+    setWorkspaceMutationsDisabled(false);
+    render();
+  }
 }
 
 function validateProjectDraft(draft: ProjectEditorDraft): boolean {
@@ -2482,6 +2739,7 @@ async function handleAction(button: HTMLElement): Promise<void> {
   }
   if (mutationInFlight) return;
   if (projectEditorMode && !button.closest("#project-editor")) return;
+  if (addColumnDraft && !button.closest("#add-column-editor")) return;
   if (action === "toggle-account-panel") {
     accountPanelOpen = !accountPanelOpen;
     projectActionsOpen = false;
@@ -2514,8 +2772,10 @@ async function handleAction(button: HTMLElement): Promise<void> {
   accountPanelOpen = false;
   projectActionsOpen = false;
   if (action === "new-project") return openProjectEditor("create", button);
+  if (action === "add-column") return openAddColumnEditor(button);
   if (action === "edit-project") return openProjectEditor("edit", button);
   if (action === "cancel-project") return cancelProjectEditor();
+  if (action === "cancel-add-column") return cancelAddColumn();
   if (action === "new-card") return openNewCard(button.dataset.columnId || activeProject?.columns[0]?.id || "", button);
   if (action === "open-card") {
     await flushCardAutosaves();
@@ -2561,6 +2821,10 @@ root.addEventListener("input", (event) => {
   const form = target.closest<HTMLFormElement>("form");
   if (!form || mutationInFlight) return;
   if (form.dataset.form === "project") captureProjectDraft(form);
+  if (form.dataset.form === "add-column") {
+    captureAddColumnDraft(form);
+    addColumnFieldError = "";
+  }
   if (form.dataset.form === "card") captureCardDraft(form);
   if (form.dataset.form === "comment" && activeProject) {
     const cardId = form.dataset.cardId || "";
@@ -2582,7 +2846,7 @@ root.addEventListener("focusout", (event) => {
 
 root.addEventListener("change", (event) => {
   const target = event.target as HTMLSelectElement;
-  if (mutationInFlight || projectEditorMode) return;
+  if (mutationInFlight || projectEditorMode || addColumnDraft) return;
   if (target.id === "project-select") {
     void switchProject(target.value);
     return;
@@ -2612,6 +2876,8 @@ root.addEventListener("submit", (event) => {
       ? createWorkspace(form)
     : form.dataset.form === "project"
       ? saveProject(form)
+      : form.dataset.form === "add-column"
+        ? saveAddColumn(form)
       : form.dataset.form === "card"
         ? saveCard(form)
         : form.dataset.form === "comment"
@@ -2649,6 +2915,15 @@ root.addEventListener("keydown", (event) => {
     return;
   }
   if (event.key !== "Escape") return;
+  if (addColumnPreparing || addColumnCommitted) {
+    event.preventDefault();
+    return;
+  }
+  if (addColumnDraft) {
+    event.preventDefault();
+    if (!mutationInFlight) cancelAddColumn();
+    return;
+  }
   if (movePanelOpen || moveConflict) {
     event.preventDefault();
     cancelMove();
@@ -2668,6 +2943,28 @@ root.addEventListener("keydown", (event) => {
     event.preventDefault();
     closeCard();
   }
+});
+
+narrowBoardQuery.addEventListener("change", () => {
+  if (!session || accessContext === "root" || (!addColumnPreparing && !addColumnCommitted && !addColumnDraft)) return;
+  const form = document.querySelector<HTMLFormElement>("form[data-form='add-column']");
+  if (form && !mutationInFlight) captureAddColumnDraft(form);
+  if (addColumnPreparing) {
+    pendingFocusId = selectedCardId || creatingCard ? "add-column-preparing-status" : "add-column-status";
+  } else if (addColumnCommitted) {
+    pendingFocusId = "add-column-status";
+  } else if (mutationInFlight || addColumnDraft?.outcomeUnconfirmed || (projectStatus && !addColumnFieldError)) {
+    pendingFocusId = "add-column-status";
+  } else {
+    pendingFocusId = "add-column-name";
+  }
+  render();
+});
+
+cardOnlyQuery.addEventListener("change", () => {
+  if (!session || accessContext === "root" || !addColumnPreparing || (!selectedCardId && !creatingCard)) return;
+  pendingFocusId = cardOnlyQuery.matches ? "add-column-preparing-status" : "add-column-status";
+  render();
 });
 
 async function boot(): Promise<void> {

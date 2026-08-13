@@ -233,6 +233,20 @@ export async function readSeededProject(harness: BrowserHarness, projectId: stri
   return (await api<{ project: BrowserProject }>(`/projects/${projectId}`)).project;
 }
 
+export async function updateSeededProject(
+  harness: BrowserHarness,
+  projectId: string,
+  revision: number,
+  changes: Record<string, unknown>
+): Promise<BrowserProject> {
+  const api = makeHarnessApi(harness.baseUrl);
+  return (await api<{ project: BrowserProject }>(`/projects/${projectId}`, {
+    method: "PATCH",
+    headers: { "X-Kanban-Version": String(revision) },
+    body: changes
+  })).project;
+}
+
 export async function updateSeededCard(
   harness: BrowserHarness,
   projectId: string,
