@@ -127,13 +127,89 @@ test("pre-promotion admitted and external probes cover all three exact release h
   admittedFailure.evidence.prePromotion.firewallProof.admittedProbe!.authHost.status = 403;
   assert.ok(evaluateCutoverSnapshot(admittedFailure, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-admitted-authHost-status"));
 
-  const externalFailure = readySnapshot();
-  externalFailure.evidence.prePromotion.firewallProof.externalDenyProbe!.candidateRoot.wafRuleId = "rule_other";
-  assert.ok(evaluateCutoverSnapshot(externalFailure, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-external-candidateRoot-rule-id"));
+  const selfAttested = readySnapshot();
+  Object.assign(selfAttested.evidence.prePromotion.firewallProof.externalDenyProbe!.candidateRoot, { wafAction: "deny", wafRuleId: "rule_other" });
+  assert.ok(evaluateCutoverSnapshot(selfAttested, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-external-candidateRoot-self-attested-traffic"));
 
   const canonicalExclusionFailure = readySnapshot();
   canonicalExclusionFailure.evidence.prePromotion.firewallProof.externalDenyProbe!.canonicalRoot.status = 403;
   assert.ok(evaluateCutoverSnapshot(canonicalExclusionFailure, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-canonical-root-exclusion"));
+});
+
+test("platform Traffic correlation remains explicit and binds its per-request deny rule", () => {
+  const snapshot = readySnapshot();
+  const external = snapshot.evidence.prePromotion.firewallProof.externalDenyProbe!;
+  external.correlationMethod = "platform-traffic";
+  for (const field of ["authHost", "candidateRoot", "candidateTenant"] as const) {
+    Object.assign(external[field], { wafAction: "deny", wafRuleId: snapshot.evidence.prePromotion.firewallProof.liveDenyRuleId });
+  }
+  assert.equal(evaluateCutoverSnapshot(snapshot, "pre-promotion", TARGET, NOW).ok, true);
+
+  (external.candidateRoot as Record<string, unknown>).wafRuleId = "rule_other";
+  assert.ok(evaluateCutoverSnapshot(snapshot, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-external-candidateRoot-rule-id"));
+});
+
+test("deterministic correlation derives one exact live deny and excludes competing mitigations", () => {
+  const wrongMethod = readySnapshot();
+  wrongMethod.evidence.prePromotion.firewallProof.externalDenyProbe!.correlationMethod = "self-attested";
+  assert.ok(evaluateCutoverSnapshot(wrongMethod, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-external-correlation-method"));
+
+  const wrongRun = readySnapshot();
+  wrongRun.evidence.prePromotion.firewallProof.externalDenyProbe!.runId = "different-run";
+  assert.ok(evaluateCutoverSnapshot(wrongRun, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-external-run-id"));
+
+  const duplicate = readySnapshot();
+  duplicate.policy.firewall.rules.push({
+    ...structuredClone(duplicate.policy.firewall.rules[1]),
+    id: "rule_duplicate_exact_deny",
+    name: "duplicate-exact-deny"
+  });
+  assert.ok(evaluateCutoverSnapshot(duplicate, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-external-deterministic-deny"));
+
+  const additionalBroadPersistentDeny = readySnapshot();
+  additionalBroadPersistentDeny.policy.firewall.rules.push({
+    id: "rule_additional_broad_deny",
+    name: "additional-broad-deny",
+    active: true,
+    _status: "live",
+    conditionGroup: [{ conditions: [{ type: "host", op: "suf", value: "kanban.cards" }] }],
+    action: {
+      mitigate: { action: "deny", actionDuration: "30m" } as { action: string }
+    }
+  });
+  assert.ok(evaluateCutoverSnapshot(additionalBroadPersistentDeny, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-external-deterministic-deny"));
+
+  const blockedIp = readySnapshot();
+  (blockedIp.policy.firewall as Record<string, unknown>).ipBlocks = [{ id: "ip_block_other" }];
+  assert.ok(evaluateCutoverSnapshot(blockedIp, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-external-deterministic-ip-blocks"));
+
+  const missingIpInventory = readySnapshot();
+  delete (missingIpInventory.policy.firewall as Record<string, unknown>).ipBlocks;
+  assert.ok(evaluateCutoverSnapshot(missingIpInventory, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-external-deterministic-ip-blocks"));
+
+  const attackMode = readySnapshot();
+  attackMode.policy.firewall.attackModeEnabled = true;
+  assert.ok(evaluateCutoverSnapshot(attackMode, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-external-deterministic-attack-mode"));
+
+  const missingAttackMode = readySnapshot();
+  delete (missingAttackMode.policy.firewall as Record<string, unknown>).attackModeEnabled;
+  assert.ok(evaluateCutoverSnapshot(missingAttackMode, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-external-deterministic-attack-mode"));
+
+  const sameSource = readySnapshot();
+  sameSource.evidence.prePromotion.firewallProof.externalDenyProbe!.observedSourceCidr = sameSource.evidence.prePromotion.firewallProof.reviewedSourceCidr!;
+  assert.ok(evaluateCutoverSnapshot(sameSource, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-external-source"));
+
+  const reusedAcrossBoundaries = readySnapshot();
+  reusedAcrossBoundaries.evidence.prePromotion.firewallProof.externalDenyProbe!.authHost.vercelId = reusedAcrossBoundaries.evidence.prePromotion.firewallProof.admittedProbe!.authHost.vercelId;
+  assert.ok(evaluateCutoverSnapshot(reusedAcrossBoundaries, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-pre-promotion-vercel-id-reused"));
+
+  const staleObservation = readySnapshot();
+  staleObservation.evidence.prePromotion.firewallProof.externalDenyProbe!.authHost.observedAt = "2026-08-12T00:00:00.000Z";
+  assert.ok(evaluateCutoverSnapshot(staleObservation, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-external-authHost-stale"));
+
+  const mismatchedConfig = readySnapshot();
+  mismatchedConfig.evidence.prePromotion.firewallProof.externalDenyProbe!.configHash = "0".repeat(64);
+  assert.ok(evaluateCutoverSnapshot(mismatchedConfig, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-external-config"));
 });
 
 test("the canonical tenant is unrouted before promotion and public only after promotion", () => {
@@ -284,6 +360,14 @@ test("the exact auth origin must be pinned to and serve the candidate artifact",
   unpinned.evidence.prePromotion.authRoutePinned = "failed";
   assert.ok(evaluateCutoverSnapshot(unpinned, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "proof-auth-route-not-pinned"));
 
+  const applicationUnpinned = readySnapshot();
+  applicationUnpinned.evidence.prePromotion.routePinned = "failed";
+  assert.ok(evaluateCutoverSnapshot(applicationUnpinned, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "proof-route-not-pinned"));
+
+  const tenantUnpinned = readySnapshot();
+  tenantUnpinned.evidence.prePromotion.tenantRoutePinned = "failed";
+  assert.ok(evaluateCutoverSnapshot(tenantUnpinned, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "proof-tenant-route-not-pinned"));
+
   const differentArtifact = readySnapshot();
   differentArtifact.evidence.prePromotion.sameArtifactAuthHost = "failed";
   assert.ok(evaluateCutoverSnapshot(differentArtifact, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "auth-host-not-proven"));
@@ -409,6 +493,8 @@ function readySnapshot() {
     firewallEnabled: true,
     hasDraft: false,
     pendingChanges: 0,
+    ipBlocks: [],
+    attackModeEnabled: false,
     rules: [
       {
         id: "rule_kanban_candidate_mike_bypass_3sYrrO",
@@ -431,7 +517,7 @@ function readySnapshot() {
       }
     ]
   };
-  const postFirewall = { firewallEnabled: true, hasDraft: false, pendingChanges: 0, rules: [] };
+  const postFirewall = { firewallEnabled: true, hasDraft: false, pendingChanges: 0, ipBlocks: [], attackModeEnabled: false, rules: [] };
   const firewallFacts = inspectCandidateFirewall(firewall, TARGET);
   const postFirewallFacts = inspectCandidateFirewall(postFirewall, TARGET);
   const receipt = (phase: "pre-promotion" | "post-promotion", runId: string, origin: string) => ({
@@ -464,11 +550,13 @@ function readySnapshot() {
         candidateTenant: { status: 302, mitigated: "none", vercelId: "sfo1::admit-tenant" }
       },
       externalDenyProbe: {
+        runId,
+        correlationMethod: "deterministic-live-policy",
         observedSourceCidr: "198.51.100.23/32",
         configHash: firewallFacts.configHash,
-        authHost: { status: 403, mitigated: "deny", wafAction: "deny", wafRuleId: firewallFacts.denyRuleId, vercelId: "iad1::deny-auth", observedAt: "2026-08-13T05:50:00.000Z" },
-        candidateRoot: { status: 403, mitigated: "deny", wafAction: "deny", wafRuleId: firewallFacts.denyRuleId, vercelId: "iad1::deny-root", observedAt: "2026-08-13T05:50:00.000Z" },
-        candidateTenant: { status: 403, mitigated: "deny", wafAction: "deny", wafRuleId: firewallFacts.denyRuleId, vercelId: "iad1::deny-tenant", observedAt: "2026-08-13T05:50:00.000Z" },
+        authHost: { status: 403, mitigated: "deny", vercelId: "iad1::deny-auth", observedAt: "2026-08-13T05:50:00.000Z" },
+        candidateRoot: { status: 403, mitigated: "deny", vercelId: "iad1::deny-root", observedAt: "2026-08-13T05:50:00.000Z" },
+        candidateTenant: { status: 403, mitigated: "deny", vercelId: "iad1::deny-tenant", observedAt: "2026-08-13T05:50:00.000Z" },
         canonicalRoot: { status: 200, ok: true, store: "postgres", mitigated: "none", vercelId: "iad1::public-root", observedAt: "2026-08-13T05:50:00.000Z" },
         canonicalTenant: { status: 404, mitigated: "none", vercelError: "DEPLOYMENT_NOT_FOUND", vercelId: "iad1::unrouted-tenant", observedAt: "2026-08-13T05:50:00.000Z" }
       }
@@ -529,7 +617,7 @@ function readySnapshot() {
 
 function readyPostSnapshot() {
   const snapshot = readySnapshot();
-  snapshot.policy.firewall = { firewallEnabled: true, hasDraft: false, pendingChanges: 0, rules: [] };
+  snapshot.policy.firewall = { firewallEnabled: true, hasDraft: false, pendingChanges: 0, ipBlocks: [], attackModeEnabled: false, rules: [] };
   snapshot.policy.aliases = ["auth.kanban.cards", "kanban.cards", "mike.kanban.cards"];
   snapshot.currentProduction = { ...snapshot.candidate, aliases: ["auth.kanban.cards", "kanban.cards", "mike.kanban.cards"], health: { status: 200, ok: true, store: "postgres" } };
   return snapshot;

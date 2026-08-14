@@ -235,11 +235,14 @@ async function listAllAliases(): Promise<string[]> {
 function normalizeFirewallOverview(overview: Record<string, unknown>): Record<string, unknown> {
   const active = record(overview.active);
   const draft = record(overview.draft);
+  const attackMode = record(overview.attackMode);
   const changes = Array.isArray(draft.changes) ? draft.changes : [];
   const rules = (Array.isArray(active.rules) ? active.rules : []).map((rule) => ({ ...record(rule), _status: "live" }));
   return {
     firewallEnabled: active.firewallEnabled === true,
     rules,
+    ipBlocks: Array.isArray(active.ips) ? active.ips : undefined,
+    attackModeEnabled: typeof attackMode.enabled === "boolean" ? attackMode.enabled : undefined,
     hasDraft: changes.length > 0,
     pendingChanges: changes.length
   };
