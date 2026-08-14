@@ -3,11 +3,48 @@ import { renderCardMarkdown } from "./markdown";
 declare global {
   interface Window {
     KANBAN_CARDS_API_BASE_URL?: string;
+    Clerk?: ClerkBrowser;
+    __internal_ClerkUICtor?: unknown;
   }
 }
 
+interface ClerkBrowser {
+  isSignedIn?: boolean;
+  load(options?: {
+    ui?: { ClerkUI?: unknown };
+    isSatellite?: boolean;
+    signInUrl?: string;
+    signUpUrl?: string;
+    allowedRedirectOrigins?: string[];
+  }): Promise<void>;
+  buildSignInUrl?(): string;
+  buildSignUpUrl?(): string;
+  mountSignIn(
+    node: HTMLDivElement,
+    options?: {
+      routing?: "hash" | "path";
+      withSignUp?: boolean;
+      forceRedirectUrl?: string;
+      fallbackRedirectUrl?: string;
+      signUpForceRedirectUrl?: string;
+      signUpFallbackRedirectUrl?: string;
+    }
+  ): void;
+  mountSignUp(
+    node: HTMLDivElement,
+    options?: {
+      routing?: "hash" | "path";
+      fallbackRedirectUrl?: string;
+      signInUrl?: string;
+    }
+  ): void;
+  unmountSignIn?(node: HTMLDivElement): void;
+  unmountSignUp?(node: HTMLDivElement): void;
+  signOut(options?: { redirectUrl?: string }): Promise<void>;
+}
+
 type Revision = string | number;
-type AccessContext = "local" | "root" | "workspace";
+type AccessContext = "auth" | "local" | "root" | "workspace";
 type ProjectEditorMode = "create" | "edit" | null;
 type InspectorTab = "card" | "activity";
 type DescriptionView = "write" | "preview";
@@ -26,8 +63,15 @@ interface SessionEnvelope {
   authenticated: boolean;
   context: AccessContext;
   rootUrl: string;
-  loginUrl: string;
   logoutUrl: string;
+  clerkPublishableKey: string;
+  clerkProxyUrl: string;
+  clerkIsSatellite: boolean;
+  clerkPrimarySignInUrl: string;
+  clerkPrimarySignUpUrl: string;
+  clerkAllowedRedirectOrigins: string[];
+  clerkFallbackRedirectUrl: string;
+  logoutRetryPending: boolean;
   session: Session | null;
 }
 
@@ -96,7 +140,7 @@ interface Project extends ProjectSummary {
 }
 
 interface AuthNotice {
-  kind: "invalid-key" | "service-unavailable" | "session-expired" | "signed-out" | "sign-out-incomplete";
+  kind: "invalid-key" | "access-denied" | "service-unavailable" | "session-expired" | "signed-out" | "sign-out-incomplete";
   title: string;
   message: string;
 }
@@ -220,8 +264,19 @@ const cardOnlyQuery = window.matchMedia("(max-width: 56rem)");
 let session: Session | null = null;
 let accessContext: AccessContext = "local";
 let rootUrl = window.location.origin;
-let loginUrl = "/auth/login";
 let logoutUrl = "";
+let clerkPublishableKey = "";
+let clerkProxyUrl = "";
+let clerkIsSatellite = false;
+let clerkPrimarySignInUrl = "";
+let clerkPrimarySignUpUrl = "";
+let clerkAllowedRedirectOrigins: string[] = [];
+let clerkFallbackRedirectUrl = "";
+let logoutRetryPending = false;
+let clerkRuntimeSignature = "";
+let clerkRuntimePromise: Promise<ClerkBrowser> | null = null;
+let clerkSignInMount: HTMLDivElement | null = null;
+let clerkSignInBlocked = false;
 let workspaceChoices: WorkspaceAccess[] = [];
 let accessFailure: AccessFailure | null = null;
 let projects: ProjectSummary[] = [];
@@ -419,16 +474,57 @@ function normalizeProject(value: unknown): Project {
 
 function normalizeSession(value: unknown): SessionEnvelope {
   const result = objectValue(value);
-  const context = result.context === "root" || result.context === "workspace" ? result.context : "local";
+  const context = result.context === "auth" || result.context === "root" || result.context === "workspace" ? result.context : "local";
   const nextRootUrl = safeOrigin(result.rootUrl) || (context === "local" ? window.location.origin : "");
-  const nextLoginUrl = safeRootAccessUrl(result.loginUrl, nextRootUrl, "/auth/login") || (context === "local" ? "/auth/login" : "");
   const nextLogoutUrl = safeRootAccessUrl(result.logoutUrl, nextRootUrl, "/auth/logout") || "";
+  const nextClerkPublishableKey = typeof result.clerkPublishableKey === "string" && result.clerkPublishableKey === result.clerkPublishableKey.trim()
+    ? result.clerkPublishableKey
+    : "";
+  const nextClerkProxyUrl = safeClerkProxyUrl(result.clerkProxyUrl, nextRootUrl) || "";
+  const nextClerkIsSatellite = result.clerkIsSatellite === true;
+  const nextClerkPrimarySignInUrl = safeClerkFlowUrl(result.clerkPrimarySignInUrl, "/sign-in") || "";
+  const nextClerkPrimarySignUpUrl = safeClerkFlowUrl(result.clerkPrimarySignUpUrl, "/sign-up") || "";
+  const nextClerkAllowedRedirectOrigins = arrayValue(result.clerkAllowedRedirectOrigins)
+    .map(safeOrigin)
+    .filter((origin): origin is string => Boolean(origin));
+  const nextClerkFallbackRedirectUrl = safeOrigin(result.clerkFallbackRedirectUrl) || "";
+  const clerkFlowOriginMatches = Boolean(
+    nextClerkPrimarySignInUrl &&
+    nextClerkPrimarySignUpUrl &&
+    new URL(nextClerkPrimarySignInUrl).origin === new URL(nextClerkPrimarySignUpUrl).origin
+  );
+  const clerkRuntime = {
+    clerkPublishableKey: nextClerkPublishableKey,
+    clerkProxyUrl: nextClerkProxyUrl,
+    clerkIsSatellite: nextClerkIsSatellite,
+    clerkPrimarySignInUrl: clerkFlowOriginMatches ? nextClerkPrimarySignInUrl : "",
+    clerkPrimarySignUpUrl: clerkFlowOriginMatches ? nextClerkPrimarySignUpUrl : "",
+    clerkAllowedRedirectOrigins: [...new Set(nextClerkAllowedRedirectOrigins)],
+    clerkFallbackRedirectUrl: nextClerkFallbackRedirectUrl
+  };
+  const nextLogoutRetryPending = result.logoutRetryPending === true;
   if (result.authenticated === false) {
-    return { authenticated: false, context, rootUrl: nextRootUrl, loginUrl: nextLoginUrl, logoutUrl: nextLogoutUrl, session: null };
+    return {
+      authenticated: false,
+      context,
+      rootUrl: nextRootUrl,
+      logoutUrl: nextLogoutUrl,
+      ...clerkRuntime,
+      logoutRetryPending: nextLogoutRetryPending,
+      session: null
+    };
   }
   const source = objectValue(result.session ?? result.user ?? result.actor ?? result);
   if (result.authenticated !== true && !source.label && !source.name && !source.email) {
-    return { authenticated: false, context, rootUrl: nextRootUrl, loginUrl: nextLoginUrl, logoutUrl: nextLogoutUrl, session: null };
+    return {
+      authenticated: false,
+      context,
+      rootUrl: nextRootUrl,
+      logoutUrl: nextLogoutUrl,
+      ...clerkRuntime,
+      logoutRetryPending: nextLogoutRetryPending,
+      session: null
+    };
   }
   const workspaceSource = objectValue(result.workspace ?? source.workspace);
   const workspace = workspaceSource.id && workspaceSource.slug
@@ -438,8 +534,9 @@ function normalizeSession(value: unknown): SessionEnvelope {
     authenticated: true,
     context,
     rootUrl: nextRootUrl,
-    loginUrl: nextLoginUrl,
     logoutUrl: nextLogoutUrl,
+    ...clerkRuntime,
+    logoutRetryPending: nextLogoutRetryPending,
     session: {
       authenticated: true,
       label: String(source.label || source.displayName || source.name || source.email || "Owner"),
@@ -462,12 +559,193 @@ function safeOrigin(value: unknown): string | null {
   }
 }
 
-function safeRootAccessUrl(value: unknown, expectedRootUrl: string, expectedPath: "/auth/login" | "/auth/logout"): string | null {
+function safeRootAccessUrl(value: unknown, expectedRootUrl: string, expectedPath: "/auth/logout"): string | null {
   if (!expectedRootUrl || typeof value !== "string" || !value.trim() || value !== value.trim() || value.includes("\\")) return null;
   try {
     const parsed = new URL(value);
     if (parsed.origin !== expectedRootUrl || parsed.pathname !== expectedPath) return null;
     if (parsed.username || parsed.password || parsed.search || parsed.hash) return null;
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
+function safeClerkProxyUrl(value: unknown, expectedRootUrl: string): string | null {
+  if (!expectedRootUrl || typeof value !== "string" || !value.trim() || value !== value.trim() || value.includes("\\")) return null;
+  try {
+    const parsed = new URL(value);
+    if (parsed.origin !== expectedRootUrl || parsed.pathname !== "/__clerk") return null;
+    if (parsed.username || parsed.password || parsed.search || parsed.hash) return null;
+    return parsed.toString().replace(/\/$/, "");
+  } catch {
+    return null;
+  }
+}
+
+function safeClerkFlowUrl(value: unknown, expectedPath: "/sign-in" | "/sign-up"): string | null {
+  if (typeof value !== "string" || !value.trim() || value !== value.trim() || value.includes("\\")) return null;
+  try {
+    const parsed = new URL(value);
+    if (parsed.pathname !== expectedPath || parsed.search || parsed.hash || parsed.username || parsed.password) return null;
+    if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && isLoopbackHostname(parsed.hostname))) return null;
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
+function clerkConfigured(): boolean {
+  return (accessContext === "auth" || accessContext === "root") && Boolean(
+    clerkPublishableKey && clerkProxyUrl && clerkPrimarySignInUrl && clerkPrimarySignUpUrl && clerkFallbackRedirectUrl
+  );
+}
+
+function clerkBundleUrl(packageName: "@clerk/ui@1" | "@clerk/clerk-js@6", filename: string): string {
+  if (!clerkConfigured()) throw new Error("Clerk sign-in is not configured for this host.");
+  const bundle = new URL(`${clerkProxyUrl}/npm/${packageName}/dist/${filename}`);
+  if (bundle.origin !== rootUrl || !bundle.pathname.startsWith("/__clerk/npm/@clerk/")) {
+    throw new Error("Clerk sign-in bundles must load through the kanban.cards root proxy.");
+  }
+  return bundle.toString();
+}
+
+async function loadClerkScript(source: string, configure?: (script: HTMLScriptElement) => void): Promise<void> {
+  const parsed = new URL(source);
+  if (parsed.origin !== rootUrl || parsed.origin !== window.location.origin) {
+    throw new Error("Clerk sign-in could not load outside the kanban.cards root host.");
+  }
+  const existing = [...document.scripts].find((script) => script.src === source);
+  if (existing?.dataset.loaded === "true") return;
+  await new Promise<void>((resolve, reject) => {
+    const script = existing || document.createElement("script");
+    const loaded = (): void => {
+      script.dataset.loaded = "true";
+      cleanup();
+      resolve();
+    };
+    const failed = (): void => {
+      cleanup();
+      if (!existing) script.remove();
+      reject(new Error("The secure Clerk sign-in interface could not be loaded."));
+    };
+    const cleanup = (): void => {
+      script.removeEventListener("load", loaded);
+      script.removeEventListener("error", failed);
+    };
+    script.addEventListener("load", loaded, { once: true });
+    script.addEventListener("error", failed, { once: true });
+    if (!existing) {
+      script.src = source;
+      script.async = true;
+      script.crossOrigin = "anonymous";
+      configure?.(script);
+      document.head.appendChild(script);
+    }
+  });
+}
+
+async function loadClerkRuntime(): Promise<ClerkBrowser> {
+  if (!clerkConfigured()) throw new Error("Clerk sign-in is not configured for this host.");
+  const signature = [
+    clerkPublishableKey,
+    clerkProxyUrl,
+    String(clerkIsSatellite),
+    clerkPrimarySignInUrl,
+    clerkPrimarySignUpUrl,
+    clerkFallbackRedirectUrl,
+    ...clerkAllowedRedirectOrigins
+  ].join("\n");
+  if (clerkRuntimePromise && clerkRuntimeSignature === signature) return clerkRuntimePromise;
+  if (clerkRuntimeSignature && clerkRuntimeSignature !== signature) {
+    throw new Error("Clerk sign-in configuration changed while this page was open.");
+  }
+  clerkRuntimeSignature = signature;
+  clerkRuntimePromise = (async () => {
+    await loadClerkScript(clerkBundleUrl("@clerk/ui@1", "ui.browser.js"));
+    await loadClerkScript(clerkBundleUrl("@clerk/clerk-js@6", "clerk.browser.js"), (script) => {
+      script.dataset.clerkPublishableKey = clerkPublishableKey;
+      script.dataset.clerkProxyUrl = clerkProxyUrl;
+    });
+    const clerk = window.Clerk;
+    if (!clerk) throw new Error("The secure Clerk sign-in interface did not initialize.");
+    await clerk.load({
+      ui: { ClerkUI: window.__internal_ClerkUICtor },
+      isSatellite: clerkIsSatellite,
+      signInUrl: clerkPrimarySignInUrl,
+      signUpUrl: clerkPrimarySignUpUrl,
+      ...(clerkIsSatellite ? {} : { allowedRedirectOrigins: clerkAllowedRedirectOrigins })
+    });
+    return clerk;
+  })().catch((error) => {
+    clerkRuntimePromise = null;
+    throw error;
+  });
+  return clerkRuntimePromise;
+}
+
+function unmountClerkSignIn(): void {
+  if (!clerkSignInMount) return;
+  try {
+    window.Clerk?.unmountSignIn?.(clerkSignInMount);
+    window.Clerk?.unmountSignUp?.(clerkSignInMount);
+  } catch {
+    // The surrounding application view is authoritative even if Clerk already removed its node.
+  }
+  clerkSignInMount = null;
+}
+
+async function mountClerkSignIn(node: HTMLDivElement): Promise<void> {
+  try {
+    const clerk = await loadClerkRuntime();
+    if (!node.isConnected || session || (accessContext !== "auth" && accessContext !== "root")) return;
+    if (clerkIsSatellite) {
+      const signInUrl = safeBuiltClerkFlowUrl(clerk.buildSignInUrl?.(), clerkPrimarySignInUrl);
+      const signUpUrl = safeBuiltClerkFlowUrl(clerk.buildSignUpUrl?.(), clerkPrimarySignUpUrl);
+      if (!signInUrl || !signUpUrl) throw new Error("Clerk did not provide secure satellite sign-in links.");
+      node.innerHTML = `<div class="jk-actions"><a class="jk-button" data-priority="primary" href="${escapeHtml(signInUrl)}">Continue with email</a><a class="jk-button" data-priority="secondary" href="${escapeHtml(signUpUrl)}">Create account</a></div>`;
+      clerkSignInMount = node;
+      return;
+    }
+    if (window.location.pathname === "/sign-up") {
+      clerk.mountSignUp(node, {
+        routing: "hash",
+        fallbackRedirectUrl: clerkFallbackRedirectUrl,
+        signInUrl: clerkPrimarySignInUrl
+      });
+    } else {
+      clerk.mountSignIn(node, {
+        routing: "hash",
+        withSignUp: true,
+        fallbackRedirectUrl: clerkFallbackRedirectUrl,
+        signUpFallbackRedirectUrl: clerkFallbackRedirectUrl
+      });
+    }
+    clerkSignInMount = node;
+  } catch (error) {
+    if (!node.isConnected) return;
+    clerkSignInBlocked = true;
+    authNotice = {
+      kind: "service-unavailable",
+      title: "Secure sign-in is unavailable",
+      message: error instanceof Error ? error.message : "Try again when the sign-in service is available."
+    };
+    render();
+  }
+}
+
+function safeBuiltClerkFlowUrl(value: unknown, configuredUrl: string): string | null {
+  if (typeof value !== "string" || !value.trim() || value !== value.trim() || value.includes("\\")) return null;
+  try {
+    const parsed = new URL(value);
+    const configured = new URL(configuredUrl);
+    if (
+      parsed.origin !== configured.origin ||
+      parsed.pathname !== configured.pathname ||
+      parsed.username ||
+      parsed.password ||
+      parsed.hash
+    ) return null;
     return parsed.toString();
   } catch {
     return null;
@@ -776,7 +1054,26 @@ function renderSignIn(): string {
     const retry = authNotice?.kind === "sign-out-incomplete" && logoutUrl
       ? `<button class="jk-button" data-priority="primary" type="button" data-action="retry-global-sign-out"${disabledAttribute()}>Retry global sign-out</button>`
       : "";
-    return `<main class="access-view"><section class="access-card jk-panel" aria-labelledby="access-title"><p class="product-name">kanban.cards</p><div><p class="eyebrow">Private workspaces</p><h1 id="access-title">Sign in to continue</h1><p class="access-description">Use your verified account to open only the Workspaces connected to you.</p></div>${notice}${retry}<button id="provider-sign-in" class="jk-button" data-priority="${retry ? "secondary" : "primary"}" type="button" data-action="provider-sign-in"${disabledAttribute(!loginUrl)}>Continue to sign in</button></section></main>`;
+    if (accessContext === "auth") {
+      const clerkSurface = clerkConfigured() && !clerkSignInBlocked
+        ? `<div id="clerk-sign-in" role="region" aria-label="${window.location.pathname === "/sign-up" ? "Sign up" : "Sign in"}"><p class="quiet" role="status">Loading secure ${window.location.pathname === "/sign-up" ? "sign-up" : "sign-in"}…</p></div>`
+        : `<div class="jk-actions"><button id="provider-sign-in" class="jk-button" data-priority="primary" type="button" data-action="provider-sign-in">Retry secure sign-in</button></div>`;
+      return `<main class="access-view"><section class="access-card jk-panel" aria-labelledby="access-title"><p class="product-name">kanban.cards</p><div><p class="eyebrow">Secure account access</p><h1 id="access-title">${window.location.pathname === "/sign-up" ? "Create your account" : "Sign in"}</h1><p class="access-description">This host verifies your Clerk account and returns you to kanban.cards. It does not serve Workspace or Project data.</p></div>${notice}${clerkSurface}</section></main>`;
+    }
+    if (accessContext === "root") {
+      const clerkSignIn = clerkConfigured() && !clerkSignInBlocked && !retry
+        ? `<div id="clerk-sign-in" role="region" aria-label="Sign in or sign up"><p class="quiet" role="status">Loading secure sign-in…</p></div>`
+        : retry
+          ? ""
+          : authNotice?.kind === "access-denied" && clerkConfigured()
+            ? `<div class="jk-actions"><button id="provider-sign-in" class="jk-button" data-priority="primary" type="button" data-action="clerk-change-account">Use a different account</button></div>`
+            : `<div class="jk-actions"><button id="provider-sign-in" class="jk-button" data-priority="primary" type="button" data-action="provider-sign-in">Retry secure sign-in</button></div>`;
+      const configurationNotice = !clerkConfigured() && !authNotice
+        ? renderStatus({ tone: "error", title: "Secure sign-in is unavailable", message: "Clerk is not configured for this kanban.cards host." }, "clerk-configuration-status")
+        : "";
+      return `<main class="access-view"><section class="access-card jk-panel" aria-labelledby="access-title"><p class="product-name">kanban.cards</p><div><p class="eyebrow">Private workspaces</p><h1 id="access-title">Sign in or create your account</h1><p class="access-description">Clerk verifies your email before kanban.cards opens the Workspaces connected to you.</p></div>${notice}${configurationNotice}${retry}${clerkSignIn}</section></main>`;
+    }
+    return `<main class="access-view"><section class="access-card jk-panel" aria-labelledby="access-title"><p class="product-name">kanban.cards</p><div><p class="eyebrow">Private workspaces</p><h1 id="access-title">Sign in to continue</h1><p class="access-description">Sign in at kanban.cards before opening this private Workspace address.</p></div>${notice}${retry}<button id="provider-sign-in" class="jk-button" data-priority="${retry ? "secondary" : "primary"}" type="button" data-action="provider-sign-in"${disabledAttribute(!rootUrl)}>Continue to sign in</button></section></main>`;
   }
   return `<main class="access-view"><section class="access-card jk-panel" aria-labelledby="access-title"><p class="product-name">kanban.cards</p><div><p class="eyebrow">Local workspace</p><h1 id="access-title">Open your workspace</h1><p class="access-description">Use the local owner key to open this development workspace.</p></div>${notice}<form data-form="sign-in" class="access-form" novalidate>${renderField({
     id: "owner-key",
@@ -1277,11 +1574,14 @@ function render(): void {
     clearConfirmation();
   }
   document.body.dataset.state = currentUiState();
+  unmountClerkSignIn();
   root.innerHTML = initialLoading
     ? renderLoading()
     : session
       ? accessContext === "root" ? renderWorkspaceRoute() : renderWorkspace()
       : renderSignIn();
+  const clerkSignIn = root.querySelector<HTMLDivElement>("#clerk-sign-in");
+  if (clerkSignIn) void mountClerkSignIn(clerkSignIn);
   restoreDescriptionSelection();
   restorePendingContext();
 }
@@ -1422,13 +1722,38 @@ async function loadSession(): Promise<void> {
     const result = normalizeSession(await api("/session"));
     accessContext = result.context;
     rootUrl = result.rootUrl;
-    loginUrl = result.loginUrl;
     logoutUrl = result.logoutUrl;
+    clerkPublishableKey = result.clerkPublishableKey;
+    clerkProxyUrl = result.clerkProxyUrl;
+    clerkIsSatellite = result.clerkIsSatellite;
+    clerkPrimarySignInUrl = result.clerkPrimarySignInUrl;
+    clerkPrimarySignUpUrl = result.clerkPrimarySignUpUrl;
+    clerkAllowedRedirectOrigins = result.clerkAllowedRedirectOrigins;
+    clerkFallbackRedirectUrl = result.clerkFallbackRedirectUrl;
+    logoutRetryPending = result.logoutRetryPending;
     session = result.session;
   } catch (error) {
     if (error instanceof ApiError && error.status === 401) session = null;
     else throw error;
   }
+}
+
+async function synchronizeClerkSession(): Promise<boolean> {
+  if (!clerkConfigured() || accessContext !== "root") return false;
+  const clerk = await loadClerkRuntime();
+  if (!clerk.isSignedIn) return false;
+  await api("/clerk-session", { method: "POST" });
+  await loadSession();
+  if (!session) throw new Error("Clerk verified the account, but kanban.cards did not create a browser session.");
+  clerkSignInBlocked = false;
+  authNotice = null;
+  return true;
+}
+
+async function completeClerkSignOut(): Promise<void> {
+  if (!clerkConfigured()) throw new Error("Clerk sign-out is not configured for this host.");
+  const clerk = await loadClerkRuntime();
+  await clerk.signOut({ redirectUrl: rootUrl });
 }
 
 async function loadWorkspaceChoices(): Promise<void> {
@@ -2743,8 +3068,31 @@ function handlePrivateError(error: unknown): boolean {
 
 async function handleAction(button: HTMLElement): Promise<void> {
   const action = button.dataset.action || "";
-  if (action === "provider-sign-in" && loginUrl) {
-    window.location.assign(loginUrl);
+  if (action === "clerk-change-account") {
+    try {
+      const clerk = await loadClerkRuntime();
+      await clerk.signOut({ redirectUrl: rootUrl });
+    } catch (error) {
+      clerkSignInBlocked = true;
+      authNotice = {
+        kind: "service-unavailable",
+        title: "Account change is unavailable",
+        message: error instanceof Error ? error.message : "Try again when Clerk is available."
+      };
+      render();
+    }
+    return;
+  }
+  if (action === "provider-sign-in") {
+    if (accessContext === "workspace" && rootUrl) {
+      window.location.assign(rootUrl);
+      return;
+    }
+    if (accessContext === "auth" || accessContext === "root") {
+      clerkSignInBlocked = false;
+      authNotice = null;
+      window.location.reload();
+    }
     return;
   }
   if (action === "retry-global-sign-out" && logoutUrl) {
@@ -2990,9 +3338,15 @@ cardOnlyQuery.addEventListener("change", () => {
 });
 
 async function boot(): Promise<void> {
-  const signOutState = new URLSearchParams(window.location.search).get("signout");
+  const currentUrl = new URL(window.location.href);
+  const signOutState = currentUrl.searchParams.get("signout");
+  const completeProviderSignOut = signOutState === "clerk";
+  const retryGlobalSignOutFromUrl = signOutState === "incomplete";
+  if (signOutState) {
+    currentUrl.searchParams.delete("signout");
+    window.history.replaceState(null, "", `${currentUrl.pathname}${currentUrl.search}${currentUrl.hash}`);
+  }
   if (signOutState === "incomplete") {
-    window.history.replaceState(null, "", `${window.location.pathname}${window.location.hash}`);
     clearPrivateState({
       kind: "sign-out-incomplete",
       title: "Sign-out incomplete",
@@ -3002,6 +3356,57 @@ async function boot(): Promise<void> {
   render();
   try {
     await loadSession();
+    const retryGlobalSignOut = retryGlobalSignOutFromUrl || logoutRetryPending;
+    if (retryGlobalSignOut) {
+      clearPrivateState({
+        kind: "sign-out-incomplete",
+        title: "Sign-out incomplete",
+        message: "Private data left this screen and this browser session was cleared, but another Workspace session may still be active. Try signing out again when the service recovers."
+      });
+      return;
+    }
+    if (completeProviderSignOut) {
+      if (session) {
+        if (accessContext === "workspace") {
+          await signOut();
+        } else if (accessContext === "root" && logoutUrl) {
+          window.location.assign(logoutUrl);
+        } else {
+          clearPrivateState({
+            kind: "sign-out-incomplete",
+            title: "Sign-out incomplete",
+            message: "The kanban.cards session is still active, so sign-out success could not be confirmed. Try signing out again."
+          });
+        }
+        return;
+      }
+      try {
+        await completeClerkSignOut();
+        clearPrivateState({
+          kind: "signed-out",
+          title: "Signed out",
+          message: "Private Project and Card data left the screen."
+        });
+      } catch (error) {
+        clerkSignInBlocked = true;
+        clearPrivateState({
+          kind: "sign-out-incomplete",
+          title: "Sign-out incomplete",
+          message: error instanceof Error
+            ? error.message
+            : "The kanban.cards session ended, but Clerk sign-out could not be confirmed. Try again."
+        });
+      }
+      return;
+    }
+    if (!session && accessContext === "root" && !retryGlobalSignOut) {
+      try {
+        await synchronizeClerkSession();
+      } catch (error) {
+        clerkSignInBlocked = true;
+        throw error;
+      }
+    }
     if (session && accessContext === "root") {
       await loadWorkspaceChoices();
       if (workspaceChoices.length === 1) await openWorkspace(workspaceChoices[0].slug);
@@ -3010,7 +3415,17 @@ async function boot(): Promise<void> {
     }
   } catch (error) {
     if (!handlePrivateError(error)) {
-      clearPrivateState({ kind: "service-unavailable", title: "kanban.cards is unavailable", message: "The service could not be reached. Try again when it is available." });
+      clearPrivateState(error instanceof ApiError && error.status === 403
+        ? {
+            kind: "access-denied",
+            title: "Access is not enabled for this account",
+            message: "Clerk verified the account, but it is not admitted to this private kanban.cards release."
+          }
+        : {
+            kind: "service-unavailable",
+            title: "kanban.cards is unavailable",
+            message: "The service could not be reached. Try again when it is available."
+          });
     }
   } finally {
     initialLoading = false;

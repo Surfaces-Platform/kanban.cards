@@ -14,9 +14,9 @@ import {
   LOGOUT_RETRY_COOKIE_DEV,
   ROOT_SESSION_COOKIE_DEV,
   TENANT_SESSION_COOKIE_DEV,
-  type PlatformAuthConfig,
   type RootSession
-} from "../../src/platform-auth";
+} from "../../src/app-sessions";
+import type { ClerkAuthConfig, ClerkAuthGateway } from "../../src/clerk-auth";
 import { createApp } from "../../src/server";
 import { createWorkspaceStoreResolver } from "../../src/state-store";
 import {
@@ -28,10 +28,10 @@ import {
 
 const SESSION_SECRET = "workspace-access-browser-secret-with-more-than-32-characters";
 const ROOT_SESSION: RootSession = {
-  providerSubject: "oidc|workspace-browser-owner",
+  providerSubject: "user_workspaceBrowserOwner123",
   email: "browser-owner@example.com",
   displayName: "Browser Owner",
-  sessionId: "root-session-browser-workspace-access",
+  sessionId: "sess_browserWorkspaceAccess123",
   rootOrigin: "http://localhost"
 };
 
@@ -39,8 +39,11 @@ interface WorkspaceAccessHarness {
   accessStore: AccessStore;
   rootHost: string;
   rootOrigin: string;
+  authOrigin: string;
+  primarySignInUrl: string;
   rootSessionCookie: string;
   candidateTenantOrigin?: string;
+  revokedClerkSessionIds: string[];
   setRevocationFailure(value: boolean): void;
   stop(): Promise<void>;
 }
@@ -74,19 +77,134 @@ test("the single exact candidate route automatically opens its Workspace on the 
   }
 });
 
-test("candidate sign-in uses only the exact server-supplied root alias", async ({ page }) => {
+test("candidate sign-in loads Clerk from its exact root proxy and redirects through the primary", async ({ page }) => {
   const harness = await startWorkspaceAccessHarness({ candidateAliases: true });
+  const clerkRequests: string[] = [];
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname.startsWith("/__clerk/")) clerkRequests.push(request.url());
+  });
 
   try {
-    const expectedLoginUrl = `${harness.rootOrigin}/auth/login`;
-    await page.route(expectedLoginUrl, (route) => route.abort());
     await page.goto(`${harness.rootOrigin}/`);
-    await expect(page.getByRole("heading", { name: "Sign in to continue" })).toBeVisible();
-    const loginRequest = page.waitForRequest((request) => request.url() === expectedLoginUrl);
+    await expect(page.getByRole("heading", { name: "Sign in or create your account" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Continue with email" })).toBeVisible();
+    expect(clerkRequests).toEqual([
+      `${harness.rootOrigin}/__clerk/npm/@clerk/ui@1/dist/ui.browser.js`,
+      `${harness.rootOrigin}/__clerk/npm/@clerk/clerk-js@6/dist/clerk.browser.js`
+    ]);
+    expect(clerkRequests.every((url) => new URL(url).origin === harness.rootOrigin)).toBe(true);
+    expect(page.url()).not.toContain("auth0");
+    const satelliteRuntime = await page.evaluate(() => (window as unknown as {
+      __kanbanClerkTest: { loadOptions: Record<string, unknown>; mountSignInCalls: number; buildSignInCalls: number; buildSignUpCalls: number };
+    }).__kanbanClerkTest);
+    expect(satelliteRuntime.loadOptions).toMatchObject({
+      isSatellite: true,
+      signInUrl: harness.primarySignInUrl,
+      signUpUrl: harness.primarySignInUrl.replace(/\/sign-in$/, "/sign-up")
+    });
+    expect(satelliteRuntime.loadOptions.allowedRedirectOrigins).toBeUndefined();
+    expect(satelliteRuntime.mountSignInCalls).toBe(0);
+    expect(satelliteRuntime.buildSignInCalls).toBe(1);
+    expect(satelliteRuntime.buildSignUpCalls).toBe(1);
 
-    await page.getByRole("button", { name: "Continue to sign in" }).click();
+    const signInLink = page.getByRole("link", { name: "Continue with email" });
+    const signInUrl = await signInLink.getAttribute("href");
+    expect(signInUrl).toContain(`${harness.primarySignInUrl}?__clerk_synced=false`);
+    expect(signInUrl).toContain(encodeURIComponent(harness.rootOrigin));
+    await page.route(signInUrl!, (route) => route.fulfill({ status: 200, body: "Satellite redirect reached primary sign-in." }));
+    const primaryRequest = page.waitForRequest(signInUrl!);
+    await signInLink.click();
+    expect((await primaryRequest).url()).toBe(signInUrl);
+  } finally {
+    await harness.stop();
+  }
+});
 
-    expect((await loginRequest).url()).toBe(expectedLoginUrl);
+test("the dedicated auth host mounts Clerk locally and cannot expose or mint app sessions", async ({ page, request }) => {
+  const harness = await startWorkspaceAccessHarness();
+
+  try {
+    for (const pathname of ["/", "/index.html"]) {
+      const redirect = await request.get(`${harness.authOrigin}${pathname}`, { maxRedirects: 0 });
+      expect(redirect.status()).toBe(302);
+      expect(redirect.headers().location).toBe("/sign-in");
+    }
+    await page.goto(`${harness.authOrigin}/sign-in`);
+    await expect(page.getByRole("button", { name: "Continue with email" })).toBeVisible();
+    const primaryRuntime = await page.evaluate(() => (window as unknown as {
+      __kanbanClerkTest: { loadOptions: Record<string, unknown>; mountSignInCalls: number; buildSignInCalls: number; buildSignUpCalls: number };
+    }).__kanbanClerkTest);
+    expect(primaryRuntime.loadOptions).toMatchObject({
+      isSatellite: false,
+      signInUrl: harness.primarySignInUrl,
+      signUpUrl: harness.primarySignInUrl.replace(/\/sign-in$/, "/sign-up"),
+      allowedRedirectOrigins: [harness.rootOrigin]
+    });
+    expect(primaryRuntime.mountSignInCalls).toBe(1);
+    expect(primaryRuntime.buildSignInCalls).toBe(0);
+    expect(primaryRuntime.buildSignUpCalls).toBe(0);
+    await page.goto(`${harness.authOrigin}/sign-up`);
+    await expect(page.getByRole("button", { name: "Create account" })).toBeVisible();
+
+    for (const pathname of ["/api/health", "/api/access/health", "/api/workspaces", "/api/projects", "/api/workspace-handoffs"]) {
+      expect((await request.get(`${harness.authOrigin}${pathname}`)).status()).toBe(404);
+    }
+    expect((await request.post(`${harness.authOrigin}/api/clerk-session`, { headers: { Origin: harness.authOrigin } })).status()).toBe(404);
+    const session = await request.get(`${harness.authOrigin}/api/session`);
+    expect(session.status()).toBe(200);
+    expect(await session.json()).toMatchObject({ authenticated: false, context: "auth" });
+  } finally {
+    await harness.stop();
+  }
+});
+
+test("a verified Clerk browser session exchanges into the app without an OIDC redirect", async ({ page, context }) => {
+  const harness = await startWorkspaceAccessHarness();
+  await page.addInitScript(() => window.localStorage.setItem("kanban.tests:clerk-signed-in", "1"));
+
+  try {
+    const exchangeRequest = page.waitForRequest((request) => {
+      const url = new URL(request.url());
+      return request.method() === "POST" && url.pathname === "/api/clerk-session";
+    });
+    await page.goto(`${harness.rootOrigin}/`);
+
+    expect((await exchangeRequest).url()).toBe(`${harness.rootOrigin}/api/clerk-session`);
+    await expect(page.getByRole("heading", { name: "Create a Workspace" })).toBeVisible();
+    expect((await context.cookies(harness.rootOrigin)).some((cookie) => cookie.name === ROOT_SESSION_COOKIE_DEV)).toBe(true);
+    expect(page.url()).toBe(`${harness.rootOrigin}/`);
+  } finally {
+    await harness.stop();
+  }
+});
+
+test("a direct Clerk completion query cannot leave an app session behind a signed-out success state", async ({ page, context }) => {
+  const harness = await startWorkspaceAccessHarness();
+  const errors = monitorBrowserErrors(page);
+  const logoutRequests: string[] = [];
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname === "/auth/logout") logoutRequests.push(request.url());
+  });
+  await page.addInitScript(() => window.localStorage.setItem("kanban.tests:clerk-signed-in", "1"));
+
+  try {
+    await seedRootSession(context, harness);
+    await page.goto(`${harness.rootOrigin}/?signout=clerk`);
+
+    await expect(page).toHaveURL(`${harness.rootOrigin}/`);
+    await expect(page.locator("body")).toHaveAttribute("data-state", "sign-out-success");
+    await expect(page.getByText("Signed out", { exact: true })).toBeVisible();
+    expect(logoutRequests).toEqual([`${harness.rootOrigin}/auth/logout`]);
+    expect((await context.cookies(harness.rootOrigin)).some((cookie) => cookie.name === ROOT_SESSION_COOKIE_DEV)).toBe(false);
+    expect(harness.revokedClerkSessionIds).toEqual([ROOT_SESSION.sessionId]);
+    expect(await page.evaluate(() => (window as unknown as {
+      __kanbanClerkTest: { signOutCalls: number };
+    }).__kanbanClerkTest.signOutCalls)).toBe(1);
+    expect(await page.evaluate(async () => {
+      const response = await fetch("/api/session", { credentials: "same-origin" });
+      return (await response.json() as { authenticated: boolean }).authenticated;
+    })).toBe(false);
+    expectNoUnexpectedBrowserErrors(errors);
   } finally {
     await harness.stop();
   }
@@ -274,7 +392,7 @@ test("incomplete global sign-out clears private UI without claiming success", as
     harness.setRevocationFailure(false);
     await page.getByRole("button", { name: "Retry global sign-out" }).click();
     await expect(page).toHaveURL(`${harness.rootOrigin}/`);
-    await expect(page.getByRole("heading", { name: "Sign in to continue" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Sign in or create your account" })).toBeVisible();
     expect((await context.cookies(`http://studio.${harness.rootHost}`)).some((cookie) => cookie.name === LOGOUT_RETRY_COOKIE_DEV)).toBe(false);
     expectNoUnexpectedBrowserErrors(errors, [/503/]);
   } finally {
@@ -285,6 +403,13 @@ test("incomplete global sign-out clears private UI without claiming success", as
 test("root logout outage preserves a non-authorizing retry path and completes after recovery", async ({ page, context }) => {
   const harness = await startWorkspaceAccessHarness();
   const errors = monitorBrowserErrors(page);
+  const clerkSessionExchanges: string[] = [];
+  page.on("request", (request) => {
+    if (request.method() === "POST" && new URL(request.url()).pathname === "/api/clerk-session") {
+      clerkSessionExchanges.push(request.url());
+    }
+  });
+  await page.addInitScript(() => window.localStorage.setItem("kanban.tests:clerk-signed-in", "1"));
 
   try {
     await harness.accessStore.createWorkspace({ ...ROOT_SESSION, slug: "studio", name: "Studio" });
@@ -300,12 +425,34 @@ test("root logout outage preserves a non-authorizing retry path and completes af
     await expect(page.getByRole("button", { name: "Retry global sign-out" })).toBeVisible();
     expect((await context.cookies(harness.rootOrigin)).some((cookie) => cookie.name === ROOT_SESSION_COOKIE_DEV)).toBe(false);
     expect((await context.cookies(harness.rootOrigin)).some((cookie) => cookie.name === LOGOUT_RETRY_COOKIE_DEV)).toBe(true);
+    expect(clerkSessionExchanges).toEqual([]);
+
+    await page.reload();
+    await expect(page).toHaveURL(`${harness.rootOrigin}/`);
+    await expect(page.locator("body")).toHaveAttribute("data-state", "service-unavailable");
+    await expect(page.getByText("Sign-out incomplete", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Retry global sign-out" })).toBeVisible();
+    expect((await context.cookies(harness.rootOrigin)).some((cookie) => cookie.name === LOGOUT_RETRY_COOKIE_DEV)).toBe(true);
+    expect(clerkSessionExchanges).toEqual([]);
+
+    await page.goto(`${harness.rootOrigin}/?signout=clerk`);
+    await expect(page).toHaveURL(`${harness.rootOrigin}/`);
+    await expect(page.getByText("Sign-out incomplete", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Retry global sign-out" })).toBeVisible();
+    expect(await page.evaluate(() => window.localStorage.getItem("kanban.tests:clerk-signed-in"))).toBe("1");
+    expect(clerkSessionExchanges).toEqual([]);
 
     harness.setRevocationFailure(false);
     await page.getByRole("button", { name: "Retry global sign-out" }).click();
     await expect(page).toHaveURL(`${harness.rootOrigin}/`);
-    await expect(page.getByRole("heading", { name: "Sign in to continue" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Sign in or create your account" })).toBeVisible();
     expect((await context.cookies(harness.rootOrigin)).some((cookie) => cookie.name === LOGOUT_RETRY_COOKIE_DEV)).toBe(false);
+    expect(harness.revokedClerkSessionIds).toEqual([ROOT_SESSION.sessionId]);
+    expect(await page.evaluate(() => (window as unknown as {
+      __kanbanClerkTest: { signOutCalls: number };
+    }).__kanbanClerkTest.signOutCalls)).toBe(1);
+    expect(await page.evaluate(() => window.localStorage.getItem("kanban.tests:clerk-signed-in"))).toBeNull();
+    expect(clerkSessionExchanges).toEqual([]);
 
     await page.goto(`http://studio.${harness.rootHost}/`);
     await expect(page.getByRole("heading", { name: "Sign in to continue" })).toBeVisible();
@@ -322,22 +469,24 @@ async function startWorkspaceAccessHarness(options: { candidateAliases?: boolean
   const primaryRootHost = `localhost:${primaryPort}`;
   const candidateRootHost = `localhost:${port}`;
   const candidateTenantHost = `candidate-studio.localhost:${port}`;
+  const authHost = `auth.localhost:${port}`;
   const rootHost = options.candidateAliases ? candidateRootHost : primaryRootHost;
   const rootOrigin = `http://${rootHost}`;
   const rootSession = { ...ROOT_SESSION, rootOrigin };
-  const platformAuthConfig: PlatformAuthConfig = {
-    issuer: "https://identity.example.com",
-    clientId: "workspace-access-browser",
-    redirectUri: `http://${primaryRootHost}/auth/callback`,
-    postLogoutRedirectUri: "/",
+  const clerkAuthConfig: ClerkAuthConfig = {
+    publishableKey: "pk_test_workspace_access_browser",
+    secretKey: "sk_test_workspace_access_browser",
+    encryptionKey: "workspace-access-browser-clerk-encryption-key-0123456789",
     sessionSecret: SESSION_SECRET,
-    surfaceId: "kanban.cards",
-    scope: "openid profile email",
+    authHost,
+    allowedUserIds: [ROOT_SESSION.providerSubject],
     rootSessionTtlSeconds: 3_600,
     tenantSessionTtlSeconds: 3_600
   };
   const accessStore = createFileAccessStore(path.join(temporaryDirectory, "access.json"));
   let revocationFailure = false;
+  const revokedClerkSessionIds: string[] = [];
+  const clerkAuthGateway = createBrowserClerkGateway(revokedClerkSessionIds);
   const applicationAccessStore: AccessStore = {
     ...accessStore,
     revokeSession(providerSubject, sessionId) {
@@ -354,16 +503,17 @@ async function startWorkspaceAccessHarness(options: { candidateAliases?: boolean
     accessStore: applicationAccessStore,
     candidateHostFamily: options.candidateAliases ? {
       rootHost: candidateRootHost,
-      redirectUri: `${rootOrigin}/auth/callback`,
       tenantHosts: { studio: candidateTenantHost }
     } : undefined,
+    clerkAuthConfig,
+    clerkAuthGateway,
     dataPath: path.join(temporaryDirectory, "legacy-workspace.json"),
     host: "localhost",
-    legacyOwnerSubject: options.candidateAliases ? ROOT_SESSION.providerSubject : undefined,
+    legacyClerkUserId: options.candidateAliases ? ROOT_SESSION.providerSubject : undefined,
     legacyWorkspaceSlug: options.candidateAliases ? "studio" : undefined,
     legacyWorkspaceName: options.candidateAliases ? "Studio" : undefined,
-    platformAuthConfig,
     requireDatabase: false,
+    rootHost: primaryRootHost,
     staticDir: repositoryRoot,
     workspaceStoreResolver
   }));
@@ -374,13 +524,16 @@ async function startWorkspaceAccessHarness(options: { candidateAliases?: boolean
       rootSession,
       SESSION_SECRET,
       false,
-      platformAuthConfig.rootSessionTtlSeconds
+      clerkAuthConfig.rootSessionTtlSeconds
     );
     return {
       accessStore,
       rootHost,
       rootOrigin,
+      authOrigin: `http://${authHost}`,
+      primarySignInUrl: `http://${authHost}/sign-in`,
       rootSessionCookie,
+      revokedClerkSessionIds,
       ...(options.candidateAliases ? { candidateTenantOrigin: `http://${candidateTenantHost}` } : {}),
       setRevocationFailure(value: boolean) {
         revocationFailure = value;
@@ -395,6 +548,76 @@ async function startWorkspaceAccessHarness(options: { candidateAliases?: boolean
     await fs.rm(temporaryDirectory, { recursive: true, force: true });
     throw error;
   }
+}
+
+function createBrowserClerkGateway(revokedSessionIds: string[]): ClerkAuthGateway {
+  return {
+    middleware(rootDomains) {
+      expect(rootDomains.length).toBeGreaterThan(0);
+      return (req, res, next) => {
+        if (req.path === "/__clerk/npm/@clerk/ui@1/dist/ui.browser.js") {
+          res.type("application/javascript").send("window.__internal_ClerkUICtor = function ClerkUI() {};\n");
+          return;
+        }
+        if (req.path === "/__clerk/npm/@clerk/clerk-js@6/dist/clerk.browser.js") {
+          res.type("application/javascript").send(`
+            window.Clerk = {
+              isSignedIn: window.localStorage.getItem("kanban.tests:clerk-signed-in") === "1",
+              load: async function (options) { window.__kanbanClerkTest.loadOptions = options; },
+              buildSignInUrl: function () {
+                window.__kanbanClerkTest.buildSignInCalls += 1;
+                return window.__kanbanClerkTest.loadOptions.signInUrl + "?__clerk_synced=false&redirect_url=" + encodeURIComponent(window.location.origin);
+              },
+              buildSignUpUrl: function () {
+                window.__kanbanClerkTest.buildSignUpCalls += 1;
+                return window.__kanbanClerkTest.loadOptions.signUpUrl + "?__clerk_synced=false&redirect_url=" + encodeURIComponent(window.location.origin);
+              },
+              mountSignIn: function (node) {
+                window.__kanbanClerkTest.mountSignInCalls += 1;
+                var button = document.createElement("button");
+                button.type = "button";
+                button.textContent = "Continue with email";
+                node.replaceChildren(button);
+              },
+              mountSignUp: function (node) {
+                window.__kanbanClerkTest.mountSignUpCalls += 1;
+                var button = document.createElement("button");
+                button.type = "button";
+                button.textContent = "Create account";
+                node.replaceChildren(button);
+              },
+              unmountSignIn: function (node) { node.replaceChildren(); },
+              unmountSignUp: function (node) { node.replaceChildren(); },
+              signOut: async function () {
+                window.__kanbanClerkTest.signOutCalls += 1;
+                window.localStorage.removeItem("kanban.tests:clerk-signed-in");
+                this.isSignedIn = false;
+              }
+            };
+            window.__kanbanClerkTest = { loadOptions: {}, mountSignInCalls: 0, mountSignUpCalls: 0, buildSignInCalls: 0, buildSignUpCalls: 0, signOutCalls: 0 };
+          `);
+          return;
+        }
+        next();
+      };
+    },
+    requestAuth(req) {
+      const clerkUserId = req.get("x-test-clerk-user") || ROOT_SESSION.providerSubject;
+      const clerkSessionId = req.get("x-test-clerk-session") || ROOT_SESSION.sessionId;
+      return { authenticated: true, clerkUserId, clerkSessionId };
+    },
+    async verifiedIdentity(clerkUserId, clerkSessionId) {
+      return {
+        clerkUserId,
+        clerkSessionId,
+        email: ROOT_SESSION.email,
+        displayName: ROOT_SESSION.displayName
+      };
+    },
+    async revokeSession(clerkSessionId) {
+      revokedSessionIds.push(clerkSessionId);
+    }
+  };
 }
 
 async function seedRootSession(context: BrowserContext, harness: WorkspaceAccessHarness): Promise<void> {

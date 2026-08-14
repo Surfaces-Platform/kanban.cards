@@ -8,6 +8,7 @@ export interface TrustedReleaseTarget {
   repository: string;
   productionBranch: string;
   publicDomain: string;
+  authDomain: string;
 }
 
 export interface CutoverBlocker {
@@ -16,7 +17,7 @@ export interface CutoverBlocker {
     | "candidate-identity"
     | "production-boundary"
     | "candidate-readiness"
-    | "provider-access"
+    | "clerk-access"
     | "compatibility-bridge"
     | "data-integrity"
     | "rollback-target"
@@ -69,7 +70,7 @@ export function evaluateCutoverSnapshot(
   const healthAccess = record(health.access);
   const accessHealth = record(evidence.accessHealth);
   const legacyBinding = record(accessHealth.legacyBinding);
-  const provider = record(evidence.providerProof);
+  const clerk = record(evidence.clerkProof);
   const compatibility = record(evidence.compatibilityProof);
   const retirement = record(evidence.retirementProof);
   const data = record(evidence.dataIntegrityProof);
@@ -91,7 +92,17 @@ export function evaluateCutoverSnapshot(
   requireMatch(blockers, "release-policy", "production-branch", text(policy.productionBranch), trustedTarget.productionBranch, "production branch");
   if (policy.autoAssignCustomDomains !== false) add(blockers, "release-policy", "auto-domain-assignment-enabled", "Auto-assign Custom Production Domains must remain disabled.");
   if (policy.mainGitDeploymentsEnabled !== false) add(blockers, "release-policy", "main-git-deployments-enabled", "The repository must keep every Git rule that matches main disabled.");
-  if (!new Set(["all_except_custom_domains", "all"]).has(text(policy.deploymentProtection))) add(blockers, "release-policy", "candidate-unprotected", "Generated candidate deployments must remain protected.");
+  const expectedProtection = phase === "pre-promotion" ? "all" : "all_except_custom_domains";
+  if (text(policy.deploymentProtection) !== expectedProtection) {
+    add(
+      blockers,
+      "release-policy",
+      phase === "pre-promotion" ? "candidate-route-protection-scope" : "public-route-protection-scope",
+      phase === "pre-promotion"
+        ? "Pre-promotion proof requires All Deployments protection so the exact custom auth, candidate-root, and candidate-tenant routes remain private."
+        : "Post-promotion completion requires Standard Protection after candidate aliases are removed so canonical production routes are public and generated deployments remain protected."
+    );
+  }
 
   requireMatch(blockers, "candidate-identity", "project-id", text(candidate.projectId), trustedTarget.projectId, "candidate Project id");
   requireMatch(blockers, "candidate-identity", "commit-ref", text(candidate.commitRef), trustedTarget.productionBranch, "candidate Git ref");
@@ -112,9 +123,18 @@ export function evaluateCutoverSnapshot(
   if (!productionAliases.includes(trustedTarget.publicDomain)) add(blockers, "production-boundary", "public-domain-missing", "The inspected production deployment does not own the public domain.");
   if (phase === "pre-promotion" && productionId === candidateId) add(blockers, "production-boundary", "candidate-already-current", "The candidate must remain unpromoted while pre-promotion gates run.");
   if (phase === "post-promotion" && productionId !== candidateId) add(blockers, "production-boundary", "candidate-not-current", "The public production target does not match the verified candidate deployment.");
+  if (phase === "post-promotion") {
+    const liveAliasOrigins = new Set(productionAliases.map((alias) => canonicalOrigin(alias)).filter(Boolean));
+    if (liveAliasOrigins.has(canonicalOrigin(preEvidence.origin))) {
+      add(blockers, "production-boundary", "candidate-root-alias-still-live", "The pre-promotion candidate root alias must be removed before Standard Protection and public post-promotion proof.");
+    }
+    if (liveAliasOrigins.has(canonicalOrigin(preEvidence.tenantOrigin))) {
+      add(blockers, "production-boundary", "candidate-tenant-alias-still-live", "The pre-promotion candidate tenant alias must be removed before Standard Protection and public post-promotion proof.");
+    }
+  }
   if (currentProductionHealth.status !== 200 || currentProductionHealth.ok !== true || text(currentProductionHealth.store) !== "postgres") add(blockers, "production-boundary", "production-unhealthy", "The deployment currently serving production is not a healthy Postgres runtime.");
 
-  requireReceiptBinding(blockers, evidence, phase, candidateId, candidateUrl, candidateSha, expectedOrigin, trustedTarget.publicDomain, now);
+  requireReceiptBinding(blockers, evidence, phase, candidateId, candidateUrl, candidateSha, expectedOrigin, trustedTarget.publicDomain, trustedTarget.authDomain, now);
 
   if (health.status !== 200 || health.ok !== true) add(blockers, "candidate-readiness", "health-not-ready", "The phase readiness receipt must report HTTP 200 with ok:true.");
   if (text(health.store) !== "postgres") add(blockers, "candidate-readiness", "store-not-postgres", "The phase readiness receipt must report the Postgres store.");
@@ -129,12 +149,18 @@ export function evaluateCutoverSnapshot(
   requireReadyValue(blockers, "candidate-readiness", "access-legacy-binding-not-ready", legacyBinding.status, "Access legacy binding");
   if (legacyBinding.present !== true) add(blockers, "candidate-readiness", "legacy-binding-absent", "The phase access receipt must report the exact legacy binding as present.");
 
-  requirePassed(blockers, "provider-access", provider, "login", "provider-login", "Provider login");
-  requirePassed(blockers, "provider-access", provider, "callback", "provider-callback", "Provider callback");
-  requirePassed(blockers, "provider-access", provider, "exactLegacyBinding", "exact-legacy-binding", "Exact legacy owner binding");
-  requirePassed(blockers, "provider-access", provider, "canonicalHandoff", "canonical-handoff", "Canonical tenant handoff");
-  requirePassed(blockers, "provider-access", provider, "tenantProjectAccess", "tenant-project-access", "Tenant Project access");
-  requirePassed(blockers, "provider-access", provider, "tenantProjectWrite", "tenant-project-write", "Tenant Project write");
+  requirePassed(blockers, "clerk-access", evidence, "clerkAuthorizedParties", "clerk-authorized-parties", "Exact Clerk authorized parties");
+  requirePassed(blockers, "clerk-access", evidence, "clerkDomainConfiguration", "clerk-domain-configuration", "Exact dedicated Clerk primary and application-satellite domain configuration");
+  requirePassed(blockers, "clerk-access", clerk, "authHostSurface", "clerk-auth-host-surface", "Dedicated Clerk primary sign-up and sign-in surface");
+  requirePassed(blockers, "clerk-access", clerk, "authHostIsolation", "clerk-auth-host-isolation", "Dedicated Clerk primary isolation from Workspace application APIs");
+  requirePassed(blockers, "clerk-access", clerk, "emailCodeAuth", "clerk-email-code-auth", "Clerk email-code authentication");
+  requirePassed(blockers, "clerk-access", clerk, "primarySatelliteSync", "clerk-primary-satellite-sync", "Clerk satellite-to-primary authentication and session sync");
+  requirePassed(blockers, "clerk-access", clerk, "sessionExchange", "clerk-session-exchange", "Server-side Clerk session exchange");
+  requirePassed(blockers, "clerk-access", clerk, "exactLegacyBinding", "exact-legacy-binding", "Exact Clerk user-to-legacy Workspace binding");
+  requirePassed(blockers, "clerk-access", clerk, "canonicalHandoff", "canonical-handoff", "Canonical tenant handoff");
+  requirePassed(blockers, "clerk-access", clerk, "tenantProjectAccess", "tenant-project-access", "Tenant Project access");
+  requirePassed(blockers, "clerk-access", clerk, "tenantProjectWrite", "tenant-project-write", "Tenant Project write");
+  requirePassed(blockers, "clerk-access", clerk, "signOut", "clerk-sign-out", "App-session and Clerk sign-out");
 
   const bridgeMode = text(accessHealth.legacyBridge);
   if (bridgeMode === "enabled") {
@@ -193,7 +219,8 @@ export function trustedReleaseTarget(): TrustedReleaseTarget {
     teamId: "team_Kw6YLfcGtRy40u9UEvifOh1r",
     repository: "Surfaces-Platform/kanban.cards",
     productionBranch: "main",
-    publicDomain: "kanban.cards"
+    publicDomain: "kanban.cards",
+    authDomain: "auth.kanban.cards"
   };
 }
 
@@ -236,56 +263,48 @@ function phaseEvidence(root: UnknownRecord, phase: CutoverPhase): UnknownRecord 
   return record(evidence[phase === "pre-promotion" ? "prePromotion" : "postPromotion"]);
 }
 
-function requireReceiptBinding(blockers: CutoverBlocker[], proof: UnknownRecord, phase: CutoverPhase, id: string, url: string, sha: string, expectedOrigin: string, publicDomain: string, now: Date): void {
+function requireReceiptBinding(blockers: CutoverBlocker[], proof: UnknownRecord, phase: CutoverPhase, id: string, url: string, sha: string, expectedOrigin: string, publicDomain: string, authDomain: string, now: Date): void {
   requireMatch(blockers, "evidence-binding", "proof-phase", text(proof.phase), phase, "proof phase");
   requireMatch(blockers, "evidence-binding", "proof-deployment-id", text(proof.deploymentId), id, "proof deployment id");
   requireMatch(blockers, "evidence-binding", "proof-deployment-url", canonicalDeploymentUrl(proof.deploymentUrl), url, "proof deployment URL");
   requireMatch(blockers, "evidence-binding", "proof-commit-sha", text(proof.commitSha), sha, "proof commit SHA");
   const origin = canonicalOrigin(proof.origin);
   const tenantOrigin = canonicalOrigin(proof.tenantOrigin);
+  const authOrigin = canonicalOrigin(proof.authOrigin);
+  requireMatch(blockers, "evidence-binding", "proof-auth-origin", authOrigin, canonicalOrigin(authDomain), "proof auth origin");
   if (phase === "post-promotion") {
     requireMatch(blockers, "evidence-binding", "proof-origin", origin, expectedOrigin, "proof origin");
-    if (!isDirectTenantOrigin(tenantOrigin, publicDomain)) {
+    if (!isDirectTenantOrigin(tenantOrigin, publicDomain) || tenantOrigin === authOrigin) {
       add(blockers, "evidence-binding", "proof-post-tenant-origin", "Post-promotion proof requires an exact one-label tenant origin beneath the canonical public root.");
     }
-  } else if (!origin || origin === url || origin === canonicalOrigin(publicDomain)) {
-    add(blockers, "evidence-binding", "proof-origin", "Pre-promotion provider proof requires a distinct approved candidate root origin; the generated deployment URL and public domain do not qualify.");
-  } else if (!isVercelAppOrigin(origin)) {
-    add(blockers, "evidence-binding", "proof-origin-platform", "Pre-promotion proof requires an exact vercel.app candidate root so the live Project protection policy applies to the inspected route.");
+  } else if (!origin || origin === url || origin === canonicalOrigin(publicDomain) || origin === authOrigin) {
+    add(blockers, "evidence-binding", "proof-origin", "Pre-promotion Clerk proof requires a distinct approved Clerk candidate root origin; the dedicated auth host, generated deployment URL, and public domain do not qualify.");
   }
   if (phase === "pre-promotion") {
     if (!tenantOrigin) {
       add(blockers, "evidence-binding", "proof-tenant-origin", "Pre-promotion proof requires an exact HTTPS tenant origin without a path, query, or fragment.");
-    } else if (tenantOrigin === origin || tenantOrigin === url || tenantOrigin === canonicalOrigin(publicDomain)) {
-      add(blockers, "evidence-binding", "proof-tenant-origin-reused", "Pre-promotion tenant proof requires a distinct tenant origin; the candidate root, immutable deployment URL, and public domain do not qualify.");
-    } else if (!isVercelAppOrigin(tenantOrigin)) {
-      add(blockers, "evidence-binding", "proof-tenant-origin-platform", "Pre-promotion proof requires an exact vercel.app candidate tenant so the live Project protection policy applies to the inspected route.");
+    } else if (tenantOrigin === origin || tenantOrigin === authOrigin || tenantOrigin === url || tenantOrigin === canonicalOrigin(publicDomain)) {
+      add(blockers, "evidence-binding", "proof-tenant-origin-reused", "Pre-promotion tenant proof requires a distinct tenant origin; the dedicated auth host, candidate root, immutable deployment URL, and public domain do not qualify.");
     }
   }
   requireMatch(blockers, "evidence-binding", "proof-route-deployment-id", text(proof.routeDeploymentId), id, "proof route deployment id");
   if (proof.routePinned !== "passed") add(blockers, "evidence-binding", "proof-route-not-pinned", "The exercised origin must be live-inspected as pinned to the exact deployment.");
   if (phase === "pre-promotion" && proof.routeProtected !== "passed") add(blockers, "evidence-binding", "proof-route-unprotected", "The candidate root origin must return an unauthenticated Vercel SSO redirect before promotion.");
-  if (proof.callbackRegistered !== "passed") add(blockers, "evidence-binding", "proof-callback-unregistered", "The exercised origin must have an approved registered provider callback.");
+  if (phase === "post-promotion" && proof.routeProtected !== "not-required") add(blockers, "evidence-binding", "proof-post-route-protection", "The promoted canonical root must explicitly record that candidate-route protection is no longer required.");
+  requireMatch(blockers, "evidence-binding", "proof-auth-route-deployment-id", text(proof.authRouteDeploymentId), id, "proof auth route deployment id");
+  if (proof.authRoutePinned !== "passed") add(blockers, "evidence-binding", "proof-auth-route-not-pinned", "The dedicated Clerk auth origin must be live-inspected as pinned to the exact deployment.");
+  if (phase === "pre-promotion" && proof.authRouteProtected !== "passed") add(blockers, "evidence-binding", "proof-auth-route-unprotected", "The dedicated Clerk auth origin must return an unauthenticated Vercel SSO redirect before promotion.");
+  if (phase === "post-promotion" && proof.authRouteProtected !== "not-required") add(blockers, "evidence-binding", "proof-post-auth-route-protection", "The stable public Clerk auth origin must explicitly record that candidate-route protection is no longer required.");
   requireMatch(blockers, "evidence-binding", "proof-tenant-route-deployment-id", text(proof.tenantRouteDeploymentId), id, "proof tenant route deployment id");
   if (proof.tenantRoutePinned !== "passed") add(blockers, "evidence-binding", "proof-tenant-route-not-pinned", "The exercised tenant origin must be live-inspected as pinned to the exact deployment.");
   if (phase === "pre-promotion" && proof.tenantRouteProtected !== "passed") add(blockers, "evidence-binding", "proof-tenant-route-unprotected", "The candidate tenant origin must return an unauthenticated Vercel SSO redirect before promotion.");
+  if (phase === "post-promotion" && proof.tenantRouteProtected !== "not-required") add(blockers, "evidence-binding", "proof-post-tenant-route-protection", "The promoted canonical tenant route must explicitly record that candidate-route protection is no longer required.");
+  if (proof.sameArtifactAuthHost !== "passed") add(blockers, "evidence-binding", "auth-host-not-proven", "The dedicated Clerk auth origin must be proven to serve the same immutable artifact as the candidate application routes.");
   if (proof.sameArtifactCanonicalHost !== "passed") add(blockers, "evidence-binding", "canonical-host-not-proven", "The same immutable artifact must be proven compatible with the canonical production root and tenant hosts before promotion.");
   const runId = text(proof.runId);
   if (!runId) add(blockers, "evidence-binding", "proof-run-id", "Proof requires a unique run id.");
   const observedAt = Date.parse(text(proof.observedAt));
   if (!Number.isFinite(observedAt) || observedAt > now.getTime() + 60_000 || now.getTime() - observedAt > MAX_RECEIPT_AGE_MS) add(blockers, "evidence-binding", "proof-stale", "Proof must have a valid observedAt no more than 30 minutes old.");
-}
-
-function isVercelAppOrigin(value: string): boolean {
-  try {
-    const parsed = new URL(value);
-    return parsed.protocol === "https:"
-      && parsed.hostname.endsWith(".vercel.app")
-      && parsed.hostname !== "vercel.app"
-      && parsed.origin === parsed.href.replace(/\/$/, "");
-  } catch {
-    return false;
-  }
 }
 
 function requireDistinctPostEvidence(blockers: CutoverBlocker[], pre: UnknownRecord, post: UnknownRecord): void {

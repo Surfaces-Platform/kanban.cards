@@ -22,6 +22,8 @@
     "test:browser": "npm run build && playwright test --config playwright.config.ts"
   },
   "dependencies": {
+    "@clerk/backend": "^3.16.5",
+    "@clerk/express": "^2.1.56",
     "express": "^5.2.1",
     "jose": "^6.2.3",
     "micromark": "4.0.2",
