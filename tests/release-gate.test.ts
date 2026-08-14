@@ -193,7 +193,7 @@ test("post cleanup rejects renamed, partial, and pre-id Firewall leftovers", () 
 
   const retainedId = readyPostSnapshot();
   retainedId.policy.firewall.rules = [{
-    id: "rule_bypass",
+    id: "rule_kanban_candidate_mike_bypass_3sYrrO",
     name: "unrelated-renamed-rule",
     active: false,
     _status: "live",
@@ -379,7 +379,7 @@ function readySnapshot() {
     pendingChanges: 0,
     rules: [
       {
-        id: "rule_bypass",
+        id: "rule_kanban_candidate_mike_bypass_3sYrrO",
         name: CANDIDATE_FIREWALL_BYPASS_RULE,
         active: true,
         _status: "live",
@@ -390,7 +390,7 @@ function readySnapshot() {
         action: { mitigate: { action: "bypass" } }
       },
       {
-        id: "rule_deny",
+        id: "rule_kanban_candidate_deny_COy5mP",
         name: CANDIDATE_FIREWALL_DENY_RULE,
         active: true,
         _status: "live",

@@ -504,7 +504,7 @@ function singleConditionGroup(rule: UnknownRecord): UnknownRecord[] {
 function liveRuleWithAction(rule: UnknownRecord, action: "bypass" | "deny"): boolean {
   const mitigate = record(record(rule.action).mitigate);
   const duration = mitigate.actionDuration;
-  return /^rule_[A-Za-z0-9]+$/.test(text(rule.id))
+  return /^rule_[A-Za-z0-9_]+$/.test(text(rule.id))
     && rule.active === true
     && text(rule._status) === "live"
     && text(mitigate.action) === action
