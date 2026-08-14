@@ -37,7 +37,7 @@
         }
       ]
     },
-    "aliases": ["auth.kanban.cards", "kanban.cards", "mike.kanban.cards"],
+    "aliases": ["auth.kanban.cards", "candidate.release.kanban.cards", "mike.candidate.release.kanban.cards", "kanban.cards"],
     "aliasInventoryComplete": true
   },
   "candidate": {
@@ -98,7 +98,7 @@
           "candidateRoot": { "status": 0, "mitigated": "not-run", "wafAction": "not-run", "wafRuleId": "", "vercelId": "", "observedAt": "1970-01-01T00:00:00.000Z" },
           "candidateTenant": { "status": 0, "mitigated": "not-run", "wafAction": "not-run", "wafRuleId": "", "vercelId": "", "observedAt": "1970-01-01T00:00:00.000Z" },
           "canonicalRoot": { "status": 0, "ok": false, "store": "", "mitigated": "not-run", "vercelId": "", "observedAt": "1970-01-01T00:00:00.000Z" },
-          "canonicalTenant": { "status": 0, "mitigated": "not-run", "vercelId": "", "observedAt": "1970-01-01T00:00:00.000Z" }
+          "canonicalTenant": { "status": 0, "mitigated": "not-run", "vercelError": "replace-with-x-vercel-error", "vercelId": "", "observedAt": "1970-01-01T00:00:00.000Z" }
         }
       },
       "sameArtifactAuthHost": "not-run",

@@ -129,17 +129,21 @@ export function evaluateCutoverSnapshot(
   const productionId = text(currentProduction.id);
   const productionUrl = canonicalDeploymentUrl(currentProduction.url);
   const productionAliases = strings(currentProduction.aliases);
+  const projectAliasOrigins = new Set(strings(policy.aliases).map((alias) => canonicalOrigin(alias)).filter(Boolean));
   requireMatch(blockers, "production-boundary", "production-project-id", text(currentProduction.projectId), trustedTarget.projectId, "current production Project id");
   requireMatch(blockers, "production-boundary", "production-target", text(currentProduction.target), "production", "current production target");
   requireMatch(blockers, "production-boundary", "production-ready-state", text(currentProduction.readyState), "READY", "current production readiness state");
   if (!isGeneratedDeploymentUrl(productionUrl, trustedTarget.publicDomain)) add(blockers, "production-boundary", "production-url", "Current production must resolve to an immutable generated deployment URL.");
   if (!productionAliases.includes(trustedTarget.publicDomain)) add(blockers, "production-boundary", "public-domain-missing", "The inspected production deployment does not own the public domain.");
   if (phase === "pre-promotion" && productionId === candidateId) add(blockers, "production-boundary", "candidate-already-current", "The candidate must remain unpromoted while pre-promotion gates run.");
+  if (phase === "pre-promotion") {
+    if (policy.aliasInventoryComplete !== true) add(blockers, "production-boundary", "alias-inventory-incomplete", "Pre-promotion proof requires a complete live Vercel Project alias inventory.");
+    if (projectAliasOrigins.has(canonicalOrigin(`mike.${trustedTarget.publicDomain}`))) add(blockers, "production-boundary", "canonical-tenant-alias-premature", "The canonical tenant must remain absent from the complete Project alias inventory before promotion.");
+  }
   if (phase === "post-promotion" && productionId !== candidateId) add(blockers, "production-boundary", "candidate-not-current", "The public production target does not match the verified candidate deployment.");
   if (phase === "post-promotion") {
     if (policy.aliasInventoryComplete !== true) add(blockers, "production-boundary", "alias-inventory-incomplete", "Post-promotion proof requires a complete live Vercel Project alias inventory.");
     const liveAliasOrigins = new Set(productionAliases.map((alias) => canonicalOrigin(alias)).filter(Boolean));
-    const projectAliasOrigins = new Set(strings(policy.aliases).map((alias) => canonicalOrigin(alias)).filter(Boolean));
     if (liveAliasOrigins.has(canonicalOrigin(preEvidence.origin))) {
       add(blockers, "production-boundary", "candidate-root-alias-still-live", "The pre-promotion candidate root alias must be removed before Standard Protection and public post-promotion proof.");
     }
@@ -420,8 +424,7 @@ function requireFirewallReceipt(blockers: CutoverBlocker[], proof: UnknownRecord
     else externalVercelIds.push(text(canonicalRoot.vercelId));
     requireFreshObservation(blockers, text(canonicalRoot.observedAt), now, "firewall-canonical-root-stale", "Canonical-root exclusion probe");
     const canonicalTenant = record(external.canonicalTenant);
-    const canonicalTenantStatus = finiteInteger(canonicalTenant.status);
-    if (canonicalTenantStatus < 200 || canonicalTenantStatus >= 400 || text(canonicalTenant.mitigated) !== "none" || !text(canonicalTenant.vercelId)) add(blockers, "evidence-binding", "firewall-canonical-tenant-exclusion", "The same external source must receive an unmitigated public 2xx or intentional 3xx from the canonical tenant.");
+    if (canonicalTenant.status !== 404 || text(canonicalTenant.mitigated) !== "none" || text(canonicalTenant.vercelError) !== "DEPLOYMENT_NOT_FOUND" || !text(canonicalTenant.vercelId)) add(blockers, "evidence-binding", "firewall-canonical-tenant-exclusion", "Before promotion, the same external source must receive Vercel's unmitigated HTTP 404 with x-vercel-error: DEPLOYMENT_NOT_FOUND from the unrouted canonical tenant.");
     else externalVercelIds.push(text(canonicalTenant.vercelId));
     requireFreshObservation(blockers, text(canonicalTenant.observedAt), now, "firewall-canonical-tenant-stale", "Canonical-tenant exclusion probe");
     if (new Set(externalVercelIds).size !== externalVercelIds.length) add(blockers, "evidence-binding", "firewall-external-vercel-id-reused", "Every external release-host and canonical-exclusion probe must record a distinct x-vercel-id.");
