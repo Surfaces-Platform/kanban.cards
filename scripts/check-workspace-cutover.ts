@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { authorizePromotion, evaluateCutoverSnapshot, isVercelSsoProtectionRedirect, trustedReleaseTarget, type CutoverPhase } from "../src/release-gate";
+import { authorizePromotion, evaluateCutoverSnapshot, inspectCandidateFirewall, isVercelSsoProtectionRedirect, trustedReleaseTarget, type CutoverPhase } from "../src/release-gate";
 import { mainGitDeploymentsAreDisabled } from "../src/release-policy";
 import { parseReleaseControllerArguments } from "../src/release-controller";
 
@@ -66,11 +66,14 @@ async function hydrateWithLiveFacts(snapshot: unknown, phase: CutoverPhase): Pro
   if (branchResult.stdout.trim() !== target.productionBranch) throw new Error(`Live authorization requires the ${target.productionBranch} branch.`);
 
   const vercelConfig = JSON.parse(await fs.readFile(path.resolve(process.cwd(), "vercel.json"), "utf8")) as Record<string, unknown>;
-  const [project, candidate, currentSummary] = await Promise.all([
+  const [project, firewallOverview, aliases, candidate, currentSummary] = await Promise.all([
     vercelJson(["api", `/v9/projects/${target.projectId}`]),
+    vercelJson(["firewall", "overview", "--json"]),
+    listAllAliases(),
     vercelJson(["api", `/v13/deployments/${candidateId}`]),
     vercelJson(["inspect", `https://${target.publicDomain}`, "--format=json"])
   ]);
+  const firewall = normalizeFirewallOverview(firewallOverview);
   const currentId = stringValue(currentSummary.id);
   if (!currentId) throw new Error("Live verification could not resolve the deployment serving the public domain.");
   const current = await vercelJson(["api", `/v13/deployments/${currentId}`]);
@@ -86,7 +89,10 @@ async function hydrateWithLiveFacts(snapshot: unknown, phase: CutoverPhase): Pro
     productionBranch: stringValue(projectLink.productionBranch),
     autoAssignCustomDomains: project.autoAssignCustomDomains,
     mainGitDeploymentsEnabled: !mainGitDeploymentsAreDisabled(localRules),
-    deploymentProtection: stringValue(protection.deploymentType)
+    deploymentProtection: stringValue(protection.deploymentType),
+    firewall,
+    aliases,
+    aliasInventoryComplete: true
   };
   root.candidate = liveCandidate;
   const liveCurrent = deploymentRecord(current);
@@ -116,20 +122,43 @@ async function hydrateWithLiveFacts(snapshot: unknown, phase: CutoverPhase): Pro
   receipt.sameArtifactAuthHost = receipt.authRoutePinned;
   receipt.tenantRouteDeploymentId = stringValue(tenantRouted.id);
   receipt.tenantRoutePinned = receipt.tenantRouteDeploymentId === candidateId ? "passed" : "failed";
-  const [routeProtected, authRouteProtected, tenantRouteProtected] = await Promise.all([
-    unauthenticatedRouteIsProtected(proofOrigin),
-    unauthenticatedRouteIsProtected(authOrigin),
-    unauthenticatedRouteIsProtected(tenantOrigin)
-  ]);
+  const firewallFacts = inspectCandidateFirewall(firewall, target);
+  const firewallProof = record(receipt.firewallProof);
   if (phase === "pre-promotion") {
-    receipt.routeProtected = routeProtected ? "passed" : "failed";
-    receipt.authRouteProtected = authRouteProtected ? "passed" : "failed";
-    receipt.tenantRouteProtected = tenantRouteProtected ? "passed" : "failed";
+    const [rootObservation, authObservation, tenantObservation] = await Promise.all([
+      routeObservation(proofOrigin, "/api/health"),
+      routeObservation(authOrigin, "/sign-in"),
+      routeObservation(tenantOrigin, "/")
+    ]);
+    firewallProof.liveBypassRuleId = firewallFacts.bypassRuleId;
+    firewallProof.liveDenyRuleId = firewallFacts.denyRuleId;
+    firewallProof.reviewedSourceCidr = firewallFacts.reviewedSourceCidr;
+    firewallProof.configHash = firewallFacts.configHash;
+    const admitted = record(firewallProof.admittedProbe);
+    admitted.configHash = firewallFacts.configHash;
+    admitted.authHost = { ...record(admitted.authHost), ...authObservation };
+    admitted.candidateRoot = { ...record(admitted.candidateRoot), ...rootObservation };
+    admitted.candidateTenant = { ...record(admitted.candidateTenant), ...tenantObservation };
+    firewallProof.admittedProbe = admitted;
   } else {
-    receipt.routeProtected = routeProtected ? "failed" : "not-required";
-    receipt.authRouteProtected = authRouteProtected ? "failed" : "not-required";
-    receipt.tenantRouteProtected = tenantRouteProtected ? "failed" : "not-required";
+    const preFirewallProof = record(record(evidence.prePromotion).firewallProof);
+    const removedRuleIds = [stringValue(preFirewallProof.liveBypassRuleId), stringValue(preFirewallProof.liveDenyRuleId)].filter(Boolean);
+    const [rootObservation, authObservation, tenantObservation, generatedProtected] = await Promise.all([
+      routeObservation(proofOrigin, "/api/health"),
+      routeObservation(authOrigin, "/sign-in"),
+      routeObservation(tenantOrigin, "/"),
+      unauthenticatedRouteIsProtected(stringValue(liveCandidate.url))
+    ]);
+    firewallProof.removedRuleIds = removedRuleIds;
+    firewallProof.configHash = firewallFacts.configHash;
+    firewallProof.releaseRulesRemoved = firewallFacts.releaseRulesAbsent ? "passed" : "failed";
+    firewallProof.noDraft = !firewallFacts.hasDraft && firewallFacts.pendingChanges === 0 ? "passed" : "failed";
+    firewallProof.authHostPublic = authObservation.status === 200 && authObservation.mitigated === "none" ? "passed" : "failed";
+    firewallProof.canonicalRootPublic = rootObservation.status === 200 && rootObservation.ok === true && rootObservation.store === "postgres" && rootObservation.mitigated === "none" ? "passed" : "failed";
+    firewallProof.canonicalTenantPublic = Number.isInteger(tenantObservation.status) && Number(tenantObservation.status) >= 200 && Number(tenantObservation.status) < 400 && tenantObservation.mitigated === "none" ? "passed" : "failed";
+    firewallProof.generatedDeploymentProtected = generatedProtected ? "passed" : "failed";
   }
+  receipt.firewallProof = firewallProof;
   const runtimeOrigin = phase === "pre-promotion" ? stringValue(record(root.candidate).url) : `https://${target.publicDomain}`;
   const [health, accessHealth] = phase === "pre-promotion"
     ? await Promise.all([vercelRuntimeJson(runtimeOrigin, "/api/health"), vercelRuntimeJson(runtimeOrigin, "/api/access/health")])
@@ -186,6 +215,36 @@ async function vercelJson(args: string[]): Promise<Record<string, unknown>> {
   return record(JSON.parse(stdout));
 }
 
+async function listAllAliases(): Promise<string[]> {
+  const aliases: string[] = [];
+  let next: number | null = null;
+  do {
+    const args = ["alias", "ls", "--format=json", "--limit", "100"];
+    if (next !== null) args.push("--next", String(next));
+    const page = await vercelJson(args);
+    for (const entry of Array.isArray(page.aliases) ? page.aliases : []) {
+      const alias = stringValue(record(entry).alias);
+      if (alias) aliases.push(alias);
+    }
+    const nextValue = record(page.pagination).next;
+    next = typeof nextValue === "number" && Number.isFinite(nextValue) ? nextValue : null;
+  } while (next !== null);
+  return [...new Set(aliases)].sort();
+}
+
+function normalizeFirewallOverview(overview: Record<string, unknown>): Record<string, unknown> {
+  const active = record(overview.active);
+  const draft = record(overview.draft);
+  const changes = Array.isArray(draft.changes) ? draft.changes : [];
+  const rules = (Array.isArray(active.rules) ? active.rules : []).map((rule) => ({ ...record(rule), _status: "live" }));
+  return {
+    firewallEnabled: active.firewallEnabled === true,
+    rules,
+    hasDraft: changes.length > 0,
+    pendingChanges: changes.length
+  };
+}
+
 async function vercelRuntimeJson(deploymentUrl: string, pathname: string): Promise<Record<string, unknown>> {
   const { stdout } = await run("vercel", ["curl", pathname, "--deployment", deploymentUrl, "--", "--silent", "--show-error", "--write-out", "\n%{http_code}"], {
     cwd: process.cwd(), encoding: "utf8", maxBuffer: 4 * 1024 * 1024
@@ -216,6 +275,23 @@ async function unauthenticatedRouteIsProtected(origin: string): Promise<boolean>
     probeUrl,
     response.headers.get("set-cookie")
   );
+}
+
+async function routeObservation(origin: string, pathname: string): Promise<Record<string, unknown>> {
+  const probeUrl = new URL(pathname, origin).href;
+  const response = await fetch(probeUrl, { cache: "no-store", redirect: "manual" });
+  const contentType = response.headers.get("content-type") ?? "";
+  let body: Record<string, unknown> = {};
+  if (contentType.includes("application/json")) {
+    try { body = record(await response.json()); } catch { body = {}; }
+  }
+  return {
+    status: response.status,
+    mitigated: response.headers.get("x-vercel-mitigated") ?? "none",
+    vercelId: response.headers.get("x-vercel-id") ?? "",
+    ok: body.ok,
+    store: body.store
+  };
 }
 
 function record(value: unknown): Record<string, unknown> {

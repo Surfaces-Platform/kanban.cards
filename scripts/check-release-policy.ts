@@ -35,6 +35,10 @@ async function main(): Promise<void> {
   for (const requiredText of [
     "Auto-assign Custom Production Domains",
     "vercel deploy --prod --skip-domain",
+    "all_except_custom_domains",
+    "kanban-candidate-mike-bypass",
+    "kanban-candidate-deny",
+    "vercel firewall publish --yes",
     "npm run release:gate -- --snapshot",
     "PROMOTE EXACT VERIFIED CANDIDATE",
     "--authorize-promotion --confirmation \"$KANBAN_CARDS_PROMOTION_CONFIRMATION\" --promote"
@@ -42,6 +46,9 @@ async function main(): Promise<void> {
     if (!runbook.includes(requiredText)) {
       violations.push({ file: "docs/runbook.md", reason: `missing release boundary: ${requiredText}` });
     }
+  }
+  for (const obsoleteText of ["All Deployments", "Project policy must be All Deployments", "complete Vercel Authentication on all three"]) {
+    if (runbook.includes(obsoleteText)) violations.push({ file: "docs/runbook.md", reason: `obsolete paid candidate-protection path remains: ${obsoleteText}` });
   }
 
   if (violations.length) {

@@ -4,6 +4,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 import { mainGitDeploymentsAreDisabled } from "../src/release-policy";
+import { inspectCandidateFirewall } from "../src/release-gate";
 
 const run = promisify(execFile);
 
@@ -19,12 +20,22 @@ async function main(): Promise<void> {
   const teamId = stringValue(link.orgId);
   if (!projectId || !teamId) throw new Error("The local Vercel link is missing its Project or team id.");
 
-  const { stdout } = await run("vercel", ["api", `/v9/projects/${projectId}`], {
-    cwd: root,
-    encoding: "utf8",
-    maxBuffer: 4 * 1024 * 1024
-  });
-  const project = JSON.parse(stdout) as Record<string, unknown>;
+  const [projectResult, firewallResult] = await Promise.all([
+    run("vercel", ["api", `/v9/projects/${projectId}`], { cwd: root, encoding: "utf8", maxBuffer: 4 * 1024 * 1024 }),
+    run("vercel", ["firewall", "overview", "--json"], { cwd: root, encoding: "utf8", maxBuffer: 4 * 1024 * 1024 })
+  ]);
+  const project = JSON.parse(projectResult.stdout) as Record<string, unknown>;
+  const firewallOverview = JSON.parse(firewallResult.stdout) as Record<string, unknown>;
+  const activeFirewall = record(firewallOverview.active);
+  const draftFirewall = record(firewallOverview.draft);
+  const draftChanges = Array.isArray(draftFirewall.changes) ? draftFirewall.changes : [];
+  const firewall = {
+    firewallEnabled: activeFirewall.firewallEnabled === true,
+    rules: (Array.isArray(activeFirewall.rules) ? activeFirewall.rules : []).map((rule) => ({ ...record(rule), _status: "live" })),
+    hasDraft: draftChanges.length > 0,
+    pendingChanges: draftChanges.length
+  };
+  const firewallFacts = inspectCandidateFirewall(firewall);
   const remoteLink = record(project.link);
   const protection = record(project.ssoProtection);
   const localGit = record(vercel.git);
@@ -36,7 +47,8 @@ async function main(): Promise<void> {
     productionBranch: stringValue(remoteLink.productionBranch),
     autoAssignCustomDomains: project.autoAssignCustomDomains,
     mainGitDeploymentsEnabled: !mainGitDeploymentsAreDisabled(localDeployments),
-    deploymentProtection: stringValue(protection.deploymentType)
+    deploymentProtection: stringValue(protection.deploymentType),
+    firewall: firewallFacts
   };
   const failures = [
     [policy.projectId === projectId, "linked Project id mismatch"],
@@ -45,7 +57,10 @@ async function main(): Promise<void> {
     [policy.productionBranch === "main", "production branch is not main"],
     [policy.autoAssignCustomDomains === false, "Auto-assign Custom Production Domains is enabled"],
     [policy.mainGitDeploymentsEnabled === false, "automatic deployments from main are enabled"],
-    [new Set(["all_except_custom_domains", "all"]).has(policy.deploymentProtection), "generated candidates are not protected"]
+    [policy.deploymentProtection === "all_except_custom_domains", "Standard Protection is not enabled"],
+    [firewallFacts.firewallEnabled, "Vercel Firewall is disabled"],
+    [!firewallFacts.hasDraft && firewallFacts.pendingChanges === 0, "Vercel Firewall has unpublished changes"],
+    [firewallFacts.releaseRulesAbsent || (firewallFacts.bypassReady && firewallFacts.denyReady), "temporary candidate Firewall rules are partial or malformed"]
   ].filter(([passed]) => !passed).map(([, reason]) => reason);
 
   process.stdout.write(`${JSON.stringify({ ok: failures.length === 0, policy, failures }, null, 2)}\n`);
