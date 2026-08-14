@@ -15,7 +15,7 @@ export interface ClerkAuthConfig {
 
 export interface ClerkRootDomainConfig {
   origin: string;
-  isSatellite: boolean;
+  role: "auth" | "app";
 }
 
 export interface VerifiedClerkIdentity {
@@ -86,6 +86,8 @@ const DEFAULT_SESSION_TTL_SECONDS = 7 * 24 * 60 * 60;
 const CLERK_USER_ID = /^user_[A-Za-z0-9]+$/;
 
 export function getClerkAuthConfig(env: Record<string, string | undefined> = process.env): ClerkAuthConfig {
+  const rootSessionTtlSeconds = appSessionTtlSeconds(env, "ROOT_SESSION_TTL_SECONDS");
+  const tenantSessionTtlSeconds = appSessionTtlSeconds(env, "TENANT_SESSION_TTL_SECONDS");
   const config = validateClerkAuthConfig({
     publishableKey: clerkPublishableKey(env),
     secretKey: requiredEnv(env, "CLERK_SECRET_KEY"),
@@ -93,8 +95,8 @@ export function getClerkAuthConfig(env: Record<string, string | undefined> = pro
     sessionSecret: requiredEnv(env, "SESSION_SECRET"),
     authHost: requiredEnv(env, "KANBAN_CARDS_AUTH_HOST"),
     allowedUserIds: parseAllowedUserIds(requiredEnv(env, "KANBAN_CARDS_ALLOWED_CLERK_USER_IDS")),
-    rootSessionTtlSeconds: positiveSeconds(env.ROOT_SESSION_TTL_SECONDS, DEFAULT_SESSION_TTL_SECONDS, "ROOT_SESSION_TTL_SECONDS"),
-    tenantSessionTtlSeconds: positiveSeconds(env.TENANT_SESSION_TTL_SECONDS, DEFAULT_SESSION_TTL_SECONDS, "TENANT_SESSION_TTL_SECONDS")
+    rootSessionTtlSeconds,
+    tenantSessionTtlSeconds
   });
   if (env.VERCEL_ENV?.trim().toLowerCase() === "production") {
     if (!config.publishableKey.startsWith("pk_live_") || !config.secretKey.startsWith("sk_live_")) {
@@ -135,7 +137,7 @@ export function validateClerkAuthConfig(config: ClerkAuthConfig): ClerkAuthConfi
   const encryptionKey = configString(config.encryptionKey, "CLERK_ENCRYPTION_KEY");
   const sessionSecret = configString(config.sessionSecret, "SESSION_SECRET");
   const authHost = exactClerkAuthHost(config.authHost);
-  if (!publishableKey.startsWith("pk_")) throw new ClerkAuthConfigError("Clerk publishable key must start with pk_");
+  clerkFrontendApiOrigin({ publishableKey });
   if (!secretKey.startsWith("sk_")) throw new ClerkAuthConfigError("CLERK_SECRET_KEY must be a Clerk secret key");
   if (Buffer.byteLength(encryptionKey, "utf8") < 32) throw new ClerkAuthConfigError("CLERK_ENCRYPTION_KEY must be at least 32 bytes");
   if (Buffer.byteLength(sessionSecret, "utf8") < 32) throw new ClerkAuthConfigError("SESSION_SECRET must be at least 32 bytes");
@@ -170,9 +172,9 @@ export function createClerkAuthGateway(config: ClerkAuthConfig, dependencies: Cl
   return {
     middleware(rootDomains, trustForwardedHost) {
       const acceptedDomains = validateRootDomains(rootDomains);
-      const configuredPrimaryOrigin = clerkPrimaryOrigin(accepted);
-      if (!acceptedDomains.some((domain) => domain.origin === configuredPrimaryOrigin && !domain.isSatellite)) {
-        throw new ClerkAuthConfigError("Clerk middleware primary must match KANBAN_CARDS_AUTH_HOST");
+      const configuredAuthOrigin = clerkAuthOrigin(accepted);
+      if (!acceptedDomains.some((domain) => domain.origin === configuredAuthOrigin && domain.role === "auth")) {
+        throw new ClerkAuthConfigError("Clerk middleware auth surface must match KANBAN_CARDS_AUTH_HOST");
       }
       const rootDomainsByHost = new Map(acceptedDomains.map((domain) => [new URL(domain.origin).host, domain]));
       const authenticate = makeMiddleware!((req) => {
@@ -184,12 +186,7 @@ export function createClerkAuthGateway(config: ClerkAuthConfig, dependencies: Cl
         return {
           publishableKey: accepted.publishableKey,
           secretKey: accepted.secretKey,
-          authorizedParties: [requestDomain.origin],
-          frontendApiProxy: { enabled: true },
-          isSatellite: requestDomain.isSatellite,
-          signInUrl: clerkPrimarySignInUrl(accepted),
-          signUpUrl: clerkPrimarySignUpUrl(accepted),
-          ...(requestDomain.isSatellite ? { satelliteAutoSync: false } : {})
+          authorizedParties: [requestDomain.origin]
         };
       });
       return (req, res, next) => {
@@ -255,30 +252,88 @@ function stripUntrustedProxyHeaders(req: Request): void {
 
 function validateRootDomains(values: readonly ClerkRootDomainConfig[]): ClerkRootDomainConfig[] {
   if (!Array.isArray(values) || values.length < 2 || values.length > 3) {
-    throw new ClerkAuthConfigError("Clerk requires one auth primary and one or two application satellites");
+    throw new ClerkAuthConfigError("Clerk requires one auth surface and one or two same-root application surfaces");
   }
-  const domains = values.map((value) => ({
-    origin: exactOrigin(value?.origin),
-    isSatellite: value?.isSatellite === true
-  }));
-  if (new Set(domains.map((value) => value.origin)).size !== domains.length || domains.filter((value) => !value.isSatellite).length !== 1) {
-    throw new ClerkAuthConfigError("Clerk root domains must contain one exact auth primary and unique application satellites");
+  const domains = values.map((value) => {
+    if (value?.role !== "auth" && value?.role !== "app") {
+      throw new ClerkAuthConfigError("Clerk root domains must declare an exact auth or app surface role");
+    }
+    return {
+      origin: exactOrigin(value.origin),
+      role: value.role
+    };
+  });
+  if (
+    new Set(domains.map((value) => value.origin)).size !== domains.length
+    || domains.filter((value) => value.role === "auth").length !== 1
+    || domains.filter((value) => value.role === "app").length < 1
+  ) {
+    throw new ClerkAuthConfigError("Clerk root domains must contain one exact auth surface and unique same-root application surfaces");
   }
   return domains;
 }
 
-export function clerkPrimaryOrigin(config: ClerkAuthConfig): string {
+export function clerkAuthOrigin(config: ClerkAuthConfig): string {
   const host = exactClerkAuthHost(config.authHost);
   const hostname = new URL(`http://${host}`).hostname;
   return `${isLoopback(hostname) ? "http" : "https"}://${host}`;
 }
 
-export function clerkPrimarySignInUrl(config: ClerkAuthConfig): string {
-  return `${clerkPrimaryOrigin(config)}/sign-in`;
+export function clerkAuthSignInUrl(config: ClerkAuthConfig): string {
+  return `${clerkAuthOrigin(config)}/sign-in`;
 }
 
-export function clerkPrimarySignUpUrl(config: ClerkAuthConfig): string {
-  return `${clerkPrimaryOrigin(config)}/sign-up`;
+export function clerkAuthSignUpUrl(config: ClerkAuthConfig): string {
+  return `${clerkAuthOrigin(config)}/sign-up`;
+}
+
+export function clerkFrontendApiOrigin(config: Pick<ClerkAuthConfig, "publishableKey">): string {
+  const publishableKey = configString(config?.publishableKey, "Clerk publishable key");
+  const match = /^(pk_(?:test|live)_)([A-Za-z0-9+/]+)$/.exec(publishableKey);
+  if (!match) throw new ClerkAuthConfigError("Clerk publishable key must be a valid pk_test_ or pk_live_ key");
+  const encodedFrontendApi = match[2];
+  let decoded: string;
+  try {
+    const bytes = Buffer.from(encodedFrontendApi, "base64");
+    if (bytes.toString("base64").replace(/=+$/, "") !== encodedFrontendApi) throw new Error();
+    decoded = bytes.toString("utf8");
+    if (Buffer.from(decoded, "utf8").compare(bytes) !== 0) throw new Error();
+  } catch {
+    throw new ClerkAuthConfigError("Clerk publishable key does not contain a valid Frontend API host");
+  }
+  if (!decoded.endsWith("$") || decoded.slice(0, -1).includes("$")) {
+    throw new ClerkAuthConfigError("Clerk publishable key does not contain a valid Frontend API host");
+  }
+  const host = decoded.slice(0, -1);
+  try {
+    const parsed = new URL(`https://${host}`);
+    if (
+      parsed.host !== host
+      || parsed.hostname !== host
+      || parsed.username
+      || parsed.password
+      || parsed.pathname !== "/"
+      || parsed.search
+      || parsed.hash
+      || isIPLiteral(parsed.hostname)
+      || !isExactDnsHostname(parsed.hostname)
+    ) throw new Error();
+  } catch {
+    throw new ClerkAuthConfigError("Clerk publishable key does not contain an exact DNS Frontend API host");
+  }
+  return `https://${host}`;
+}
+
+function isIPLiteral(hostname: string): boolean {
+  return /^\d+(?:\.\d+){3}$/.test(hostname) || hostname.includes(":");
+}
+
+function isExactDnsHostname(hostname: string): boolean {
+  if (hostname.length > 253 || !hostname.includes(".")) return false;
+  return hostname.split(".").every((label) => (
+    label.length <= 63
+    && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label)
+  ));
 }
 
 function exactRequestHost(req: Request, trustForwardedHost: boolean): string {
@@ -378,6 +433,22 @@ function positiveSeconds(value: string | undefined, fallback: number, label: str
   const result = Number(value);
   if (!Number.isSafeInteger(result) || result < 1) throw new ClerkAuthConfigError(`${label} must be a positive integer`);
   return result;
+}
+
+function appSessionTtlSeconds(env: Record<string, string | undefined>, compatibilityName: string): number {
+  const canonicalName = "KANBAN_CARDS_SESSION_TTL_SECONDS";
+  const canonicalConfigured = env[canonicalName] !== undefined && env[canonicalName] !== "";
+  if (!canonicalConfigured) {
+    return positiveSeconds(env[compatibilityName], DEFAULT_SESSION_TTL_SECONDS, compatibilityName);
+  }
+  const canonical = positiveSeconds(env[canonicalName], DEFAULT_SESSION_TTL_SECONDS, canonicalName);
+  if (env[compatibilityName] !== undefined && env[compatibilityName] !== "") {
+    const compatibility = positiveSeconds(env[compatibilityName], DEFAULT_SESSION_TTL_SECONDS, compatibilityName);
+    if (compatibility !== canonical) {
+      throw new ClerkAuthConfigError(`${compatibilityName} must match ${canonicalName} when both are set`);
+    }
+  }
+  return canonical;
 }
 
 function configSeconds(value: unknown, label: string): number {

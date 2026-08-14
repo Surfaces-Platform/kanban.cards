@@ -9,7 +9,9 @@ import test from "node:test";
 
 import { createFileAccessStore, type AccessStore, type AccessWorkspace } from "../src/access-store";
 import {
+  createLogoutContinuationToken,
   createRootSessionCookie,
+  logoutCompletionCookieName,
   logoutRetryCookieName,
   rootSessionCookieName,
   tenantSessionCookieName,
@@ -23,8 +25,8 @@ import { createWorkspaceStoreResolver, freshWorkspaceState } from "../src/state-
 const ROOT_HOST = "kanban.cards";
 const LEGACY_HOST = "legacy.kanban.cards";
 const BETA_HOST = "beta.kanban.cards";
-const CANDIDATE_ROOT_HOST = "kanban-candidate-root.vercel.app";
-const CANDIDATE_LEGACY_HOST = "kanban-candidate-legacy.vercel.app";
+const CANDIDATE_ROOT_HOST = "candidate.release.kanban.cards";
+const CANDIDATE_LEGACY_HOST = "mike.candidate.release.kanban.cards";
 const LEGACY_BEARER = "legacy-owner-key";
 const OWNER: RootSession = {
   providerSubject: "user_legacyOwner123",
@@ -35,7 +37,7 @@ const OWNER: RootSession = {
 };
 const UNAUTHORIZED_CLERK_USER_ID = "user_notAdmitted456";
 const CLERK_CONFIG: ClerkAuthConfig = {
-  publishableKey: "pk_test_workspace_access_security",
+  publishableKey: clerkPublishableKey("test", "clerk.kanban.cards"),
   secretKey: "sk_test_workspace_access_security",
   encryptionKey: "workspace-access-security-clerk-encryption-key-0123456789",
   sessionSecret: "workspace-access-security-test-session-secret-0123456789",
@@ -256,22 +258,32 @@ test("an explicit candidate host family exchanges only an admitted Clerk session
     const candidateTenantOrigin = `https://${CANDIDATE_LEGACY_HOST}`;
     const canonicalSession = await client.get("/api/session", { host: ROOT_HOST });
     assert.equal(canonicalSession.status, 200);
-    assert.equal(canonicalSession.data.clerkIsSatellite, true);
-    assert.equal(canonicalSession.data.clerkPrimarySignInUrl, "https://auth.kanban.cards/sign-in");
-    assert.equal(canonicalSession.data.clerkPrimarySignUpUrl, "https://auth.kanban.cards/sign-up");
+    assert.equal(canonicalSession.data.clerkSurfaceRole, "app");
+    assert.equal(canonicalSession.data.clerkAuthSignInUrl, "https://auth.kanban.cards/sign-in");
+    assert.equal(canonicalSession.data.clerkAuthSignUpUrl, "https://auth.kanban.cards/sign-up");
     assert.deepEqual(canonicalSession.data.clerkAllowedRedirectOrigins, []);
     assert.equal(canonicalSession.data.clerkFallbackRedirectUrl, `https://${ROOT_HOST}`);
+    assert.equal(canonicalSession.data.clerkFrontendApiOrigin, "https://clerk.kanban.cards");
+    assert.equal("clerkProxyUrl" in canonicalSession.data, false);
+    assert.match(canonicalSession.headers.get("content-security-policy") || "", /script-src[^;]*https:\/\/clerk\.kanban\.cards/);
+    assert.match(canonicalSession.headers.get("content-security-policy") || "", /connect-src[^;]*https:\/\/clerk\.kanban\.cards/);
     const candidateSession = await client.get("/api/session", { host: CANDIDATE_ROOT_HOST });
     assert.equal(candidateSession.status, 200);
-    assert.equal(candidateSession.data.clerkIsSatellite, true);
-    assert.equal(candidateSession.data.clerkProxyUrl, `${candidateRootOrigin}/__clerk`);
-    assert.equal(candidateSession.data.clerkPrimarySignInUrl, "https://auth.kanban.cards/sign-in");
-    assert.equal(candidateSession.data.clerkPrimarySignUpUrl, "https://auth.kanban.cards/sign-up");
+    assert.equal(candidateSession.data.clerkSurfaceRole, "app");
+    assert.equal(candidateSession.data.clerkFrontendApiOrigin, "https://clerk.kanban.cards");
+    assert.equal("clerkProxyUrl" in candidateSession.data, false);
+    assert.equal(candidateSession.data.clerkAuthSignInUrl, "https://auth.kanban.cards/sign-in");
+    assert.equal(candidateSession.data.clerkAuthSignUpUrl, "https://auth.kanban.cards/sign-up");
     assert.deepEqual(candidateSession.data.clerkAllowedRedirectOrigins, []);
     assert.equal(candidateSession.data.clerkFallbackRedirectUrl, `https://${ROOT_HOST}`);
     const tenantSession = await client.get("/api/session", { host: CANDIDATE_LEGACY_HOST });
     assert.equal("clerkPublishableKey" in tenantSession.data, false);
-    assert.equal("clerkPrimarySignInUrl" in tenantSession.data, false);
+    assert.equal("clerkFrontendApiOrigin" in tenantSession.data, false);
+    assert.equal("clerkAuthSignInUrl" in tenantSession.data, false);
+    for (const host of ["auth.kanban.cards", ROOT_HOST, CANDIDATE_ROOT_HOST, CANDIDATE_LEGACY_HOST]) {
+      const retiredProxyRoute = await client.get("/__clerk/npm/@clerk/clerk-js@6/dist/clerk.browser.js", { host });
+      assert.equal(retiredProxyRoute.status, 404, `${host} must not expose an app-owned Clerk FAPI proxy`);
+    }
 
     const crossFamilyExchange = await client.post("/api/clerk-session", {
       host: CANDIDATE_ROOT_HOST,
@@ -451,7 +463,7 @@ test("handoff identity comes from the access registry and sibling origins cannot
   });
 });
 
-test("tenant sign-out revokes the app session family, then root logout revokes the exact Clerk session without revoking the legacy bearer", async () => {
+test("tenant sign-out revokes the app session family and exact Clerk session before the Origin-gated root completion", async () => {
   await withApp(async ({ client, revokedClerkSessionIds, rootCookie }) => {
     const legacyCookie = await openWorkspace(client, rootCookie, "legacy");
     const betaCookie = await openWorkspace(client, rootCookie, "beta");
@@ -467,7 +479,9 @@ test("tenant sign-out revokes the app session family, then root logout revokes t
     });
     assert.equal(signedOut.status, 200);
     assert.equal(signedOut.data.logoutUrl, `https://${ROOT_HOST}/auth/logout`);
-    assert.deepEqual(revokedClerkSessionIds, []);
+    assert.equal(typeof signedOut.data.logoutContinuation, "string");
+    assert.ok(signedOut.data.logoutContinuation);
+    assert.deepEqual(revokedClerkSessionIds, [OWNER.sessionId]);
 
     assert.equal((await client.get("/api/projects", { host: LEGACY_HOST, cookie: legacyCookie })).status, 401);
     assert.equal((await client.get("/api/projects", { host: BETA_HOST, cookie: betaCookie })).status, 401);
@@ -500,10 +514,129 @@ test("tenant sign-out revokes the app session family, then root logout revokes t
     });
     assert.equal(legacyBearerRead.status, 200);
 
-    const rootLogout = await client.get("/auth/logout", { host: ROOT_HOST, cookie: rootCookie });
+    const inertGet = await client.get("/auth/logout", { host: ROOT_HOST, cookie: rootCookie });
+    assert.equal(inertGet.status, 404);
+
+    const rootLogout = await client.post("/auth/logout", {
+      host: ROOT_HOST,
+      origin: `https://${LEGACY_HOST}`,
+      form: { continuation: signedOut.data.logoutContinuation }
+    });
     assert.equal(rootLogout.status, 303);
     assert.equal(rootLogout.headers.get("location"), "/?signout=clerk");
+    const completionCookie = requiredSessionCookie(rootLogout, logoutCompletionCookieName(true));
     assert.deepEqual(revokedClerkSessionIds, [OWNER.sessionId]);
+
+    const completion = await client.get("/api/session", {
+      host: ROOT_HOST,
+      cookie: cookieHeader(completionCookie)
+    });
+    assert.equal(completion.status, 200);
+    assert.equal(completion.data.authenticated, false);
+    assert.equal(completion.data.logoutCompletion, true);
+    assert.equal(completion.data.logoutCompletionSessionId, OWNER.sessionId);
+    assert.equal(completion.headers.getAll("set-cookie").some((cookie) => {
+      return cookie.startsWith(`${logoutCompletionCookieName(true)}=`) && cookie.includes("Max-Age=0");
+    }), false);
+
+    const acknowledged = await client.delete("/api/logout-completion", {
+      host: ROOT_HOST,
+      cookie: cookieHeader(completionCookie),
+      origin: `https://${ROOT_HOST}`
+    });
+    assert.equal(acknowledged.status, 200);
+    assert.deepEqual(acknowledged.data, { completed: true });
+    assert.ok(acknowledged.headers.getAll("set-cookie").some((cookie) => {
+      return cookie.startsWith(`${logoutCompletionCookieName(true)}=`) && cookie.includes("Max-Age=0");
+    }));
+    const consumed = await client.get("/api/session", { host: ROOT_HOST });
+    assert.equal(consumed.data.logoutCompletion, false);
+    assert.equal((await client.delete("/api/logout-completion", {
+      host: ROOT_HOST,
+      origin: `https://${ROOT_HOST}`
+    })).status, 401);
+  });
+});
+
+test("logout completion rejects GET and untrusted Origins while accepting exact root and existing tenant Origins", async () => {
+  await withApp(async ({ client, accessStore }) => {
+    await accessStore.revokeSession(OWNER.providerSubject, OWNER.sessionId);
+    const rootContinuation = await createLogoutContinuationToken({
+      completionId: "completion-root",
+      providerSubject: OWNER.providerSubject,
+      sessionId: OWNER.sessionId,
+      rootOrigin: `https://${ROOT_HOST}`,
+      initiatingOrigin: `https://${ROOT_HOST}`
+    }, CLERK_CONFIG.sessionSecret);
+    const tenantContinuation = await createLogoutContinuationToken({
+      completionId: "completion-tenant",
+      providerSubject: OWNER.providerSubject,
+      sessionId: OWNER.sessionId,
+      rootOrigin: `https://${ROOT_HOST}`,
+      initiatingOrigin: `https://${BETA_HOST}`
+    }, CLERK_CONFIG.sessionSecret);
+    assert.equal((await client.get("/auth/logout", { host: ROOT_HOST })).status, 404);
+    assert.equal((await client.post("/auth/logout", { host: ROOT_HOST })).status, 403);
+    assert.equal((await client.post("/auth/logout", {
+      host: ROOT_HOST,
+      origin: "https://evil.example"
+    })).status, 403);
+    assert.equal((await client.post("/auth/logout", {
+      host: ROOT_HOST,
+      origin: "https://unknown.kanban.cards"
+    })).status, 403);
+    assert.equal((await client.post("/auth/logout?next=https://evil.example", {
+      host: ROOT_HOST,
+      origin: `https://${ROOT_HOST}`
+    })).status, 404);
+
+    const root = await client.post("/auth/logout", {
+      host: ROOT_HOST,
+      origin: `https://${ROOT_HOST}`,
+      form: { continuation: rootContinuation }
+    });
+    assert.equal(root.status, 303);
+    assert.ok(requiredSessionCookie(root, logoutCompletionCookieName(true)));
+
+    const tenant = await client.post("/auth/logout", {
+      host: ROOT_HOST,
+      origin: `https://${BETA_HOST}`,
+      form: { continuation: tenantContinuation }
+    });
+    assert.equal(tenant.status, 303);
+    const tenantCompletion = requiredSessionCookie(tenant, logoutCompletionCookieName(true));
+    assert.ok(tenantCompletion);
+    assert.equal((await client.post("/auth/logout", {
+      host: ROOT_HOST,
+      origin: `https://${ROOT_HOST}`,
+      form: { continuation: tenantContinuation }
+    })).status, 403);
+    assert.equal((await client.post("/auth/logout", {
+      host: ROOT_HOST,
+      origin: `https://${BETA_HOST}`,
+      form: { continuation: `${tenantContinuation.slice(0, -1)}x` }
+    })).status, 403);
+    assert.equal((await client.delete("/api/logout-completion", {
+      host: ROOT_HOST,
+      cookie: cookieHeader(tenantCompletion),
+      origin: `https://${BETA_HOST}`
+    })).status, 403);
+
+    const replacementSession: RootSession = { ...OWNER, sessionId: "sess_reauthenticatedOwner123" };
+    const replacementCookie = cookieHeader(await createRootSessionCookie(
+      replacementSession,
+      CLERK_CONFIG.sessionSecret,
+      true,
+      3_600
+    ));
+    const staleReplay = await client.post("/auth/logout", {
+      host: ROOT_HOST,
+      cookie: replacementCookie,
+      origin: `https://${ROOT_HOST}`,
+      form: { continuation: rootContinuation }
+    });
+    assert.equal(staleReplay.status, 409);
+    assert.equal(staleReplay.headers.get("set-cookie"), null);
   });
 });
 
@@ -663,16 +796,118 @@ test("Clerk mode rejects numeric-IP roots before it can issue unusable tenant UR
 });
 
 test("legacy migration rejects reserved tenant slugs at startup", () => {
-  assert.throws(() => createApp({
-    host: "localhost",
-    legacyClerkUserId: OWNER.providerSubject,
-    legacyWorkspaceSlug: "auth",
-    legacyWorkspaceName: "Unreachable legacy Workspace",
+  for (const slug of ["auth", "clerk"]) {
+    assert.throws(() => createApp({
+      host: "localhost",
+      legacyClerkUserId: OWNER.providerSubject,
+      legacyWorkspaceSlug: slug,
+      legacyWorkspaceName: "Unreachable legacy Workspace",
+      clerkAuthConfig: { ...CLERK_CONFIG, authHost: "auth.localhost:4317" },
+      clerkAuthGateway: createFakeClerkGateway([]),
+      requireDatabase: false,
+      rootHost: "localhost:4317"
+    }), /must be a valid, non-reserved Workspace hostname label/);
+  }
+});
+
+test("same-root Clerk topology accepts the nested candidate family and rejects off-root auth, candidate, and tenant hosts", () => {
+  const base = {
+    host: "0.0.0.0",
     clerkAuthConfig: CLERK_CONFIG,
     clerkAuthGateway: createFakeClerkGateway([]),
     requireDatabase: false,
+    rootHost: ROOT_HOST
+  };
+  assert.doesNotThrow(() => createApp({
+    ...base,
+    candidateHostFamily: {
+      rootHost: CANDIDATE_ROOT_HOST,
+      tenantHosts: { legacy: CANDIDATE_LEGACY_HOST }
+    },
+    legacyClerkUserId: OWNER.providerSubject,
+    legacyWorkspaceSlug: "legacy",
+    legacyWorkspaceName: "Legacy Workspace"
+  }));
+  assert.throws(() => createApp({
+    ...base,
+    candidateHostFamily: null,
+    clerkAuthConfig: { ...CLERK_CONFIG, authHost: "auth.example.net" }
+  }), /AUTH_HOST must be a strict same-root subdomain/);
+  assert.throws(() => createApp({
+    ...base,
+    candidateHostFamily: null,
+    clerkAuthConfig: { ...CLERK_CONFIG, authHost: "auth.localhost:4318" },
+    host: "localhost",
     rootHost: "localhost:4317"
-  }), /must be a valid, non-reserved Workspace hostname label/);
+  }), /AUTH_HOST must be a strict same-root subdomain.*matching port/);
+  assert.throws(() => createApp({
+    ...base,
+    candidateHostFamily: null,
+    clerkAuthConfig: { ...CLERK_CONFIG, authHost: "clerk.kanban.cards" }
+  }), /Frontend API hostname must be distinct from every auth, application-root, and explicit tenant host/);
+  assert.throws(() => createApp({
+    ...base,
+    candidateHostFamily: {
+      rootHost: "clerk.kanban.cards",
+      tenantHosts: { legacy: "mike.clerk.kanban.cards" }
+    },
+    legacyClerkUserId: OWNER.providerSubject,
+    legacyWorkspaceSlug: "legacy",
+    legacyWorkspaceName: "Legacy Workspace"
+  }), /Frontend API hostname must be distinct from every auth, application-root, and explicit tenant host/);
+  assert.throws(() => createApp({
+    ...base,
+    candidateHostFamily: {
+      rootHost: "candidate.release.example.net",
+      tenantHosts: { legacy: "mike.candidate.release.example.net" }
+    },
+    legacyClerkUserId: OWNER.providerSubject,
+    legacyWorkspaceSlug: "legacy",
+    legacyWorkspaceName: "Legacy Workspace"
+  }), /CANDIDATE_ROOT_HOST must be nested beneath KANBAN_CARDS_ROOT_HOST/);
+  assert.throws(() => createApp({
+    ...base,
+    candidateHostFamily: {
+      rootHost: CANDIDATE_ROOT_HOST,
+      tenantHosts: { legacy: "mike.release.kanban.cards" }
+    },
+    legacyClerkUserId: OWNER.providerSubject,
+    legacyWorkspaceSlug: "legacy",
+    legacyWorkspaceName: "Legacy Workspace"
+  }), /candidate tenant host must be nested beneath KANBAN_CARDS_CANDIDATE_ROOT_HOST/);
+});
+
+test("Vercel production accepts only the exact same-root Clerk Frontend API derived from the live key", () => {
+  const previousVercelEnv = process.env.VERCEL_ENV;
+  process.env.VERCEL_ENV = "production";
+  const base = {
+    host: "0.0.0.0",
+    candidateHostFamily: null,
+    clerkAuthGateway: createFakeClerkGateway([]),
+    requireDatabase: false,
+    rootHost: ROOT_HOST
+  };
+  try {
+    assert.doesNotThrow(() => createApp({
+      ...base,
+      clerkAuthConfig: {
+        ...CLERK_CONFIG,
+        publishableKey: clerkPublishableKey("live", "clerk.kanban.cards"),
+        secretKey: "sk_live_workspace_access_security"
+      }
+    }));
+    assert.throws(() => createApp({
+      ...base,
+      clerkAuthConfig: {
+        ...CLERK_CONFIG,
+        publishableKey: clerkPublishableKey("live", "frontend-api.clerk.accounts.dev"),
+        secretKey: "sk_live_workspace_access_security"
+      }
+    }), /requires the Clerk Frontend API origin https:\/\/clerk\.kanban\.cards/);
+  } finally {
+    if (previousVercelEnv === undefined) delete process.env.VERCEL_ENV;
+    else process.env.VERCEL_ENV = previousVercelEnv;
+  }
 });
 
 test("candidate host-family configuration requires Clerk and rejects overlap, duplicate, extra, and missing legacy routes", () => {
@@ -740,6 +975,15 @@ test("candidate host-family configuration requires Clerk and rejects overlap, du
 
 test("Workspace creation returns recoverable validation and conflict responses", async () => {
   await withApp(async ({ client, rootCookie }) => {
+    const reservedFapi = await client.post("/api/workspaces", {
+      host: ROOT_HOST,
+      cookie: rootCookie,
+      origin: `https://${ROOT_HOST}`,
+      json: { name: "Clerk collision", slug: "clerk" }
+    });
+    assert.equal(reservedFapi.status, 400);
+    assert.match(reservedFapi.data.error, /lowercase letters, numbers, and hyphens/);
+
     const duplicate = await client.post("/api/workspaces", {
       host: ROOT_HOST,
       cookie: rootCookie,
@@ -770,7 +1014,7 @@ test("tenant registry failures remain service failures instead of appearing as e
 });
 
 test("tenant revocation failure remains retryable without a root cookie and revokes sibling sessions", async () => {
-  await withApp(async ({ client, rootCookie, setRevocationFailure }) => {
+  await withApp(async ({ client, revokedClerkSessionIds, rootCookie, setRevocationFailure }) => {
     const legacyCookie = await openWorkspace(client, rootCookie, "legacy");
     const betaCookie = await openWorkspace(client, rootCookie, "beta");
     setRevocationFailure(true);
@@ -795,6 +1039,7 @@ test("tenant revocation failure remains retryable without a root cookie and revo
     });
     assert.ok(retryCookie);
     assert.doesNotMatch(retryCookie, /Domain=/i);
+    assert.deepEqual(revokedClerkSessionIds, []);
 
     assert.equal((await client.get("/api/projects", { host: BETA_HOST, cookie: betaCookie })).status, 200);
     setRevocationFailure(false);
@@ -806,6 +1051,7 @@ test("tenant revocation failure remains retryable without a root cookie and revo
     assert.equal(retry.status, 200);
     assert.equal(retry.data.globalSignOutComplete, true);
     assert.equal(retry.data.logoutUrl, `https://${ROOT_HOST}/auth/logout`);
+    assert.deepEqual(revokedClerkSessionIds, [OWNER.sessionId]);
     assert.ok(retry.headers.getAll("set-cookie").some((cookie) => {
       return cookie.startsWith(`${logoutRetryCookieName(true)}=`) && cookie.includes("Max-Age=0");
     }));
@@ -816,9 +1062,13 @@ test("tenant revocation failure remains retryable without a root cookie and revo
 test("Clerk revocation failure preserves a non-authorizing root retry and completes with the same Clerk session", async () => {
   await withApp(async ({ client, revokedClerkSessionIds, rootCookie, setClerkRevocationFailure }) => {
     setClerkRevocationFailure(true);
-    const failed = await client.get("/auth/logout", { host: ROOT_HOST, cookie: rootCookie });
-    assert.equal(failed.status, 303);
-    assert.equal(failed.headers.get("location"), "/?signout=incomplete");
+    const failed = await client.delete("/api/session", {
+      host: ROOT_HOST,
+      cookie: rootCookie,
+      origin: `https://${ROOT_HOST}`
+    });
+    assert.equal(failed.status, 503);
+    assert.equal(failed.data.error, "Global sign-out could not be completed.");
     assert.deepEqual(revokedClerkSessionIds, []);
     assert.ok(failed.headers.getAll("set-cookie").some((cookie) => {
       return cookie.startsWith(`${rootSessionCookieName(true)}=`) && cookie.includes("Max-Age=0");
@@ -846,22 +1096,34 @@ test("Clerk revocation failure preserves a non-authorizing root retry and comple
     assert.equal(blockedExchange.headers.get("set-cookie"), null);
 
     setClerkRevocationFailure(false);
-    const retried = await client.get("/auth/logout", {
+    const retried = await client.delete("/api/session", {
       host: ROOT_HOST,
-      cookie: cookieHeader(retryCookie)
+      cookie: cookieHeader(retryCookie),
+      origin: `https://${ROOT_HOST}`
     });
-    assert.equal(retried.status, 303);
-    assert.equal(retried.headers.get("location"), "/?signout=clerk");
+    assert.equal(retried.status, 200);
+    assert.equal(retried.data.logoutUrl, `https://${ROOT_HOST}/auth/logout`);
+    assert.equal(typeof retried.data.logoutContinuation, "string");
     assert.deepEqual(revokedClerkSessionIds, [OWNER.sessionId]);
     assert.ok(retried.headers.getAll("set-cookie").some((cookie) => {
       return cookie.startsWith(`${logoutRetryCookieName(true)}=`) && cookie.includes("Max-Age=0");
     }));
+
+    const completed = await client.post("/auth/logout", {
+      host: ROOT_HOST,
+      origin: `https://${ROOT_HOST}`,
+      form: { continuation: retried.data.logoutContinuation }
+    });
+    assert.equal(completed.status, 303);
+    assert.equal(completed.headers.get("location"), "/?signout=clerk");
+    assert.ok(requiredSessionCookie(completed, logoutCompletionCookieName(true)));
     const recoveredSession = await client.get("/api/session", { host: ROOT_HOST });
     assert.equal(recoveredSession.data.logoutRetryPending, false);
   });
 });
 
 interface AppFixture {
+  accessStore: AccessStore;
   client: SecurityClient;
   rootCookie: string;
   revokedClerkSessionIds: string[];
@@ -951,6 +1213,7 @@ async function withApp(operation: (fixture: AppFixture) => Promise<void>, option
   try {
     const rootCookie = cookieHeader(await createRootSessionCookie(OWNER, CLERK_CONFIG.sessionSecret, true, 3_600));
     await operation({
+      accessStore,
       client,
       rootCookie,
       revokedClerkSessionIds,
@@ -1152,6 +1415,11 @@ function createFakeClerkGateway(
       revokedSessionIds.push(clerkSessionId);
     }
   };
+}
+
+function clerkPublishableKey(instance: "test" | "live", frontendApi: string): string {
+  const encoded = Buffer.from(`${frontendApi}$`, "utf8").toString("base64").replace(/=+$/, "");
+  return `pk_${instance}_${encoded}`;
 }
 
 function requiredSessionCookie(response: JsonResponse, name: string): string {

@@ -8,17 +8,23 @@ declare global {
   }
 }
 
+interface ClerkBrowserSession {
+  id: string;
+  end(): Promise<unknown>;
+}
+
 interface ClerkBrowser {
   isSignedIn?: boolean;
+  session?: ClerkBrowserSession | null;
+  client?: { signedInSessions?: ClerkBrowserSession[] } | null;
   load(options?: {
     ui?: { ClerkUI?: unknown };
-    isSatellite?: boolean;
     signInUrl?: string;
     signUpUrl?: string;
     allowedRedirectOrigins?: string[];
   }): Promise<void>;
-  buildSignInUrl?(): string;
-  buildSignUpUrl?(): string;
+  buildSignInUrl?(options?: { redirectUrl?: string }): string;
+  buildSignUpUrl?(options?: { redirectUrl?: string }): string;
   mountSignIn(
     node: HTMLDivElement,
     options?: {
@@ -40,11 +46,12 @@ interface ClerkBrowser {
   ): void;
   unmountSignIn?(node: HTMLDivElement): void;
   unmountSignUp?(node: HTMLDivElement): void;
-  signOut(options?: { redirectUrl?: string }): Promise<void>;
+  signOut(options?: { redirectUrl?: string; sessionId?: string }): Promise<void>;
 }
 
 type Revision = string | number;
 type AccessContext = "auth" | "local" | "root" | "workspace";
+type ClerkSurfaceRole = "auth" | "app" | "";
 type ProjectEditorMode = "create" | "edit" | null;
 type InspectorTab = "card" | "activity";
 type DescriptionView = "write" | "preview";
@@ -65,13 +72,15 @@ interface SessionEnvelope {
   rootUrl: string;
   logoutUrl: string;
   clerkPublishableKey: string;
-  clerkProxyUrl: string;
-  clerkIsSatellite: boolean;
-  clerkPrimarySignInUrl: string;
-  clerkPrimarySignUpUrl: string;
+  clerkFrontendApiOrigin: string;
+  clerkSurfaceRole: ClerkSurfaceRole;
+  clerkAuthSignInUrl: string;
+  clerkAuthSignUpUrl: string;
   clerkAllowedRedirectOrigins: string[];
   clerkFallbackRedirectUrl: string;
   logoutRetryPending: boolean;
+  logoutCompletion: boolean;
+  logoutCompletionSessionId: string;
   session: Session | null;
 }
 
@@ -266,13 +275,15 @@ let accessContext: AccessContext = "local";
 let rootUrl = window.location.origin;
 let logoutUrl = "";
 let clerkPublishableKey = "";
-let clerkProxyUrl = "";
-let clerkIsSatellite = false;
-let clerkPrimarySignInUrl = "";
-let clerkPrimarySignUpUrl = "";
+let clerkFrontendApiOrigin = "";
+let clerkSurfaceRole: ClerkSurfaceRole = "";
+let clerkAuthSignInUrl = "";
+let clerkAuthSignUpUrl = "";
 let clerkAllowedRedirectOrigins: string[] = [];
 let clerkFallbackRedirectUrl = "";
 let logoutRetryPending = false;
+let logoutCompletion = false;
+let logoutCompletionSessionId = "";
 let clerkRuntimeSignature = "";
 let clerkRuntimePromise: Promise<ClerkBrowser> | null = null;
 let clerkSignInMount: HTMLDivElement | null = null;
@@ -474,35 +485,49 @@ function normalizeProject(value: unknown): Project {
 
 function normalizeSession(value: unknown): SessionEnvelope {
   const result = objectValue(value);
-  const context = result.context === "auth" || result.context === "root" || result.context === "workspace" ? result.context : "local";
+  const context: AccessContext = result.context === "auth" || result.context === "root" || result.context === "workspace" ? result.context : "local";
   const nextRootUrl = safeOrigin(result.rootUrl) || (context === "local" ? window.location.origin : "");
   const nextLogoutUrl = safeRootAccessUrl(result.logoutUrl, nextRootUrl, "/auth/logout") || "";
   const nextClerkPublishableKey = typeof result.clerkPublishableKey === "string" && result.clerkPublishableKey === result.clerkPublishableKey.trim()
     ? result.clerkPublishableKey
     : "";
-  const nextClerkProxyUrl = safeClerkProxyUrl(result.clerkProxyUrl, nextRootUrl) || "";
-  const nextClerkIsSatellite = result.clerkIsSatellite === true;
-  const nextClerkPrimarySignInUrl = safeClerkFlowUrl(result.clerkPrimarySignInUrl, "/sign-in") || "";
-  const nextClerkPrimarySignUpUrl = safeClerkFlowUrl(result.clerkPrimarySignUpUrl, "/sign-up") || "";
+  const derivedClerkFrontendApiOrigin = clerkFrontendApiOriginFromPublishableKey(nextClerkPublishableKey) || "";
+  const suppliedClerkFrontendApiOrigin = safeClerkFrontendApiOrigin(result.clerkFrontendApiOrigin) || "";
+  const nextClerkFrontendApiOrigin = suppliedClerkFrontendApiOrigin === derivedClerkFrontendApiOrigin
+    ? suppliedClerkFrontendApiOrigin
+    : "";
+  const expectedClerkSurfaceRole: ClerkSurfaceRole = context === "auth" ? "auth" : context === "root" ? "app" : "";
+  const nextClerkSurfaceRole: ClerkSurfaceRole = result.clerkSurfaceRole === expectedClerkSurfaceRole
+    ? expectedClerkSurfaceRole
+    : "";
+  const nextClerkAuthSignInUrl = safeClerkFlowUrl(result.clerkAuthSignInUrl, "/sign-in") || "";
+  const nextClerkAuthSignUpUrl = safeClerkFlowUrl(result.clerkAuthSignUpUrl, "/sign-up") || "";
   const nextClerkAllowedRedirectOrigins = arrayValue(result.clerkAllowedRedirectOrigins)
     .map(safeOrigin)
     .filter((origin): origin is string => Boolean(origin));
   const nextClerkFallbackRedirectUrl = safeOrigin(result.clerkFallbackRedirectUrl) || "";
   const clerkFlowOriginMatches = Boolean(
-    nextClerkPrimarySignInUrl &&
-    nextClerkPrimarySignUpUrl &&
-    new URL(nextClerkPrimarySignInUrl).origin === new URL(nextClerkPrimarySignUpUrl).origin
+    nextClerkAuthSignInUrl &&
+    nextClerkAuthSignUpUrl &&
+    new URL(nextClerkAuthSignInUrl).origin === new URL(nextClerkAuthSignUpUrl).origin
   );
   const clerkRuntime = {
     clerkPublishableKey: nextClerkPublishableKey,
-    clerkProxyUrl: nextClerkProxyUrl,
-    clerkIsSatellite: nextClerkIsSatellite,
-    clerkPrimarySignInUrl: clerkFlowOriginMatches ? nextClerkPrimarySignInUrl : "",
-    clerkPrimarySignUpUrl: clerkFlowOriginMatches ? nextClerkPrimarySignUpUrl : "",
+    clerkFrontendApiOrigin: nextClerkFrontendApiOrigin,
+    clerkSurfaceRole: nextClerkSurfaceRole,
+    clerkAuthSignInUrl: clerkFlowOriginMatches ? nextClerkAuthSignInUrl : "",
+    clerkAuthSignUpUrl: clerkFlowOriginMatches ? nextClerkAuthSignUpUrl : "",
     clerkAllowedRedirectOrigins: [...new Set(nextClerkAllowedRedirectOrigins)],
     clerkFallbackRedirectUrl: nextClerkFallbackRedirectUrl
   };
   const nextLogoutRetryPending = result.logoutRetryPending === true;
+  const nextLogoutCompletion = context === "root" && result.authenticated === false && result.logoutCompletion === true;
+  const nextLogoutCompletionSessionId = nextLogoutCompletion
+    && typeof result.logoutCompletionSessionId === "string"
+    && Boolean(result.logoutCompletionSessionId)
+    && result.logoutCompletionSessionId === result.logoutCompletionSessionId.trim()
+    ? result.logoutCompletionSessionId
+    : "";
   if (result.authenticated === false) {
     return {
       authenticated: false,
@@ -511,6 +536,8 @@ function normalizeSession(value: unknown): SessionEnvelope {
       logoutUrl: nextLogoutUrl,
       ...clerkRuntime,
       logoutRetryPending: nextLogoutRetryPending,
+      logoutCompletion: nextLogoutCompletion,
+      logoutCompletionSessionId: nextLogoutCompletionSessionId,
       session: null
     };
   }
@@ -523,6 +550,8 @@ function normalizeSession(value: unknown): SessionEnvelope {
       logoutUrl: nextLogoutUrl,
       ...clerkRuntime,
       logoutRetryPending: nextLogoutRetryPending,
+      logoutCompletion: nextLogoutCompletion,
+      logoutCompletionSessionId: nextLogoutCompletionSessionId,
       session: null
     };
   }
@@ -537,6 +566,8 @@ function normalizeSession(value: unknown): SessionEnvelope {
     logoutUrl: nextLogoutUrl,
     ...clerkRuntime,
     logoutRetryPending: nextLogoutRetryPending,
+    logoutCompletion: nextLogoutCompletion,
+    logoutCompletionSessionId: nextLogoutCompletionSessionId,
     session: {
       authenticated: true,
       label: String(source.label || source.displayName || source.name || source.email || "Owner"),
@@ -571,16 +602,43 @@ function safeRootAccessUrl(value: unknown, expectedRootUrl: string, expectedPath
   }
 }
 
-function safeClerkProxyUrl(value: unknown, expectedRootUrl: string): string | null {
-  if (!expectedRootUrl || typeof value !== "string" || !value.trim() || value !== value.trim() || value.includes("\\")) return null;
+function safeClerkFrontendApiOrigin(value: unknown): string | null {
+  if (typeof value !== "string" || !value.trim() || value !== value.trim() || value.includes("\\")) return null;
   try {
     const parsed = new URL(value);
-    if (parsed.origin !== expectedRootUrl || parsed.pathname !== "/__clerk") return null;
-    if (parsed.username || parsed.password || parsed.search || parsed.hash) return null;
-    return parsed.toString().replace(/\/$/, "");
+    if (parsed.protocol !== "https:" || parsed.origin !== value || parsed.pathname !== "/") return null;
+    if (parsed.username || parsed.password || parsed.port || parsed.search || parsed.hash) return null;
+    if (!isExactDnsHostname(parsed.hostname)) return null;
+    return parsed.origin;
   } catch {
     return null;
   }
+}
+
+function clerkFrontendApiOriginFromPublishableKey(publishableKey: string): string | null {
+  const match = /^(?:pk_(?:test|live)_)([A-Za-z0-9+/]+)$/.exec(publishableKey);
+  if (!match) return null;
+  try {
+    const encoded = match[1];
+    const decoded = window.atob(encoded);
+    if (window.btoa(decoded).replace(/=+$/, "") !== encoded) return null;
+    if (!decoded.endsWith("$") || decoded.slice(0, -1).includes("$")) return null;
+    const host = decoded.slice(0, -1);
+    const parsed = new URL(`https://${host}`);
+    if (parsed.hostname !== host || parsed.host !== host || parsed.pathname !== "/") return null;
+    if (!isExactDnsHostname(parsed.hostname)) return null;
+    return parsed.origin;
+  } catch {
+    return null;
+  }
+}
+
+function isExactDnsHostname(hostname: string): boolean {
+  if (hostname.length > 253 || !hostname.includes(".")) return false;
+  return hostname.split(".").every((label) => (
+    label.length <= 63
+    && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label)
+  ));
 }
 
 function safeClerkFlowUrl(value: unknown, expectedPath: "/sign-in" | "/sign-up"): string | null {
@@ -596,24 +654,26 @@ function safeClerkFlowUrl(value: unknown, expectedPath: "/sign-in" | "/sign-up")
 }
 
 function clerkConfigured(): boolean {
-  return (accessContext === "auth" || accessContext === "root") && Boolean(
-    clerkPublishableKey && clerkProxyUrl && clerkPrimarySignInUrl && clerkPrimarySignUpUrl && clerkFallbackRedirectUrl
+  const expectedSurfaceRole = accessContext === "auth" ? "auth" : accessContext === "root" ? "app" : "";
+  return Boolean(expectedSurfaceRole && clerkSurfaceRole === expectedSurfaceRole &&
+    clerkPublishableKey && clerkFrontendApiOrigin && clerkAuthSignInUrl && clerkAuthSignUpUrl && clerkFallbackRedirectUrl
   );
 }
 
 function clerkBundleUrl(packageName: "@clerk/ui@1" | "@clerk/clerk-js@6", filename: string): string {
   if (!clerkConfigured()) throw new Error("Clerk sign-in is not configured for this host.");
-  const bundle = new URL(`${clerkProxyUrl}/npm/${packageName}/dist/${filename}`);
-  if (bundle.origin !== rootUrl || !bundle.pathname.startsWith("/__clerk/npm/@clerk/")) {
-    throw new Error("Clerk sign-in bundles must load through the kanban.cards root proxy.");
+  const expectedPath = `/npm/${packageName}/dist/${filename}`;
+  const bundle = new URL(expectedPath, `${clerkFrontendApiOrigin}/`);
+  if (bundle.origin !== clerkFrontendApiOrigin || bundle.pathname !== expectedPath || bundle.search || bundle.hash) {
+    throw new Error("Clerk sign-in bundles must load from the configured Clerk Frontend API.");
   }
   return bundle.toString();
 }
 
 async function loadClerkScript(source: string, configure?: (script: HTMLScriptElement) => void): Promise<void> {
   const parsed = new URL(source);
-  if (parsed.origin !== rootUrl || parsed.origin !== window.location.origin) {
-    throw new Error("Clerk sign-in could not load outside the kanban.cards root host.");
+  if (parsed.origin !== clerkFrontendApiOrigin || !parsed.pathname.startsWith("/npm/@clerk/")) {
+    throw new Error("Clerk sign-in could not load outside the configured Clerk Frontend API.");
   }
   const existing = [...document.scripts].find((script) => script.src === source);
   if (existing?.dataset.loaded === "true") return;
@@ -649,10 +709,10 @@ async function loadClerkRuntime(): Promise<ClerkBrowser> {
   if (!clerkConfigured()) throw new Error("Clerk sign-in is not configured for this host.");
   const signature = [
     clerkPublishableKey,
-    clerkProxyUrl,
-    String(clerkIsSatellite),
-    clerkPrimarySignInUrl,
-    clerkPrimarySignUpUrl,
+    clerkFrontendApiOrigin,
+    clerkSurfaceRole,
+    clerkAuthSignInUrl,
+    clerkAuthSignUpUrl,
     clerkFallbackRedirectUrl,
     ...clerkAllowedRedirectOrigins
   ].join("\n");
@@ -665,16 +725,14 @@ async function loadClerkRuntime(): Promise<ClerkBrowser> {
     await loadClerkScript(clerkBundleUrl("@clerk/ui@1", "ui.browser.js"));
     await loadClerkScript(clerkBundleUrl("@clerk/clerk-js@6", "clerk.browser.js"), (script) => {
       script.dataset.clerkPublishableKey = clerkPublishableKey;
-      script.dataset.clerkProxyUrl = clerkProxyUrl;
     });
     const clerk = window.Clerk;
     if (!clerk) throw new Error("The secure Clerk sign-in interface did not initialize.");
     await clerk.load({
       ui: { ClerkUI: window.__internal_ClerkUICtor },
-      isSatellite: clerkIsSatellite,
-      signInUrl: clerkPrimarySignInUrl,
-      signUpUrl: clerkPrimarySignUpUrl,
-      ...(clerkIsSatellite ? {} : { allowedRedirectOrigins: clerkAllowedRedirectOrigins })
+      signInUrl: clerkAuthSignInUrl,
+      signUpUrl: clerkAuthSignUpUrl,
+      ...(clerkSurfaceRole === "auth" ? { allowedRedirectOrigins: clerkAllowedRedirectOrigins } : {})
     });
     return clerk;
   })().catch((error) => {
@@ -699,10 +757,18 @@ async function mountClerkSignIn(node: HTMLDivElement): Promise<void> {
   try {
     const clerk = await loadClerkRuntime();
     if (!node.isConnected || session || (accessContext !== "auth" && accessContext !== "root")) return;
-    if (clerkIsSatellite) {
-      const signInUrl = safeBuiltClerkFlowUrl(clerk.buildSignInUrl?.(), clerkPrimarySignInUrl);
-      const signUpUrl = safeBuiltClerkFlowUrl(clerk.buildSignUpUrl?.(), clerkPrimarySignUpUrl);
-      if (!signInUrl || !signUpUrl) throw new Error("Clerk did not provide secure satellite sign-in links.");
+    if (clerkSurfaceRole === "app") {
+      const signInUrl = safeBuiltClerkFlowUrl(
+        clerk.buildSignInUrl?.({ redirectUrl: rootUrl }),
+        clerkAuthSignInUrl,
+        rootUrl
+      );
+      const signUpUrl = safeBuiltClerkFlowUrl(
+        clerk.buildSignUpUrl?.({ redirectUrl: rootUrl }),
+        clerkAuthSignUpUrl,
+        rootUrl
+      );
+      if (!signInUrl || !signUpUrl) throw new Error("Clerk did not provide secure auth-host sign-in links.");
       node.innerHTML = `<div class="jk-actions"><a class="jk-button" data-priority="primary" href="${escapeHtml(signInUrl)}">Continue with email</a><a class="jk-button" data-priority="secondary" href="${escapeHtml(signUpUrl)}">Create account</a></div>`;
       clerkSignInMount = node;
       return;
@@ -711,7 +777,7 @@ async function mountClerkSignIn(node: HTMLDivElement): Promise<void> {
       clerk.mountSignUp(node, {
         routing: "hash",
         fallbackRedirectUrl: clerkFallbackRedirectUrl,
-        signInUrl: clerkPrimarySignInUrl
+        signInUrl: clerkAuthSignInUrl
       });
     } else {
       clerk.mountSignIn(node, {
@@ -734,17 +800,30 @@ async function mountClerkSignIn(node: HTMLDivElement): Promise<void> {
   }
 }
 
-function safeBuiltClerkFlowUrl(value: unknown, configuredUrl: string): string | null {
+function safeBuiltClerkFlowUrl(value: unknown, configuredUrl: string, requiredRedirectUrl: string): string | null {
   if (typeof value !== "string" || !value.trim() || value !== value.trim() || value.includes("\\")) return null;
   try {
     const parsed = new URL(value);
     const configured = new URL(configuredUrl);
+    const requiredRedirectOrigin = safeOrigin(requiredRedirectUrl);
+    if (!requiredRedirectOrigin || requiredRedirectOrigin !== requiredRedirectUrl) return null;
+    const fragment = parsed.hash.slice(1);
+    const querySeparator = fragment.indexOf("?");
+    if (querySeparator < 0 || fragment.slice(0, querySeparator) !== "/") return null;
+    const fragmentParams = new URLSearchParams(fragment.slice(querySeparator + 1));
+    const fragmentEntries = [...fragmentParams.entries()];
+    const redirectUrls = fragmentParams.getAll("redirect_url");
+    const redirectOrigin = redirectUrls.length === 1 ? safeOrigin(redirectUrls[0]) : null;
     if (
       parsed.origin !== configured.origin ||
       parsed.pathname !== configured.pathname ||
       parsed.username ||
       parsed.password ||
-      parsed.hash
+      parsed.search ||
+      fragmentEntries.length !== 1 ||
+      fragmentEntries[0][0] !== "redirect_url" ||
+      redirectUrls.length !== 1 ||
+      redirectOrigin !== requiredRedirectOrigin
     ) return null;
     return parsed.toString();
   } catch {
@@ -1672,7 +1751,7 @@ function captureCardDraft(form: HTMLFormElement): CardDraft | null {
   return draft;
 }
 
-function clearPrivateState(notice: AuthNotice): void {
+function clearPrivateState(notice: AuthNotice | null): void {
   session = null;
   workspaceChoices = [];
   projects = [];
@@ -1724,13 +1803,15 @@ async function loadSession(): Promise<void> {
     rootUrl = result.rootUrl;
     logoutUrl = result.logoutUrl;
     clerkPublishableKey = result.clerkPublishableKey;
-    clerkProxyUrl = result.clerkProxyUrl;
-    clerkIsSatellite = result.clerkIsSatellite;
-    clerkPrimarySignInUrl = result.clerkPrimarySignInUrl;
-    clerkPrimarySignUpUrl = result.clerkPrimarySignUpUrl;
+    clerkFrontendApiOrigin = result.clerkFrontendApiOrigin;
+    clerkSurfaceRole = result.clerkSurfaceRole;
+    clerkAuthSignInUrl = result.clerkAuthSignInUrl;
+    clerkAuthSignUpUrl = result.clerkAuthSignUpUrl;
     clerkAllowedRedirectOrigins = result.clerkAllowedRedirectOrigins;
     clerkFallbackRedirectUrl = result.clerkFallbackRedirectUrl;
     logoutRetryPending = result.logoutRetryPending;
+    logoutCompletion = result.logoutCompletion;
+    logoutCompletionSessionId = result.logoutCompletionSessionId;
     session = result.session;
   } catch (error) {
     if (error instanceof ApiError && error.status === 401) session = null;
@@ -1750,10 +1831,33 @@ async function synchronizeClerkSession(): Promise<boolean> {
   return true;
 }
 
-async function completeClerkSignOut(): Promise<void> {
+function clearSignOutState(): void {
+  const currentUrl = new URL(window.location.href);
+  if (!currentUrl.searchParams.has("signout")) return;
+  currentUrl.searchParams.delete("signout");
+  window.history.replaceState(null, "", `${currentUrl.pathname}${currentUrl.search}${currentUrl.hash}`);
+}
+
+async function completeClerkSignOut(sessionId: string): Promise<void> {
   if (!clerkConfigured()) throw new Error("Clerk sign-out is not configured for this host.");
+  if (!sessionId || sessionId !== sessionId.trim()) throw new Error("The Clerk session sign-out receipt is invalid.");
   const clerk = await loadClerkRuntime();
-  await clerk.signOut({ redirectUrl: rootUrl });
+  const browserSessions = clerk.client?.signedInSessions;
+  if (!Array.isArray(browserSessions)) throw new Error("Clerk did not return a verifiable browser-session list.");
+  const targetSession = browserSessions.find((candidate) => candidate.id === sessionId);
+  if (targetSession) await targetSession.end();
+  const remainingSessions = clerk.client?.signedInSessions;
+  if (!Array.isArray(remainingSessions) || remainingSessions.some((candidate) => candidate.id === sessionId)) {
+    throw new Error("Clerk did not confirm that the exact browser session ended.");
+  }
+  await acknowledgeLogoutCompletion();
+}
+
+async function acknowledgeLogoutCompletion(): Promise<void> {
+  await api("/logout-completion", { method: "DELETE" });
+  logoutCompletion = false;
+  logoutCompletionSessionId = "";
+  clearSignOutState();
 }
 
 async function loadWorkspaceChoices(): Promise<void> {
@@ -1796,6 +1900,24 @@ function submitWorkspaceHandoff(destination: URL, token: string): void {
   input.type = "hidden";
   input.name = "token";
   input.value = token;
+  form.append(input);
+  document.body.append(form);
+  try {
+    form.submit();
+  } finally {
+    form.remove();
+  }
+}
+
+function submitLogoutCompletion(destination: URL, continuation: string): void {
+  const form = document.createElement("form");
+  form.method = "POST";
+  form.action = destination.toString();
+  form.hidden = true;
+  const input = document.createElement("input");
+  input.type = "hidden";
+  input.name = "continuation";
+  input.value = continuation;
   form.append(input);
   document.body.append(form);
   try {
@@ -1944,18 +2066,26 @@ async function signOut(): Promise<void> {
   setWorkspaceMutationsDisabled(true, "sign-in");
   projectStatus = { tone: "neutral", title: "Signing out", message: "Conflicting actions are unavailable while private workspace data is cleared." };
   render();
-  let notice: AuthNotice = {
-    kind: "signed-out",
-    title: "Signed out",
-    message: "Private Project and Card data left the screen."
-  };
+  let notice: AuthNotice | null = accessContext === "local"
+    ? {
+        kind: "signed-out",
+        title: "Signed out",
+        message: "Private Project and Card data left the screen."
+      }
+    : null;
   try {
     const response = objectValue(await api("/session", { method: "DELETE" }));
     const next = safeRootAccessUrl(response.logoutUrl, rootUrl, "/auth/logout") || "";
-    if (next) {
-      window.location.assign(next);
+    const continuation = typeof response.logoutContinuation === "string"
+      && response.logoutContinuation
+      && response.logoutContinuation === response.logoutContinuation.trim()
+      ? response.logoutContinuation
+      : "";
+    if (next && continuation) {
+      submitLogoutCompletion(new URL(next), continuation);
       return;
     }
+    if (accessContext !== "local") throw new Error("Global sign-out did not return a trusted completion route.");
   } catch (error) {
     const incompleteGlobalSignOut = error instanceof ApiError &&
       error.status === 503 &&
@@ -3071,7 +3201,9 @@ async function handleAction(button: HTMLElement): Promise<void> {
   if (action === "clerk-change-account") {
     try {
       const clerk = await loadClerkRuntime();
-      await clerk.signOut({ redirectUrl: rootUrl });
+      const sessionId = clerk.session?.id;
+      if (!sessionId) throw new Error("Clerk did not identify the active browser session.");
+      await clerk.signOut({ sessionId, redirectUrl: rootUrl });
     } catch (error) {
       clerkSignInBlocked = true;
       authNotice = {
@@ -3096,11 +3228,35 @@ async function handleAction(button: HTMLElement): Promise<void> {
     return;
   }
   if (action === "retry-global-sign-out" && logoutUrl) {
-    if (accessContext === "workspace") {
-      await signOut();
+    if (
+      !session
+      && accessContext === "root"
+      && !logoutRetryPending
+      && logoutCompletion
+      && logoutCompletionSessionId
+    ) {
+      try {
+        await completeClerkSignOut(logoutCompletionSessionId);
+        clearPrivateState({
+          kind: "signed-out",
+          title: "Signed out",
+          message: "Private Project and Card data left the screen."
+        });
+        render();
+      } catch (error) {
+        clerkSignInBlocked = true;
+        clearPrivateState({
+          kind: "sign-out-incomplete",
+          title: "Sign-out incomplete",
+          message: error instanceof Error
+            ? error.message
+            : "The kanban.cards session ended, but Clerk sign-out could not be confirmed. Try again."
+        });
+        render();
+      }
       return;
     }
-    window.location.assign(logoutUrl);
+    await signOut();
     return;
   }
   if (action === "show-description-write" || action === "show-description-preview") {
@@ -3340,24 +3496,12 @@ cardOnlyQuery.addEventListener("change", () => {
 async function boot(): Promise<void> {
   const currentUrl = new URL(window.location.href);
   const signOutState = currentUrl.searchParams.get("signout");
-  const completeProviderSignOut = signOutState === "clerk";
-  const retryGlobalSignOutFromUrl = signOutState === "incomplete";
-  if (signOutState) {
-    currentUrl.searchParams.delete("signout");
-    window.history.replaceState(null, "", `${currentUrl.pathname}${currentUrl.search}${currentUrl.hash}`);
-  }
-  if (signOutState === "incomplete") {
-    clearPrivateState({
-      kind: "sign-out-incomplete",
-      title: "Sign-out incomplete",
-      message: "Private data left this screen and this browser session was cleared, but another Workspace session may still be active. Try signing out again when the service recovers."
-    });
-  }
   render();
   try {
     await loadSession();
-    const retryGlobalSignOut = retryGlobalSignOutFromUrl || logoutRetryPending;
+    const retryGlobalSignOut = logoutRetryPending;
     if (retryGlobalSignOut) {
+      if (signOutState) clearSignOutState();
       clearPrivateState({
         kind: "sign-out-incomplete",
         title: "Sign-out incomplete",
@@ -3365,23 +3509,13 @@ async function boot(): Promise<void> {
       });
       return;
     }
-    if (completeProviderSignOut) {
-      if (session) {
-        if (accessContext === "workspace") {
-          await signOut();
-        } else if (accessContext === "root" && logoutUrl) {
-          window.location.assign(logoutUrl);
-        } else {
-          clearPrivateState({
-            kind: "sign-out-incomplete",
-            title: "Sign-out incomplete",
-            message: "The kanban.cards session is still active, so sign-out success could not be confirmed. Try signing out again."
-          });
-        }
-        return;
-      }
+    const trustedLogoutCompletion = logoutCompletion
+      && Boolean(logoutCompletionSessionId)
+      && !session
+      && accessContext === "root";
+    if (trustedLogoutCompletion) {
       try {
-        await completeClerkSignOut();
+        await completeClerkSignOut(logoutCompletionSessionId);
         clearPrivateState({
           kind: "signed-out",
           title: "Signed out",
@@ -3399,6 +3533,7 @@ async function boot(): Promise<void> {
       }
       return;
     }
+    if (signOutState) clearSignOutState();
     if (!session && accessContext === "root" && !retryGlobalSignOut) {
       try {
         await synchronizeClerkSession();

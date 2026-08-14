@@ -7,14 +7,19 @@ import express, { type ErrorRequestHandler, type NextFunction, type Request, typ
 
 import { AccessStoreError, createAccessStore, type AccessStore, type AccessWorkspace } from "./access-store";
 import {
+  clearLogoutCompletionCookie,
   clearRootSessionCookie,
   clearTenantSessionCookie,
   clearLogoutRetryCookie,
+  createLogoutCompletionCookie,
+  createLogoutContinuationToken,
   createLogoutRetryCookie,
   createRootSessionCookie,
   createTenantSessionCookie,
   isProductionRequest,
   verifyRootSession,
+  verifyLogoutCompletionSession,
+  verifyLogoutContinuationToken,
   verifyLogoutRetrySession,
   verifyTenantSession,
   type LogoutRetrySession,
@@ -22,9 +27,10 @@ import {
 } from "./app-sessions";
 import {
   ClerkIdentityError,
-  clerkPrimaryOrigin,
-  clerkPrimarySignInUrl,
-  clerkPrimarySignUpUrl,
+  clerkAuthOrigin,
+  clerkAuthSignInUrl,
+  clerkAuthSignUpUrl,
+  clerkFrontendApiOrigin,
   clerkAuthConfigurationRequested,
   createClerkAuthGateway,
   getClerkAuthConfig,
@@ -144,7 +150,7 @@ const PRODUCT_NAME = "kanban.cards";
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 4317;
 const SESSION_COOKIE = "kanban_cards_session";
-const RESERVED_WORKSPACE_SLUGS = new Set(["api", "app", "auth", "admin", "www"]);
+const RESERVED_WORKSPACE_SLUGS = new Set(["api", "app", "auth", "admin", "clerk", "www"]);
 const DEFAULT_SESSION_TTL_SECONDS = 60 * 60 * 24 * 7;
 const MAX_ACTIVITY = 1_000;
 const MAX_IDEMPOTENCY_RECORDS = 1_000;
@@ -206,11 +212,16 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
   const hostFamilies = candidateHostFamily ? [primaryHostFamily, candidateHostFamily] : [primaryHostFamily];
   validateHostFamilies(hostFamilies);
   const authHost = clerkAuthConfig?.authHost || "";
-  const authOrigin = clerkAuthConfig ? clerkPrimaryOrigin(clerkAuthConfig) : "";
-  if (clerkAuthConfig) validateAuthHostTopology(authHost, hostFamilies);
+  const authOrigin = clerkAuthConfig ? clerkAuthOrigin(clerkAuthConfig) : "";
+  const clerkFrontendApi = clerkAuthConfig ? clerkFrontendApiOrigin(clerkAuthConfig) : "";
+  if (clerkAuthConfig) {
+    validateSameRootClerkTopology(authHost, primaryHostFamily, candidateHostFamily);
+    validateClerkFrontendApiHostIsolation(clerkFrontendApi, authHost, hostFamilies);
+    validateProductionClerkFrontendApi(clerkFrontendApi, primaryHostFamily);
+  }
   const clerkRootDomains = clerkAuthConfig ? [
-    { origin: authOrigin, isSatellite: false },
-    ...hostFamilies.map((family) => ({ origin: family.rootOrigin, isSatellite: true }))
+    { origin: authOrigin, role: "auth" as const },
+    ...hostFamilies.map((family) => ({ origin: family.rootOrigin, role: "app" as const }))
   ] : [];
   const clerkAuthGateway = clerkAuthConfig
     ? options.clerkAuthGateway || createClerkAuthGateway(clerkAuthConfig)
@@ -388,7 +399,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       trustForwardedHost
     ));
   }
-  app.use(securityHeaders(Boolean(clerkAuthConfig)));
+  app.use(securityHeaders(clerkFrontendApi));
   app.use(express.urlencoded({ extended: false, limit: "16kb", type: "application/x-www-form-urlencoded" }));
   app.use(express.json({ limit: "256kb", type: "application/json" }));
   if (clerkAuthConfig) {
@@ -474,38 +485,50 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       productionRequest,
       clerkAuthConfig.rootSessionTtlSeconds
     );
+    res.append("Set-Cookie", clearLogoutCompletionCookie(productionRequest));
     res.append("Set-Cookie", cookie);
     res.status(201).json({ authenticated: true });
   }));
 
-  app.get("/auth/logout", asyncHandler(async (req, res) => {
+  app.post("/auth/logout", asyncHandler(async (req, res) => {
+    noStore(res);
+    if (req.originalUrl !== "/auth/logout") throw httpError(404, "API route not found.");
     const family = requireRootRequest(req, hostFamilies, trustForwardedHost);
-    if (!clerkAuthConfig || !clerkAuthGateway) {
-      res.redirect(303, "/");
-      return;
+    if (!clerkAuthConfig || !clerkAuthGateway) throw httpError(404, "API route not found.");
+    await assertLogoutCompletionOrigin(req, family, accessStore);
+    const continuationToken = requiredString(asRecord(req.body).continuation, "Logout continuation");
+    const continuation = await verifyLogoutContinuationToken(continuationToken, clerkAuthConfig.sessionSecret);
+    if (
+      !continuation
+      || continuation.rootOrigin !== family.rootOrigin
+      || continuation.initiatingOrigin !== req.get("origin")
+    ) {
+      throw httpError(403, "Logout continuation is invalid or expired.");
     }
     const appRequest = webRequest(req, trustForwardedHost);
     const productionRequest = isProductionRequest(appRequest);
-    res.append("Set-Cookie", clearRootSessionCookie(productionRequest));
-    const identity = await verifyRootSession(appRequest, clerkAuthConfig.sessionSecret, productionRequest)
-      || await verifyLogoutRetrySession(appRequest, clerkAuthConfig.sessionSecret, productionRequest);
-    try {
-      if (identity) {
-        await accessStore.revokeSession(identity.providerSubject, identity.sessionId);
-        await clerkAuthGateway.revokeSession(identity.sessionId);
-      }
-    } catch {
-      if (identity) {
-        res.append("Set-Cookie", await createLogoutRetryCookie(
-          logoutRetrySession(identity, family.rootOrigin, requestOrigin(appRequest)),
-          clerkAuthConfig.sessionSecret,
-          productionRequest
-        ));
-      }
-      res.redirect(303, "/?signout=incomplete");
-      return;
+    const currentRootSession = await verifyRootSession(
+      appRequest,
+      clerkAuthConfig.sessionSecret,
+      productionRequest
+    );
+    const [continuationRevoked, currentRootRevoked] = await Promise.all([
+      accessStore.isSessionRevoked(continuation.providerSubject, continuation.sessionId),
+      currentRootSession
+        ? accessStore.isSessionRevoked(currentRootSession.providerSubject, currentRootSession.sessionId)
+        : Promise.resolve(true)
+    ]);
+    if (!continuationRevoked || !currentRootRevoked) {
+      throw httpError(409, "Logout continuation no longer matches the active browser state.");
     }
+    res.append("Set-Cookie", clearRootSessionCookie(productionRequest));
     res.append("Set-Cookie", clearLogoutRetryCookie(productionRequest));
+    res.append("Set-Cookie", await createLogoutCompletionCookie({
+      completionId: continuation.completionId,
+      providerSubject: continuation.providerSubject,
+      sessionId: continuation.sessionId,
+      rootOrigin: family.rootOrigin
+    }, clerkAuthConfig.sessionSecret, productionRequest));
     res.redirect(303, "/?signout=clerk");
   }));
 
@@ -518,8 +541,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
         rootUrl: authOrigin,
         ...clerkBrowserRuntimeConfig({
           config: clerkAuthConfig,
-          currentOrigin: authOrigin,
-          isSatellite: false,
+          surfaceRole: "auth",
           allowedRedirectOrigins: hostFamilies.map((family) => family.rootOrigin),
           fallbackRedirectUrl: primaryHostFamily.rootOrigin
         })
@@ -539,7 +561,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       workspaceStoreResolver
     });
     const family = requestContext.hostFamily || primaryHostFamily;
-    const appRequest = clerkAuthConfig && requestContext.kind === "root"
+    const appRequest = clerkAuthConfig && requestContext.kind !== "local"
       ? webRequest(req, trustForwardedHost)
       : null;
     const logoutRetryPending = clerkAuthConfig && appRequest
@@ -549,18 +571,26 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
           isProductionRequest(appRequest)
         ))
       : false;
+    const logoutCompletionSession = clerkAuthConfig && appRequest && requestContext.kind === "root"
+      ? await verifyLogoutCompletionSession(
+          appRequest,
+          clerkAuthConfig.sessionSecret,
+          isProductionRequest(appRequest)
+        )
+      : null;
     if (!requestContext.auth) {
       res.json({
         authenticated: false,
         context: requestContext.kind,
         rootUrl: family.rootOrigin,
         ...(clerkAuthConfig ? { logoutUrl: rootLogoutUrl(family) } : {}),
+        ...(clerkAuthConfig ? { logoutRetryPending } : {}),
         ...(clerkAuthConfig && requestContext.kind === "root" ? {
-          logoutRetryPending,
+          logoutCompletion: Boolean(logoutCompletionSession),
+          ...(logoutCompletionSession ? { logoutCompletionSessionId: logoutCompletionSession.sessionId } : {}),
           ...clerkBrowserRuntimeConfig({
             config: clerkAuthConfig,
-            currentOrigin: family.rootOrigin,
-            isSatellite: true,
+            surfaceRole: "app",
             allowedRedirectOrigins: [],
             fallbackRedirectUrl: primaryHostFamily.rootOrigin
           })
@@ -573,12 +603,12 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       context: requestContext.kind,
       rootUrl: family.rootOrigin,
       logoutUrl: rootLogoutUrl(family),
+      ...(clerkAuthConfig ? { logoutRetryPending } : {}),
       ...(clerkAuthConfig && requestContext.kind === "root" ? {
-        logoutRetryPending,
+        logoutCompletion: false,
         ...clerkBrowserRuntimeConfig({
           config: clerkAuthConfig,
-          currentOrigin: family.rootOrigin,
-          isSatellite: true,
+          surfaceRole: "app",
           allowedRedirectOrigins: [],
           fallbackRedirectUrl: primaryHostFamily.rootOrigin
         })
@@ -587,6 +617,24 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       email: requestContext.identity?.email,
       ...(requestContext.workspace ? { workspace: publicAccessWorkspace(requestContext.workspace, family) } : {})
     });
+  }));
+
+  app.delete("/api/logout-completion", asyncHandler(async (req, res) => {
+    noStore(res);
+    const family = requireRootRequest(req, hostFamilies, trustForwardedHost);
+    if (!clerkAuthConfig) throw httpError(404, "API route not found.");
+    assertExactOrigin(req, family.rootOrigin);
+    const appRequest = webRequest(req, trustForwardedHost);
+    const productionRequest = isProductionRequest(appRequest);
+    const [completion, rootSession] = await Promise.all([
+      verifyLogoutCompletionSession(appRequest, clerkAuthConfig.sessionSecret, productionRequest),
+      verifyRootSession(appRequest, clerkAuthConfig.sessionSecret, productionRequest)
+    ]);
+    if (!completion || completion.rootOrigin !== family.rootOrigin || rootSession) {
+      throw httpError(401, "Logout completion required.");
+    }
+    res.append("Set-Cookie", clearLogoutCompletionCookie(productionRequest));
+    res.json({ completed: true });
   }));
 
   app.post("/api/session", asyncHandler(async (req, res) => {
@@ -622,17 +670,30 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       ]);
       res.append("Set-Cookie", clearRootSessionCookie(productionRequest));
       res.append("Set-Cookie", clearTenantSessionCookie(productionRequest));
+      res.append("Set-Cookie", clearLogoutCompletionCookie(productionRequest));
       const session = tenantSession || rootSession || retrySession;
+      if (!session || session.rootOrigin !== family.rootOrigin) {
+        res.append("Set-Cookie", clearLogoutRetryCookie(productionRequest));
+        throw httpError(401, "Authentication required.");
+      }
+      let logoutContinuation = "";
       try {
-        if (session) await accessStore.revokeSession(session.providerSubject, session.sessionId);
+        await accessStore.revokeSession(session.providerSubject, session.sessionId);
+        if (!clerkAuthGateway) throw new Error("Clerk sign-out is unavailable.");
+        await clerkAuthGateway.revokeSession(session.sessionId);
+        logoutContinuation = await createLogoutContinuationToken({
+          completionId: crypto.randomUUID(),
+          providerSubject: session.providerSubject,
+          sessionId: session.sessionId,
+          rootOrigin: family.rootOrigin,
+          initiatingOrigin: requestOrigin(appRequest)
+        }, clerkAuthConfig.sessionSecret);
       } catch {
-        if (session) {
-          res.append("Set-Cookie", await createLogoutRetryCookie(
-            logoutRetrySession(session, family.rootOrigin, requestOrigin(appRequest)),
-            clerkAuthConfig.sessionSecret,
-            productionRequest
-          ));
-        }
+        res.append("Set-Cookie", await createLogoutRetryCookie(
+          logoutRetrySession(session, family.rootOrigin, requestOrigin(appRequest)),
+          clerkAuthConfig.sessionSecret,
+          productionRequest
+        ));
         res.status(503).json({
           error: "Global sign-out could not be completed.",
           signedOutHere: true,
@@ -644,7 +705,8 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       res.json({
         signedOutHere: true,
         globalSignOutComplete: true,
-        logoutUrl: rootLogoutUrl(family)
+        logoutUrl: rootLogoutUrl(family),
+        logoutContinuation
       });
       return;
     }
@@ -998,7 +1060,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
   return app;
 }
 
-function securityHeaders(clerkConfigured: boolean): RequestHandler {
+function securityHeaders(clerkFrontendApi: string): RequestHandler {
   return (req, res, next) => {
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
@@ -1006,8 +1068,8 @@ function securityHeaders(clerkConfigured: boolean): RequestHandler {
     res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
     res.setHeader(
       "Content-Security-Policy",
-      clerkConfigured
-        ? "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'; script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com https://*.protect.clerk.com; style-src 'self' 'unsafe-inline'; connect-src 'self' https://*.protect.clerk.com; img-src 'self' https://img.clerk.com; worker-src 'self' blob:; frame-src 'self' https://challenges.cloudflare.com https://*.protect.clerk.com"
+      clerkFrontendApi
+        ? `default-src 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'; script-src 'self' 'unsafe-inline' ${clerkFrontendApi} https://challenges.cloudflare.com https://*.protect.clerk.com; style-src 'self' 'unsafe-inline'; connect-src 'self' ${clerkFrontendApi} https://*.protect.clerk.com; img-src 'self' https://img.clerk.com; worker-src 'self' blob:; frame-src 'self' https://challenges.cloudflare.com https://*.protect.clerk.com`
         : "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'"
     );
     if (req.path.startsWith("/api/")) noStore(res);
@@ -1266,24 +1328,31 @@ function createCandidateHostFamily(input: CandidateHostFamilyOptions, clerkConfi
 
 function clerkBrowserRuntimeConfig(input: {
   config: ClerkAuthConfig;
-  currentOrigin: string;
-  isSatellite: boolean;
+  surfaceRole: "auth" | "app";
   allowedRedirectOrigins: readonly string[];
   fallbackRedirectUrl: string;
 }): UnknownRecord {
   return {
     clerkPublishableKey: input.config.publishableKey,
-    clerkProxyUrl: `${input.currentOrigin}/__clerk`,
-    clerkIsSatellite: input.isSatellite,
-    clerkPrimarySignInUrl: clerkPrimarySignInUrl(input.config),
-    clerkPrimarySignUpUrl: clerkPrimarySignUpUrl(input.config),
+    clerkFrontendApiOrigin: clerkFrontendApiOrigin(input.config),
+    clerkSurfaceRole: input.surfaceRole,
+    clerkAuthSignInUrl: clerkAuthSignInUrl(input.config),
+    clerkAuthSignUpUrl: clerkAuthSignUpUrl(input.config),
     clerkAllowedRedirectOrigins: [...input.allowedRedirectOrigins],
     clerkFallbackRedirectUrl: input.fallbackRedirectUrl
   };
 }
 
-function validateAuthHostTopology(authHost: string, families: readonly HostFamily[]): void {
+function validateSameRootClerkTopology(
+  authHost: string,
+  primaryFamily: HostFamily,
+  candidateFamily: HostFamily | null
+): void {
   if (!authHost) throw new Error("KANBAN_CARDS_AUTH_HOST is required for Clerk authentication.");
+  if (!isStrictSubdomainHost(authHost, primaryFamily.rootHost)) {
+    throw new Error("KANBAN_CARDS_AUTH_HOST must be a strict same-root subdomain of KANBAN_CARDS_ROOT_HOST with a matching port.");
+  }
+  const families = candidateFamily ? [primaryFamily, candidateFamily] : [primaryFamily];
   for (const family of families) {
     if (
       authHost === family.rootHost
@@ -1293,10 +1362,49 @@ function validateAuthHostTopology(authHost: string, families: readonly HostFamil
       throw new Error("KANBAN_CARDS_AUTH_HOST must be distinct from every application root and tenant host.");
     }
   }
+  if (!candidateFamily) return;
+  if (!isStrictSubdomainHost(candidateFamily.rootHost, primaryFamily.rootHost)) {
+    throw new Error("KANBAN_CARDS_CANDIDATE_ROOT_HOST must be nested beneath KANBAN_CARDS_ROOT_HOST with a matching port.");
+  }
+  for (const tenantHost of candidateFamily.tenantHosts.keys()) {
+    if (!isStrictSubdomainHost(tenantHost, candidateFamily.rootHost)) {
+      throw new Error("Every candidate tenant host must be nested beneath KANBAN_CARDS_CANDIDATE_ROOT_HOST with a matching port.");
+    }
+  }
+}
+
+function isStrictSubdomainHost(host: string, rootHost: string): boolean {
+  const parsedHost = new URL(`http://${host}`);
+  const parsedRoot = new URL(`http://${rootHost}`);
+  return parsedHost.port === parsedRoot.port
+    && parsedHost.hostname.endsWith(`.${parsedRoot.hostname}`);
+}
+
+function validateClerkFrontendApiHostIsolation(
+  frontendApiOrigin: string,
+  authHost: string,
+  hostFamilies: readonly HostFamily[]
+): void {
+  const frontendApiHost = new URL(frontendApiOrigin).host;
+  const applicationHosts = new Set([
+    authHost,
+    ...hostFamilies.flatMap((family) => [family.rootHost, ...family.tenantHosts.keys()])
+  ]);
+  if (applicationHosts.has(frontendApiHost)) {
+    throw new Error("The Clerk Frontend API hostname must be distinct from every auth, application-root, and explicit tenant host.");
+  }
+}
+
+function validateProductionClerkFrontendApi(frontendApiOrigin: string, primaryFamily: HostFamily): void {
+  if (process.env.VERCEL_ENV?.trim().toLowerCase() !== "production") return;
+  const rootHostname = new URL(`http://${primaryFamily.rootHost}`).hostname;
+  const expectedOrigin = `https://clerk.${rootHostname}`;
+  if (frontendApiOrigin !== expectedOrigin) {
+    throw new Error(`Vercel production requires the Clerk Frontend API origin ${expectedOrigin} derived from the production publishable key.`);
+  }
 }
 
 function authHostSurfaceAllows(req: Request): boolean {
-  if (req.path === "/__clerk" || req.path.startsWith("/__clerk/")) return true;
   if (req.method !== "GET" && req.method !== "HEAD") return false;
   return new Set([
     "/sign-in",
@@ -1656,6 +1764,32 @@ function assertExactOrigin(req: Request, expectedOrigin: string): void {
     throw httpError(403, "Invalid request origin.");
   }
   if (actual.origin !== expected.origin) throw httpError(403, "Cross-origin request rejected.");
+}
+
+async function assertLogoutCompletionOrigin(
+  req: Request,
+  family: HostFamily,
+  accessStore: AccessStore
+): Promise<void> {
+  const origin = req.get("origin");
+  if (!origin) throw httpError(403, "A trusted application origin is required.");
+  let parsed: URL;
+  try {
+    parsed = new URL(origin);
+  } catch {
+    throw httpError(403, "Invalid request origin.");
+  }
+  if (parsed.origin !== origin || parsed.username || parsed.password) {
+    throw httpError(403, "Invalid request origin.");
+  }
+  if (origin === family.rootOrigin) return;
+  if (originForHost(parsed.host.toLowerCase()) !== origin) {
+    throw httpError(403, "Cross-origin request rejected.");
+  }
+  const context = await resolveKnownHost(parsed.host.toLowerCase(), [family], accessStore);
+  if (!context || context.kind !== "workspace" || !context.workspace) {
+    throw httpError(403, "Cross-origin request rejected.");
+  }
 }
 
 function requireActor(req: Request): ActivityActor {

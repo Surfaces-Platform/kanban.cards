@@ -6,9 +6,10 @@ import {
   ClerkAuthConfigError,
   ClerkIdentityError,
   clerkAuthConfigurationRequested,
+  clerkFrontendApiOrigin,
+  clerkAuthSignInUrl,
+  clerkAuthSignUpUrl,
   createClerkAuthGateway,
-  clerkPrimarySignInUrl,
-  clerkPrimarySignUpUrl,
   getClerkAuthConfig,
   validateClerkAuthConfig,
   type ClerkAuthConfig,
@@ -16,8 +17,11 @@ import {
 } from "../src/clerk-auth";
 import { createApp } from "../src/server";
 
+const TEST_PUBLISHABLE_KEY = clerkPublishableKey("test", "clerk.kanban.cards");
+const LIVE_PUBLISHABLE_KEY = clerkPublishableKey("live", "clerk.kanban.cards");
+
 const CONFIG: ClerkAuthConfig = {
-  publishableKey: "pk_test_kanban",
+  publishableKey: TEST_PUBLISHABLE_KEY,
   secretKey: "sk_test_kanban",
   encryptionKey: "clerk-encryption-test-key-with-at-least-32-characters",
   sessionSecret: "clerk-auth-test-secret-with-at-least-32-characters",
@@ -35,15 +39,35 @@ test("Clerk configuration requires exact keys, user IDs, and a separate app-sess
     SESSION_SECRET: CONFIG.sessionSecret,
     KANBAN_CARDS_AUTH_HOST: CONFIG.authHost,
     KANBAN_CARDS_ALLOWED_CLERK_USER_IDS: "user_mike123,user_mike123,user_teammate456",
-    ROOT_SESSION_TTL_SECONDS: "90",
-    TENANT_SESSION_TTL_SECONDS: "120"
+    KANBAN_CARDS_SESSION_TTL_SECONDS: "90"
   };
   assert.deepEqual(getClerkAuthConfig(marketplaceEnv), {
     ...CONFIG,
     allowedUserIds: ["user_mike123", "user_teammate456"],
     rootSessionTtlSeconds: 90,
+    tenantSessionTtlSeconds: 90
+  });
+
+  const { KANBAN_CARDS_SESSION_TTL_SECONDS: _canonicalTtl, ...withoutCanonicalTtl } = marketplaceEnv;
+  assert.deepEqual(getClerkAuthConfig({
+    ...withoutCanonicalTtl,
+    ROOT_SESSION_TTL_SECONDS: "90",
+    TENANT_SESSION_TTL_SECONDS: "120"
+  }), {
+    ...CONFIG,
+    allowedUserIds: ["user_mike123", "user_teammate456"],
+    rootSessionTtlSeconds: 90,
     tenantSessionTtlSeconds: 120
   });
+  assert.equal(getClerkAuthConfig({
+    ...marketplaceEnv,
+    ROOT_SESSION_TTL_SECONDS: "90",
+    TENANT_SESSION_TTL_SECONDS: "90"
+  }).tenantSessionTtlSeconds, 90);
+  assert.throws(() => getClerkAuthConfig({
+    ...marketplaceEnv,
+    TENANT_SESSION_TTL_SECONDS: "120"
+  }), /TENANT_SESSION_TTL_SECONDS must match KANBAN_CARDS_SESSION_TTL_SECONDS/);
 
   const { NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: _marketplaceKey, ...sharedEnv } = marketplaceEnv;
   assert.equal(getClerkAuthConfig({ ...sharedEnv, CLERK_PUBLISHABLE_KEY: CONFIG.publishableKey }).publishableKey, CONFIG.publishableKey);
@@ -53,7 +77,7 @@ test("Clerk configuration requires exact keys, user IDs, and a separate app-sess
   }).publishableKey, CONFIG.publishableKey);
   assert.throws(() => getClerkAuthConfig({
     ...marketplaceEnv,
-    CLERK_PUBLISHABLE_KEY: "pk_test_different"
+    CLERK_PUBLISHABLE_KEY: clerkPublishableKey("test", "clerk.different.test")
   }), /must match when both are set/);
   assert.equal(clerkAuthConfigurationRequested({ NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: CONFIG.publishableKey }), true);
   assert.throws(
@@ -62,13 +86,15 @@ test("Clerk configuration requires exact keys, user IDs, and a separate app-sess
   );
   assert.equal(getClerkAuthConfig({
     ...marketplaceEnv,
-    NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: "pk_live_kanban",
+    NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: LIVE_PUBLISHABLE_KEY,
     CLERK_SECRET_KEY: "sk_live_kanban",
     VERCEL_ENV: "production"
-  }).publishableKey, "pk_live_kanban");
+  }).publishableKey, LIVE_PUBLISHABLE_KEY);
+  assert.equal(clerkFrontendApiOrigin(CONFIG), "https://clerk.kanban.cards");
 
   for (const change of [
     { publishableKey: "not-clerk" },
+    { publishableKey: clerkPublishableKey("test", "clerk_bad.kanban.cards") },
     { secretKey: "not-clerk" },
     { encryptionKey: "too-short" },
     { sessionSecret: "too-short" },
@@ -110,33 +136,30 @@ test("Clerk middleware is limited to exact root origins and reads only verified 
   });
 
   const directMiddleware = gateway.middleware([
-    { origin: "https://auth.kanban.cards", isSatellite: false },
-    { origin: "https://kanban.cards", isSatellite: true },
-    { origin: "https://candidate.example.com", isSatellite: true }
+    { origin: "https://auth.kanban.cards", role: "auth" },
+    { origin: "https://kanban.cards", role: "app" },
+    { origin: "https://candidate.release.kanban.cards", role: "app" }
   ], false);
   const optionsForRequest = middlewareOptions as unknown as (req: Request) => Record<string, unknown>;
-  const primary = optionsForRequest(requestWithHost("auth.kanban.cards"));
+  const auth = optionsForRequest(requestWithHost("auth.kanban.cards"));
   const canonical = optionsForRequest(requestWithHost("kanban.cards"));
-  const candidate = optionsForRequest(requestWithHost("candidate.example.com"));
-  assert.deepEqual(primary.authorizedParties, ["https://auth.kanban.cards"]);
-  assert.deepEqual(primary.frontendApiProxy, { enabled: true });
-  assert.equal(primary.isSatellite, false);
-  assert.equal(primary.signInUrl, clerkPrimarySignInUrl(CONFIG));
-  assert.equal(primary.signUpUrl, clerkPrimarySignUpUrl(CONFIG));
+  const candidate = optionsForRequest(requestWithHost("candidate.release.kanban.cards"));
+  assert.deepEqual(auth.authorizedParties, ["https://auth.kanban.cards"]);
   assert.deepEqual(canonical.authorizedParties, ["https://kanban.cards"]);
-  assert.deepEqual(candidate.authorizedParties, ["https://candidate.example.com"]);
-  assert.deepEqual(canonical.frontendApiProxy, { enabled: true });
-  assert.equal(canonical.isSatellite, true);
-  assert.equal(canonical.signInUrl, clerkPrimarySignInUrl(CONFIG));
-  assert.equal(canonical.signUpUrl, clerkPrimarySignUpUrl(CONFIG));
-  assert.equal(candidate.isSatellite, true);
-  assert.equal(candidate.satelliteAutoSync, false);
-  assert.equal(candidate.signInUrl, clerkPrimarySignInUrl(CONFIG));
-  assert.equal(candidate.signUpUrl, clerkPrimarySignUpUrl(CONFIG));
+  assert.deepEqual(candidate.authorizedParties, ["https://candidate.release.kanban.cards"]);
+  for (const options of [auth, canonical, candidate]) {
+    assert.deepEqual(Object.keys(options).sort(), ["authorizedParties", "publishableKey", "secretKey"]);
+    assert.equal("frontendApiProxy" in options, false);
+    assert.equal("isSatellite" in options, false);
+    assert.equal("domain" in options, false);
+    assert.equal("satelliteAutoSync" in options, false);
+  }
+  assert.equal(clerkAuthSignInUrl(CONFIG), "https://auth.kanban.cards/sign-in");
+  assert.equal(clerkAuthSignUpUrl(CONFIG), "https://auth.kanban.cards/sign-up");
 
   const spoofedCandidate = optionsForRequest(requestWithHost(
     "kanban.cards",
-    "candidate.example.com"
+    "candidate.release.kanban.cards"
   ));
   assert.deepEqual(spoofedCandidate.authorizedParties, ["https://kanban.cards"]);
   assert.throws(
@@ -146,14 +169,14 @@ test("Clerk middleware is limited to exact root origins and reads only verified 
 
   let tenantNextCalls = 0;
   directMiddleware(
-    requestWithHost("mike.kanban.cards", "candidate.example.com"),
+    requestWithHost("mike.candidate.release.kanban.cards", "candidate.release.kanban.cards"),
     {} as Response,
     () => { tenantNextCalls += 1; }
   );
   assert.equal(tenantNextCalls, 1);
   assert.equal(middlewareCalls, 0, "tenant hosts must bypass Clerk middleware entirely");
 
-  const directProxyRequest = requestWithHost("kanban.cards", "candidate.example.com");
+  const directProxyRequest = requestWithHost("kanban.cards", "candidate.release.kanban.cards");
   Object.defineProperty(directProxyRequest, "socket", { value: { remoteAddress: "127.0.0.1" } });
   directProxyRequest.headers["x-forwarded-proto"] = "https";
   directProxyRequest.headers["x-forwarded-for"] = "203.0.113.5";
@@ -163,21 +186,21 @@ test("Clerk middleware is limited to exact root origins and reads only verified 
   assert.deepEqual(observedProxyHeaders.at(-1), { host: "kanban.cards", "x-forwarded-for": "127.0.0.1" });
 
   const trustedMiddleware = gateway.middleware([
-    { origin: "https://auth.kanban.cards", isSatellite: false },
-    { origin: "https://kanban.cards", isSatellite: true },
-    { origin: "https://candidate.example.com", isSatellite: true }
+    { origin: "https://auth.kanban.cards", role: "auth" },
+    { origin: "https://kanban.cards", role: "app" },
+    { origin: "https://candidate.release.kanban.cards", role: "app" }
   ], true);
   const trustedOptionsForRequest = middlewareOptions as unknown as (req: Request) => Record<string, unknown>;
   const trustedCandidate = trustedOptionsForRequest(requestWithHost(
     "internal.vercel.invalid",
-    "candidate.example.com"
+    "candidate.release.kanban.cards"
   ));
-  assert.deepEqual(trustedCandidate.authorizedParties, ["https://candidate.example.com"]);
-  assert.deepEqual(trustedCandidate.frontendApiProxy, { enabled: true });
-  const trustedProxyRequest = requestWithHost("internal.vercel.invalid", "candidate.example.com");
+  assert.deepEqual(trustedCandidate.authorizedParties, ["https://candidate.release.kanban.cards"]);
+  assert.equal("frontendApiProxy" in trustedCandidate, false);
+  const trustedProxyRequest = requestWithHost("internal.vercel.invalid", "candidate.release.kanban.cards");
   trustedProxyRequest.headers["x-forwarded-proto"] = "https";
   trustedMiddleware(trustedProxyRequest, {} as Response, () => undefined);
-  assert.equal(observedProxyHeaders.at(-1)?.["x-forwarded-host"], "candidate.example.com");
+  assert.equal(observedProxyHeaders.at(-1)?.["x-forwarded-host"], "candidate.release.kanban.cards");
   assert.equal(observedProxyHeaders.at(-1)?.["x-forwarded-proto"], "https");
   assert.deepEqual(gateway.requestAuth({} as Request), {
     authenticated: true,
@@ -191,19 +214,19 @@ test("Clerk middleware is limited to exact root origins and reads only verified 
     clerkSessionId: null
   });
 
-  assert.throws(() => gateway.middleware([{ origin: "https://auth.kanban.cards/path", isSatellite: false }, { origin: "https://kanban.cards", isSatellite: true }], false), ClerkAuthConfigError);
-  assert.throws(() => gateway.middleware([{ origin: "http://auth.kanban.cards", isSatellite: false }, { origin: "https://kanban.cards", isSatellite: true }], false), ClerkAuthConfigError);
+  assert.throws(() => gateway.middleware([{ origin: "https://auth.kanban.cards/path", role: "auth" }, { origin: "https://kanban.cards", role: "app" }], false), ClerkAuthConfigError);
+  assert.throws(() => gateway.middleware([{ origin: "http://auth.kanban.cards", role: "auth" }, { origin: "https://kanban.cards", role: "app" }], false), ClerkAuthConfigError);
   assert.throws(() => gateway.middleware([
-    { origin: "https://auth.kanban.cards", isSatellite: false },
-    { origin: "https://candidate.example.com", isSatellite: false }
+    { origin: "https://auth.kanban.cards", role: "auth" },
+    { origin: "https://candidate.release.kanban.cards", role: "auth" }
   ], false), ClerkAuthConfigError);
   assert.doesNotThrow(() => createClerkAuthGateway({ ...CONFIG, authHost: "auth.localhost:4317" }, {
     middleware: () => handler,
     getAuth: () => ({ isAuthenticated: false, userId: null, sessionId: null }),
     client: verifiedClient()
   }).middleware([
-    { origin: "http://auth.localhost:4317", isSatellite: false },
-    { origin: "http://root.localhost:4317", isSatellite: true }
+    { origin: "http://auth.localhost:4317", role: "auth" },
+    { origin: "http://root.localhost:4317", role: "app" }
   ], false));
 });
 
@@ -285,6 +308,11 @@ function verifiedClient(revoked: string[] = []) {
     users: { async getUser() { return verifiedUser(); } },
     sessions: { async revokeSession(sessionId: string) { revoked.push(sessionId); } }
   };
+}
+
+function clerkPublishableKey(instance: "test" | "live", frontendApi: string): string {
+  const encoded = Buffer.from(`${frontendApi}$`, "utf8").toString("base64").replace(/=+$/, "");
+  return `pk_${instance}_${encoded}`;
 }
 
 function requestWithHost(host: string, forwardedHost?: string): Request {

@@ -2,19 +2,27 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  clearLogoutCompletionCookie,
   clearLogoutRetryCookie,
   clearRootSessionCookie,
   clearTenantSessionCookie,
+  createLogoutCompletionCookie,
+  createLogoutContinuationToken,
   createLogoutRetryCookie,
   createRootSessionCookie,
   createTenantSessionCookie,
   isProductionRequest,
+  logoutCompletionCookieName,
   logoutRetryCookieName,
   rootSessionCookieName,
   tenantSessionCookieName,
+  verifyLogoutCompletionSession,
+  verifyLogoutContinuationToken,
   verifyLogoutRetrySession,
   verifyRootSession,
   verifyTenantSession,
+  type LogoutCompletionSession,
+  type LogoutContinuation,
   type LogoutRetrySession,
   type RootSession,
   type TenantSession
@@ -152,6 +160,57 @@ test("logout retry sessions preserve only revocation-family identity and bind to
   assert.match(clearLogoutRetryCookie(true), /^__Host-kanban_logout_retry=; .*Max-Age=0/);
 });
 
+test("logout continuations are signed and bind the exact Clerk session and initiating origin", async () => {
+  const continuation: LogoutContinuation = {
+    completionId: "completion-1",
+    providerSubject: "user_owner123",
+    sessionId: "sess_owner123",
+    rootOrigin: "https://kanban.cards",
+    initiatingOrigin: "https://mike.kanban.cards"
+  };
+  const token = await createLogoutContinuationToken(continuation, SESSION_SECRET, 120);
+
+  assert.deepEqual(await verifyLogoutContinuationToken(token, SESSION_SECRET), continuation);
+  assert.equal(await verifyLogoutContinuationToken(token, `${SESSION_SECRET}-wrong`), null);
+  assert.equal(await verifyLogoutContinuationToken(`${token.slice(0, -1)}x`, SESSION_SECRET), null);
+});
+
+test("logout completion markers are signed, short-lived host-only cookies bound to the exact root origin", async () => {
+  const completion: LogoutCompletionSession = {
+    completionId: "completion-1",
+    providerSubject: "user_owner123",
+    sessionId: "sess_owner123",
+    rootOrigin: "https://kanban.cards"
+  };
+  const cookie = await createLogoutCompletionCookie(completion, SESSION_SECRET, true, 120);
+
+  assert.match(cookie, /^__Host-kanban_logout_complete=/);
+  assert.match(cookie, /; Max-Age=120/);
+  assert.match(cookie, /; Path=\//);
+  assert.match(cookie, /; Secure/);
+  assert.match(cookie, /; HttpOnly/);
+  assert.match(cookie, /; SameSite=Lax/);
+  assert.doesNotMatch(cookie, /Domain=/i);
+  assert.deepEqual(
+    await verifyLogoutCompletionSession(cookieRequest("https://kanban.cards/", [cookie]), SESSION_SECRET, true),
+    completion
+  );
+  assert.equal(
+    await verifyLogoutCompletionSession(cookieRequest("https://candidate.kanban.cards/", [cookie]), SESSION_SECRET, true),
+    null
+  );
+  assert.equal(
+    await verifyLogoutCompletionSession(cookieRequest("https://kanban.cards/", [cookie]), `${SESSION_SECRET}-wrong`, true),
+    null
+  );
+  const tampered = cookie.replace(/(logout_complete=[^;]+)./, "$1x");
+  assert.equal(
+    await verifyLogoutCompletionSession(cookieRequest("https://kanban.cards/", [tampered]), SESSION_SECRET, true),
+    null
+  );
+  assert.match(clearLogoutCompletionCookie(true), /^__Host-kanban_logout_complete=; .*Max-Age=0/);
+});
+
 test("cookie names and production detection retain local and deployed behavior", () => {
   assert.equal(rootSessionCookieName(true), "__Host-kanban_root_session");
   assert.equal(rootSessionCookieName(false), "kanban_root_session");
@@ -159,6 +218,8 @@ test("cookie names and production detection retain local and deployed behavior",
   assert.equal(tenantSessionCookieName(false), "kanban_tenant_session");
   assert.equal(logoutRetryCookieName(true), "__Host-kanban_logout_retry");
   assert.equal(logoutRetryCookieName(false), "kanban_logout_retry");
+  assert.equal(logoutCompletionCookieName(true), "__Host-kanban_logout_complete");
+  assert.equal(logoutCompletionCookieName(false), "kanban_logout_complete");
   assert.equal(isProductionRequest(new Request("https://kanban.cards/")), true);
   assert.equal(isProductionRequest(new Request("http://localhost:4317/")), false);
   assert.equal(isProductionRequest(new Request("http://tenant.localhost:4317/")), false);

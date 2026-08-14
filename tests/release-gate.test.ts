@@ -50,7 +50,7 @@ test("pending binding blocks with zero promotion calls", async () => {
 });
 
 test("Clerk proof and the full enabled bridge lifecycle are mandatory", () => {
-  for (const field of ["authHostSurface", "authHostIsolation", "emailCodeAuth", "primarySatelliteSync", "sessionExchange", "exactLegacyBinding", "canonicalHandoff", "tenantProjectAccess", "tenantProjectWrite", "signOut"] as const) {
+  for (const field of ["authHostSurface", "authHostIsolation", "emailCodeAuth", "sameRootSessionShare", "sessionExchange", "exactLegacyBinding", "canonicalHandoff", "tenantProjectAccess", "tenantProjectWrite", "signOut"] as const) {
     const snapshot = readySnapshot();
     snapshot.evidence.prePromotion.clerkProof[field] = "failed";
     const result = evaluateCutoverSnapshot(snapshot, "pre-promotion", TARGET, NOW);
@@ -91,10 +91,16 @@ test("legacy provider and callback evidence cannot satisfy Clerk gates", () => {
   assert.ok(codes.has("clerk-auth-host-surface"));
   assert.ok(codes.has("clerk-auth-host-isolation"));
   assert.ok(codes.has("clerk-email-code-auth"));
-  assert.ok(codes.has("clerk-primary-satellite-sync"));
+  assert.ok(codes.has("clerk-same-root-session-share"));
   assert.ok(codes.has("clerk-session-exchange"));
   assert.ok(codes.has("clerk-sign-out"));
   assert.equal(codes.has("proof-callback-unregistered"), false);
+
+  const obsoleteSyncReceipt = readySnapshot();
+  const obsoleteClerkProof = obsoleteSyncReceipt.evidence.prePromotion.clerkProof as unknown as Record<string, unknown>;
+  delete obsoleteClerkProof.sameRootSessionShare;
+  obsoleteClerkProof.primarySatelliteSync = "passed";
+  assert.ok(evaluateCutoverSnapshot(obsoleteSyncReceipt, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "clerk-same-root-session-share"));
 });
 
 test("disabled bridge requires explicit retirement negatives and closure", () => {
@@ -158,8 +164,8 @@ test("post-promotion completion requires both temporary candidate aliases to be 
     ...snapshot.candidate,
     aliases: [
       "kanban.cards",
-      "cutover-root-surfaces-platform.vercel.app",
-      "cutover-tenant-surfaces-platform.vercel.app"
+      "candidate.release.kanban.cards",
+      "mike.candidate.release.kanban.cards"
     ],
     health: { status: 200, ok: true, store: "postgres" }
   };
@@ -190,26 +196,30 @@ test("the exact auth origin must be pinned to and serve the candidate artifact",
   assert.ok(evaluateCutoverSnapshot(differentArtifact, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "auth-host-not-proven"));
 });
 
-test("pre-promotion tenant origin must be exact and distinct", () => {
+test("pre-promotion root and tenant origins must be the exact same-root candidate family", () => {
   const invalid = readySnapshot();
   invalid.evidence.prePromotion.tenantOrigin = "https://tenant.candidate.example.com/projects";
   assert.ok(evaluateCutoverSnapshot(invalid, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "proof-tenant-origin"));
 
-  for (const reused of [
+  for (const wrongTenantOrigin of [
     "https://auth.kanban.cards",
-    "https://cutover-root-surfaces-platform.vercel.app",
+    "https://candidate.release.kanban.cards",
     "https://candidate-abc.vercel.app",
     "https://kanban.cards"
   ]) {
     const snapshot = readySnapshot();
-    snapshot.evidence.prePromotion.tenantOrigin = reused;
-    assert.ok(evaluateCutoverSnapshot(snapshot, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "proof-tenant-origin-reused"));
+    snapshot.evidence.prePromotion.tenantOrigin = wrongTenantOrigin;
+    assert.ok(evaluateCutoverSnapshot(snapshot, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "proof-tenant-origin"));
   }
 
-  const ClerkConfiguredCustomRoutes = readySnapshot();
-  ClerkConfiguredCustomRoutes.evidence.prePromotion.origin = "https://candidate-root.example.com";
-  ClerkConfiguredCustomRoutes.evidence.prePromotion.tenantOrigin = "https://candidate-tenant.example.com";
-  assert.equal(evaluateCutoverSnapshot(ClerkConfiguredCustomRoutes, "pre-promotion", TARGET, NOW).ok, true);
+  const wrongRoot = readySnapshot();
+  wrongRoot.evidence.prePromotion.origin = "https://candidate-root.example.com";
+  assert.ok(evaluateCutoverSnapshot(wrongRoot, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "proof-origin"));
+
+  const exactSameRootRoutes = readySnapshot();
+  exactSameRootRoutes.evidence.prePromotion.origin = "https://candidate.release.kanban.cards";
+  exactSameRootRoutes.evidence.prePromotion.tenantOrigin = "https://mike.candidate.release.kanban.cards";
+  assert.equal(evaluateCutoverSnapshot(exactSameRootRoutes, "pre-promotion", TARGET, NOW).ok, true);
 });
 
 test("post-promotion tenant origin must be a direct canonical tenant", () => {
@@ -217,7 +227,7 @@ test("post-promotion tenant origin must be a direct canonical tenant", () => {
     "https://auth.kanban.cards",
     "https://kanban.cards",
     "https://nested.default.kanban.cards",
-    "https://candidate-tenant.example.com",
+    "https://mike.candidate.release.kanban.cards",
     "https://default.kanban.cards/projects"
   ]) {
     const snapshot = readySnapshot();
@@ -228,7 +238,7 @@ test("post-promotion tenant origin must be a direct canonical tenant", () => {
 });
 
 test("only an unauthenticated Vercel SSO redirect proves route protection", () => {
-  const requested = "https://cutover-root-surfaces-platform.vercel.app/__kanban_cards_protection_probe__/probe-id";
+  const requested = "https://candidate.release.kanban.cards/__kanban_cards_protection_probe__/probe-id";
   const nonce = "a".repeat(64);
   const cookie = `_vercel_sso_nonce=${"b".repeat(40)}; Max-Age=3600; Path=/; Secure; HttpOnly; SameSite=Lax`;
   const redirect = `https://vercel.com/sso-api?url=${encodeURIComponent(requested)}&nonce=${nonce}`;
@@ -315,7 +325,7 @@ function readySnapshot() {
     commitSha: candidateSha,
     origin,
     authOrigin: "https://auth.kanban.cards",
-    tenantOrigin: phase === "pre-promotion" ? "https://cutover-tenant-surfaces-platform.vercel.app" : "https://default.kanban.cards",
+    tenantOrigin: phase === "pre-promotion" ? "https://mike.candidate.release.kanban.cards" : "https://mike.kanban.cards",
     routeDeploymentId: "dpl_candidate",
     routePinned: "passed",
     routeProtected: phase === "pre-promotion" ? "passed" : "not-required",
@@ -331,7 +341,7 @@ function readySnapshot() {
     sameArtifactCanonicalHost: "passed",
     health: { status: 200, ok: true, store: "postgres", missingConfiguration: [], access: { registry: "ready", legacyState: "ready", legacyBinding: "ready" } },
     accessHealth: { status: 200, ok: true, legacyBridge: "enabled", registryState: "ready", legacyState: "ready", legacyBinding: { present: true, status: "ready" }, missingConfiguration: [] },
-    clerkProof: { authHostSurface: "passed", authHostIsolation: "passed", emailCodeAuth: "passed", primarySatelliteSync: "passed", sessionExchange: "passed", exactLegacyBinding: "passed", canonicalHandoff: "passed", tenantProjectAccess: "passed", tenantProjectWrite: "passed", signOut: "passed" },
+    clerkProof: { authHostSurface: "passed", authHostIsolation: "passed", emailCodeAuth: "passed", sameRootSessionShare: "passed", sessionExchange: "passed", exactLegacyBinding: "passed", canonicalHandoff: "passed", tenantProjectAccess: "passed", tenantProjectWrite: "passed", signOut: "passed" },
     compatibilityProof: { required: true, read: "passed", create: "passed", comment: "passed", move: "passed", archive: "passed", cardId: `card-${runId}`, finalCardVersion: 4 },
     retirementProof: { required: true, public401: "passed", legacy401: "passed", sibling401: "passed", oldDeploymentsClosed: "passed" },
     dataIntegrityProof: {
@@ -349,7 +359,7 @@ function readySnapshot() {
     candidate: { id: "dpl_candidate", url: "https://candidate-abc.vercel.app", projectId: TARGET.projectId, commitSha: candidateSha, commitRef: "main", target: "production", readyState: "READY", aliases: [] },
     currentProduction: { id: "dpl_known_good", url: "https://known-good-abc.vercel.app", projectId: TARGET.projectId, commitSha: productionSha, commitRef: "main", target: "production", readyState: "READY", aliases: ["kanban.cards"], health: { status: 200, ok: true, store: "postgres" } },
     evidence: {
-      prePromotion: receipt("pre-promotion", "run-pre", "https://cutover-root-surfaces-platform.vercel.app"),
+      prePromotion: receipt("pre-promotion", "run-pre", "https://candidate.release.kanban.cards"),
       postPromotion: receipt("post-promotion", "run-post", "https://kanban.cards")
     },
     rollbackTarget: { id: "dpl_known_good", url: "https://known-good-abc.vercel.app", projectId: TARGET.projectId, commitSha: productionSha, target: "production", readyState: "READY", verified: true },
