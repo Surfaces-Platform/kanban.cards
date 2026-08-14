@@ -6,7 +6,39 @@
     "productionBranch": "main",
     "autoAssignCustomDomains": false,
     "mainGitDeploymentsEnabled": false,
-    "deploymentProtection": "all"
+    "deploymentProtection": "all_except_custom_domains",
+    "firewall": {
+      "firewallEnabled": true,
+      "hasDraft": false,
+      "pendingChanges": 0,
+      "rules": [
+        {
+          "id": "rule_replacebypass",
+          "name": "kanban-candidate-mike-bypass",
+          "active": true,
+          "_status": "live",
+          "conditionGroup": [{
+            "conditions": [
+              { "type": "host", "op": "inc", "value": ["auth.kanban.cards", "candidate.release.kanban.cards", "mike.candidate.release.kanban.cards"] },
+              { "type": "ip_address", "op": "eq", "value": "203.0.113.42/32" }
+            ]
+          }],
+          "action": { "mitigate": { "action": "bypass" } }
+        },
+        {
+          "id": "rule_replacedeny",
+          "name": "kanban-candidate-deny",
+          "active": true,
+          "_status": "live",
+          "conditionGroup": [{
+            "conditions": [{ "type": "host", "op": "inc", "value": ["auth.kanban.cards", "candidate.release.kanban.cards", "mike.candidate.release.kanban.cards"] }]
+          }],
+          "action": { "mitigate": { "action": "deny" } }
+        }
+      ]
+    },
+    "aliases": ["auth.kanban.cards", "kanban.cards", "mike.kanban.cards"],
+    "aliasInventoryComplete": true
   },
   "candidate": {
     "id": "dpl_exact-candidate-id",
@@ -41,16 +73,34 @@
       "authOrigin": "https://auth.kanban.cards",
       "routeDeploymentId": "dpl_exact-candidate-id",
       "routePinned": "not-run",
-      "routeProtected": "not-run",
       "authRouteDeploymentId": "dpl_exact-candidate-id",
       "authRoutePinned": "not-run",
-      "authRouteProtected": "not-run",
       "clerkAuthorizedParties": "not-run",
       "clerkDomainConfiguration": "not-run",
       "tenantOrigin": "https://mike.candidate.release.kanban.cards",
       "tenantRouteDeploymentId": "dpl_exact-candidate-id",
       "tenantRoutePinned": "not-run",
-      "tenantRouteProtected": "not-run",
+      "firewallProof": {
+        "liveBypassRuleId": "written-by-live-hydrator",
+        "liveDenyRuleId": "written-by-live-hydrator",
+        "reviewedSourceCidr": "written-by-live-hydrator",
+        "configHash": "written-by-live-hydrator",
+        "admittedProbe": {
+          "configHash": "written-by-live-hydrator",
+          "authHost": { "status": 0, "mitigated": "not-run", "vercelId": "" },
+          "candidateRoot": { "status": 0, "mitigated": "not-run", "vercelId": "" },
+          "candidateTenant": { "status": 0, "mitigated": "not-run", "vercelId": "" }
+        },
+        "externalDenyProbe": {
+          "observedSourceCidr": "replace-with-external-exact-ip/32-or-128",
+          "configHash": "replace-with-live-config-hash",
+          "authHost": { "status": 0, "mitigated": "not-run", "wafAction": "not-run", "wafRuleId": "", "vercelId": "", "observedAt": "1970-01-01T00:00:00.000Z" },
+          "candidateRoot": { "status": 0, "mitigated": "not-run", "wafAction": "not-run", "wafRuleId": "", "vercelId": "", "observedAt": "1970-01-01T00:00:00.000Z" },
+          "candidateTenant": { "status": 0, "mitigated": "not-run", "wafAction": "not-run", "wafRuleId": "", "vercelId": "", "observedAt": "1970-01-01T00:00:00.000Z" },
+          "canonicalRoot": { "status": 0, "ok": false, "store": "", "mitigated": "not-run", "vercelId": "", "observedAt": "1970-01-01T00:00:00.000Z" },
+          "canonicalTenant": { "status": 0, "mitigated": "not-run", "vercelId": "", "observedAt": "1970-01-01T00:00:00.000Z" }
+        }
+      },
       "sameArtifactAuthHost": "not-run",
       "sameArtifactCanonicalHost": "not-run",
       "health": {
@@ -119,16 +169,30 @@
       "authOrigin": "https://auth.kanban.cards",
       "routeDeploymentId": "dpl_exact-candidate-id",
       "routePinned": "not-run",
-      "routeProtected": "not-required",
       "authRouteDeploymentId": "dpl_exact-candidate-id",
       "authRoutePinned": "not-run",
-      "authRouteProtected": "not-required",
       "clerkAuthorizedParties": "not-run",
       "clerkDomainConfiguration": "not-run",
       "tenantOrigin": "https://mike.kanban.cards",
       "tenantRouteDeploymentId": "dpl_exact-candidate-id",
       "tenantRoutePinned": "not-run",
-      "tenantRouteProtected": "not-required",
+      "firewallProof": {
+        "removedRuleIds": ["written-from-pre-bypass-rule-id", "written-from-pre-deny-rule-id"],
+        "configHash": "written-by-live-hydrator-after-cleanup",
+        "releaseRulesRemoved": "not-run",
+        "noDraft": "not-run",
+        "authHostPublic": "not-run",
+        "canonicalRootPublic": "not-run",
+        "canonicalTenantPublic": "not-run",
+        "generatedDeploymentProtected": "not-run",
+        "externalPublicProbe": {
+          "observedSourceCidr": "replace-with-external-exact-ip/32-or-128",
+          "configHash": "replace-with-post-cleanup-live-config-hash",
+          "authHost": { "status": 0, "mitigated": "not-run", "vercelId": "", "observedAt": "1970-01-01T00:00:00.000Z" },
+          "canonicalRoot": { "status": 0, "ok": false, "store": "", "mitigated": "not-run", "vercelId": "", "observedAt": "1970-01-01T00:00:00.000Z" },
+          "canonicalTenant": { "status": 0, "mitigated": "not-run", "vercelId": "", "observedAt": "1970-01-01T00:00:00.000Z" }
+        }
+      },
       "sameArtifactAuthHost": "not-run",
       "sameArtifactCanonicalHost": "not-run",
       "health": {},
