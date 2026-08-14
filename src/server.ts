@@ -13,19 +13,25 @@ import {
   createLogoutRetryCookie,
   createRootSessionCookie,
   createTenantSessionCookie,
-  finishOwnerLogin,
-  getPlatformAuthConfig,
-  hasPlatformAuthConfig,
   isProductionRequest,
-  startOwnerLogin,
-  validatePlatformAuthConfig,
   verifyRootSession,
   verifyLogoutRetrySession,
   verifyTenantSession,
-  type AuthRouteResponse,
-  type PlatformAuthConfig,
+  type LogoutRetrySession,
   type RootSession
-} from "./platform-auth";
+} from "./app-sessions";
+import {
+  ClerkIdentityError,
+  clerkPrimaryOrigin,
+  clerkPrimarySignInUrl,
+  clerkPrimarySignUpUrl,
+  clerkAuthConfigurationRequested,
+  createClerkAuthGateway,
+  getClerkAuthConfig,
+  validateClerkAuthConfig,
+  type ClerkAuthConfig,
+  type ClerkAuthGateway
+} from "./clerk-auth";
 import { createStateStore, createWorkspaceStoreResolver, DEFAULT_WORKSPACE_ID } from "./state-store";
 import type {
   Activity,
@@ -69,23 +75,21 @@ export interface CreateAppOptions extends StateStoreOptions {
   store?: StateStore;
   accessStore?: AccessStore;
   workspaceStoreResolver?: WorkspaceStoreResolver;
-  platformAuthConfig?: PlatformAuthConfig | null;
+  clerkAuthConfig?: ClerkAuthConfig | null;
+  clerkAuthGateway?: ClerkAuthGateway;
   rootHost?: string;
   candidateHostFamily?: CandidateHostFamilyOptions | null;
   legacyApiWorkspaceId?: string;
   legacyWorkspaceSlug?: string;
   legacyWorkspaceName?: string;
-  legacyOwnerSubject?: string;
+  legacyClerkUserId?: string;
   trustForwardedHost?: boolean;
-  fetch?: typeof fetch;
   host?: string;
   port?: string | number;
 }
 
 export interface CandidateHostFamilyOptions {
   rootHost: string;
-  redirectUri: string;
-  postLogoutRedirectUri?: string;
   tenantHosts: Record<string, string>;
 }
 
@@ -112,7 +116,6 @@ interface HostFamily {
   rootOrigin: string;
   deriveTenantHosts: boolean;
   tenantHosts: ReadonlyMap<string, string>;
-  authConfig: PlatformAuthConfig | null;
 }
 
 interface ResolvedHostContext {
@@ -127,7 +130,7 @@ interface AccessContextConfig {
   legacyApiWorkspaceId: string;
   legacyStore: StateStore;
   ownerLabel: string;
-  platformAuthConfig: PlatformAuthConfig | null;
+  clerkAuthConfig: ClerkAuthConfig | null;
   hostFamilies: readonly HostFamily[];
   primaryHostFamily: HostFamily;
   trustForwardedHost: boolean;
@@ -173,51 +176,50 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
   const databaseRequired = options.requireDatabase ?? production;
   const connectionString = options.connectionString || process.env.KANBAN_CARDS_DATABASE_URL || process.env.POSTGRES_URL || process.env.DATABASE_URL;
   const trustForwardedHost = options.trustForwardedHost ?? Boolean(process.env.VERCEL);
-  const platformAuthConfigured = options.platformAuthConfig !== undefined
-    ? options.platformAuthConfig !== null
-    : hasPlatformAuthConfig();
-  const platformAuthConfig = options.platformAuthConfig === null
+  const clerkAuthConfig = options.clerkAuthConfig === null
     ? null
-    : options.platformAuthConfig || (platformAuthConfigured ? getPlatformAuthConfig() : null);
-  if (platformAuthConfig) validatePlatformAuthConfig(platformAuthConfig);
+    : options.clerkAuthConfig || (clerkAuthConfigurationRequested() ? getClerkAuthConfig() : null);
+  const clerkAuthConfigured = Boolean(clerkAuthConfig);
+  if (clerkAuthConfig) validateClerkAuthConfig(clerkAuthConfig);
   const rootHost = canonicalConfiguredHost(
     options.rootHost ||
     process.env.KANBAN_CARDS_ROOT_HOST ||
-    (platformAuthConfig ? new URL(platformAuthConfig.redirectUri).host : production ? PRODUCT_NAME : configuredHost)
+    (production ? PRODUCT_NAME : configuredHost)
   );
   const rootOrigin = originForHost(rootHost);
   const rootHostname = new URL(`http://${rootHost}`).hostname.replace(/^\[|\]$/g, "");
-  if (platformAuthConfig && isIP(rootHostname)) {
-    throw new Error("Provider mode requires a DNS root host such as localhost or kanban.cards; numeric-IP tenant hosts are unsupported.");
-  }
-  if (platformAuthConfig) requireFamilyRedirect(platformAuthConfig.redirectUri, rootOrigin, "OIDC_REDIRECT_URI");
-  if (
-    platformAuthConfig &&
-    !platformAuthConfig.postLogoutRedirectUri.startsWith("/") &&
-    new URL(platformAuthConfig.postLogoutRedirectUri).origin.toLowerCase() !== rootOrigin
-  ) {
-    throw new Error("OIDC_POST_LOGOUT_REDIRECT_URI must stay on the configured kanban.cards root origin.");
+  if (clerkAuthConfig && isIP(rootHostname)) {
+    throw new Error("Clerk Workspace mode requires a DNS root host such as localhost or kanban.cards; numeric-IP tenant hosts are unsupported.");
   }
   const primaryHostFamily: HostFamily = {
     rootHost,
     rootOrigin,
     deriveTenantHosts: true,
-    tenantHosts: new Map(),
-    authConfig: platformAuthConfig
+    tenantHosts: new Map()
   };
   const candidateHostFamilyInput = options.candidateHostFamily === null
     ? null
     : options.candidateHostFamily || candidateHostFamilyFromEnv();
   const candidateHostFamily = candidateHostFamilyInput
-    ? createCandidateHostFamily(candidateHostFamilyInput, platformAuthConfig)
+    ? createCandidateHostFamily(candidateHostFamilyInput, Boolean(clerkAuthConfig))
     : null;
   const hostFamilies = candidateHostFamily ? [primaryHostFamily, candidateHostFamily] : [primaryHostFamily];
   validateHostFamilies(hostFamilies);
+  const authHost = clerkAuthConfig?.authHost || "";
+  const authOrigin = clerkAuthConfig ? clerkPrimaryOrigin(clerkAuthConfig) : "";
+  if (clerkAuthConfig) validateAuthHostTopology(authHost, hostFamilies);
+  const clerkRootDomains = clerkAuthConfig ? [
+    { origin: authOrigin, isSatellite: false },
+    ...hostFamilies.map((family) => ({ origin: family.rootOrigin, isSatellite: true }))
+  ] : [];
+  const clerkAuthGateway = clerkAuthConfig
+    ? options.clerkAuthGateway || createClerkAuthGateway(clerkAuthConfig)
+    : null;
   const legacyApiWorkspaceId = String(options.legacyApiWorkspaceId ?? process.env.KANBAN_CARDS_API_WORKSPACE_ID ?? DEFAULT_WORKSPACE_ID).trim();
   if (legacyApiWorkspaceId !== DEFAULT_WORKSPACE_ID) {
     throw new Error(`KANBAN_CARDS_API_WORKSPACE_ID must remain ${DEFAULT_WORKSPACE_ID} during the compatibility bridge.`);
   }
-  const legacyOwnerSubject = String(options.legacyOwnerSubject ?? process.env.KANBAN_CARDS_LEGACY_OWNER_SUBJECT ?? "").trim();
+  const legacyClerkUserId = String(options.legacyClerkUserId ?? process.env.KANBAN_CARDS_LEGACY_CLERK_USER_ID ?? "").trim();
   const legacyWorkspaceSlug = String(options.legacyWorkspaceSlug ?? process.env.KANBAN_CARDS_LEGACY_WORKSPACE_SLUG ?? "").trim().toLowerCase();
   const legacyWorkspaceName = String(options.legacyWorkspaceName ?? process.env.KANBAN_CARDS_LEGACY_WORKSPACE_NAME ?? "").trim();
   if (legacyWorkspaceSlug) {
@@ -237,12 +239,15 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     options.sessionTtlSeconds ?? process.env.KANBAN_CARDS_SESSION_TTL_SECONDS,
     DEFAULT_SESSION_TTL_SECONDS
   );
-  const legacyMigrationValues = [legacyOwnerSubject, legacyWorkspaceSlug, legacyWorkspaceName];
+  const legacyMigrationValues = [legacyClerkUserId, legacyWorkspaceSlug, legacyWorkspaceName];
   const missingConfiguration = [
-    ...(!platformAuthConfigured && !apiToken ? ["KANBAN_CARDS_API_TOKEN"] : []),
-    ...(production && !platformAuthConfigured ? ["OIDC_ISSUER, OIDC_CLIENT_ID, OIDC_REDIRECT_URI, SESSION_SECRET, and PLATFORM_SURFACE_ID"] : []),
+    ...(!clerkAuthConfigured && !apiToken ? ["KANBAN_CARDS_API_TOKEN"] : []),
+    ...(production && !clerkAuthConfigured ? ["NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY, CLERK_SECRET_KEY, CLERK_ENCRYPTION_KEY, SESSION_SECRET, KANBAN_CARDS_AUTH_HOST, and KANBAN_CARDS_ALLOWED_CLERK_USER_IDS"] : []),
     ...(legacyMigrationValues.some(Boolean) && !legacyMigrationValues.every(Boolean)
-      ? ["KANBAN_CARDS_LEGACY_OWNER_SUBJECT, KANBAN_CARDS_LEGACY_WORKSPACE_SLUG, and KANBAN_CARDS_LEGACY_WORKSPACE_NAME must be set together"]
+      ? ["KANBAN_CARDS_LEGACY_CLERK_USER_ID, KANBAN_CARDS_LEGACY_WORKSPACE_SLUG, and KANBAN_CARDS_LEGACY_WORKSPACE_NAME must be set together"]
+      : []),
+    ...(legacyClerkUserId && clerkAuthConfig && !clerkAuthConfig.allowedUserIds.includes(legacyClerkUserId)
+      ? ["KANBAN_CARDS_ALLOWED_CLERK_USER_IDS must include KANBAN_CARDS_LEGACY_CLERK_USER_ID"]
       : []),
     ...(databaseRequired && !connectionString ? ["KANBAN_CARDS_DATABASE_URL or POSTGRES_URL or DATABASE_URL"] : [])
   ];
@@ -271,7 +276,6 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     pool: options.pool,
     ssl: options.ssl
   });
-  const authFetch = options.fetch || fetch;
   const legacyMigrationConfigured = legacyMigrationValues.every(Boolean);
 
   async function requireExistingLegacyState(): Promise<WorkspaceState> {
@@ -291,7 +295,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     legacyState: "ready" | "missing" | "invalid" | "not-required";
     legacyBinding: "ready" | "pending" | "mismatch" | "not-required";
   }> {
-    if (!platformAuthConfig) {
+    if (!clerkAuthConfig) {
       return {
         ready: missingConfiguration.length === 0,
         registry: "not-required",
@@ -334,7 +338,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     if (!legacyWorkspace) {
       legacyBinding = "pending";
     } else if (legacyMigrationConfigured) {
-      const owner = registryState.owners.find((candidate) => candidate.providerSubject === legacyOwnerSubject);
+      const owner = registryState.owners.find((candidate) => candidate.providerSubject === legacyClerkUserId);
       legacyBinding = owner &&
         legacyWorkspace.slug === legacyWorkspaceSlug &&
         legacyWorkspace.name === legacyWorkspaceName &&
@@ -355,16 +359,16 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
 
   let legacyBindingPromise: Promise<AccessWorkspace | null> | null = null;
   function ensureLegacyBinding(identity?: RootSession): Promise<AccessWorkspace | null> {
-    if (!legacyOwnerSubject && !legacyWorkspaceSlug && !legacyWorkspaceName) return Promise.resolve(null);
-    if (!legacyOwnerSubject || !legacyWorkspaceSlug || !legacyWorkspaceName) {
-      return Promise.reject(httpError(503, "Legacy Workspace migration requires owner subject, Workspace slug, and Workspace name together."));
+    if (!legacyClerkUserId && !legacyWorkspaceSlug && !legacyWorkspaceName) return Promise.resolve(null);
+    if (!legacyClerkUserId || !legacyWorkspaceSlug || !legacyWorkspaceName) {
+      return Promise.reject(httpError(503, "Legacy Workspace migration requires a Clerk user ID, Workspace slug, and Workspace name together."));
     }
-    if (!identity || identity.providerSubject !== legacyOwnerSubject) {
+    if (!identity || identity.providerSubject !== legacyClerkUserId) {
       return Promise.resolve(null);
     }
     if (!legacyBindingPromise) {
       legacyBindingPromise = requireExistingLegacyState().then(() => accessStore.bindLegacyWorkspace({
-          providerSubject: legacyOwnerSubject,
+          providerSubject: legacyClerkUserId,
           email: identity.email,
           displayName: identity.displayName,
           slug: legacyWorkspaceSlug,
@@ -378,9 +382,32 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
   }
 
   app.disable("x-powered-by");
-  app.use(securityHeaders());
+  if (clerkAuthGateway) {
+    app.use(clerkAuthGateway.middleware(
+      clerkRootDomains,
+      trustForwardedHost
+    ));
+  }
+  app.use(securityHeaders(Boolean(clerkAuthConfig)));
   app.use(express.urlencoded({ extended: false, limit: "16kb", type: "application/x-www-form-urlencoded" }));
   app.use(express.json({ limit: "256kb", type: "application/json" }));
+  if (clerkAuthConfig) {
+    app.use((req, res, next) => {
+      if (requestHost(req, trustForwardedHost) !== authHost) {
+        next();
+        return;
+      }
+      if ((req.method === "GET" || req.method === "HEAD") && (req.path === "/" || req.path === "/index.html")) {
+        res.redirect(302, "/sign-in");
+        return;
+      }
+      if (authHostSurfaceAllows(req)) {
+        next();
+        return;
+      }
+      res.status(404).type("text/plain").send("Not found");
+    });
+  }
 
   app.get("/api/health", asyncHandler(async (_req, res) => {
     const access = await inspectAccessReadiness();
@@ -389,7 +416,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       product: PRODUCT_NAME,
       schemaVersion: 2,
       store: legacyStore.kind,
-      authentication: platformAuthConfigured ? "provider-session+workspace" : "local-owner-key",
+      authentication: clerkAuthConfigured ? "clerk-session+workspace" : "local-owner-key",
       access,
       missingConfiguration
     });
@@ -399,7 +426,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     const access = await inspectAccessReadiness();
     res.status(access.ready ? 200 : 503).json({
       ok: access.ready,
-      authentication: platformAuthConfigured ? "provider-session+workspace" : "local-owner-key",
+      authentication: clerkAuthConfigured ? "clerk-session+workspace" : "local-owner-key",
       registry: accessStore.kind,
       legacyBridge: apiToken ? "enabled" : "disabled",
       registryState: access.registry,
@@ -409,54 +436,69 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     });
   }));
 
-  app.get("/auth/login", asyncHandler(async (req, res) => {
+  app.post("/api/clerk-session", asyncHandler(async (req, res) => {
+    noStore(res);
     const family = requireRootRequest(req, hostFamilies, trustForwardedHost);
-    if (!family.authConfig) throw httpError(503, "Provider sign-in is not configured.");
-    sendAuthRoute(res, await startOwnerLogin(webRequest(req, trustForwardedHost), family.authConfig, authFetch));
-  }));
-
-  app.get("/auth/callback", asyncHandler(async (req, res) => {
-    const family = requireRootRequest(req, hostFamilies, trustForwardedHost);
-    if (!family.authConfig) throw httpError(503, "Provider sign-in is not configured.");
-    const completed = await finishOwnerLogin(webRequest(req, trustForwardedHost), family.authConfig, authFetch);
-    if (!completed.completion) {
-      sendAuthRoute(res, completed);
-      return;
+    assertExactOrigin(req, family.rootOrigin);
+    if (!clerkAuthConfig || !clerkAuthGateway) throw httpError(503, "Clerk sign-in is not configured.");
+    const appRequest = webRequest(req, trustForwardedHost);
+    const productionRequest = isProductionRequest(appRequest);
+    if (await verifyLogoutRetrySession(appRequest, clerkAuthConfig.sessionSecret, productionRequest)) {
+      throw httpError(409, "Sign-out must complete before creating a new browser session.");
     }
-    const { identity, returnTo } = completed.completion;
-    const rootSession: RootSession = { ...identity, sessionId: crypto.randomUUID(), rootOrigin: family.rootOrigin };
+    const requestAuth = clerkAuthGateway.requestAuth(req);
+    if (!requestAuth.authenticated || !requestAuth.clerkUserId || !requestAuth.clerkSessionId) {
+      throw httpError(401, "Clerk sign-in required.");
+    }
+    if (!clerkAuthConfig.allowedUserIds.includes(requestAuth.clerkUserId)) {
+      throw httpError(403, "This Clerk account does not have access to the private release.");
+    }
+    let identity;
+    try {
+      identity = await clerkAuthGateway.verifiedIdentity(requestAuth.clerkUserId, requestAuth.clerkSessionId);
+    } catch (error) {
+      if (error instanceof ClerkIdentityError) throw httpError(403, error.message);
+      throw httpError(503, "Clerk identity verification is unavailable.");
+    }
+    const rootSession: RootSession = {
+      providerSubject: identity.clerkUserId,
+      email: identity.email,
+      displayName: identity.displayName,
+      sessionId: identity.clerkSessionId,
+      rootOrigin: family.rootOrigin
+    };
     await ensureLegacyBinding(rootSession);
-    const platformRequest = webRequest(req, trustForwardedHost);
-    const productionRequest = isProductionRequest(platformRequest);
     const cookie = await createRootSessionCookie(
       rootSession,
-      family.authConfig.sessionSecret,
+      clerkAuthConfig.sessionSecret,
       productionRequest,
-      family.authConfig.rootSessionTtlSeconds
+      clerkAuthConfig.rootSessionTtlSeconds
     );
-    const clears = headerValues(completed.headers?.["Set-Cookie"]);
-    for (const value of [...clears, cookie]) res.append("Set-Cookie", value);
-    res.redirect(303, returnTo);
+    res.append("Set-Cookie", cookie);
+    res.status(201).json({ authenticated: true });
   }));
 
   app.get("/auth/logout", asyncHandler(async (req, res) => {
     const family = requireRootRequest(req, hostFamilies, trustForwardedHost);
-    if (!family.authConfig) {
+    if (!clerkAuthConfig || !clerkAuthGateway) {
       res.redirect(303, "/");
       return;
     }
-    const platformRequest = webRequest(req, trustForwardedHost);
-    const productionRequest = isProductionRequest(platformRequest);
+    const appRequest = webRequest(req, trustForwardedHost);
+    const productionRequest = isProductionRequest(appRequest);
     res.append("Set-Cookie", clearRootSessionCookie(productionRequest));
-    const identity = await verifyRootSession(platformRequest, family.authConfig.sessionSecret, productionRequest)
-      || await verifyLogoutRetrySession(platformRequest, family.authConfig.sessionSecret, productionRequest);
+    const identity = await verifyRootSession(appRequest, clerkAuthConfig.sessionSecret, productionRequest)
+      || await verifyLogoutRetrySession(appRequest, clerkAuthConfig.sessionSecret, productionRequest);
     try {
-      if (identity) await accessStore.revokeSession(identity.providerSubject, identity.sessionId);
+      if (identity) {
+        await accessStore.revokeSession(identity.providerSubject, identity.sessionId);
+        await clerkAuthGateway.revokeSession(identity.sessionId);
+      }
     } catch {
       if (identity) {
         res.append("Set-Cookie", await createLogoutRetryCookie(
-          logoutRetrySession(identity, family.rootOrigin, requestOrigin(platformRequest)),
-          family.authConfig.sessionSecret,
+          logoutRetrySession(identity, family.rootOrigin, requestOrigin(appRequest)),
+          clerkAuthConfig.sessionSecret,
           productionRequest
         ));
       }
@@ -464,41 +506,83 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       return;
     }
     res.append("Set-Cookie", clearLogoutRetryCookie(productionRequest));
-    res.redirect(303, family.authConfig.postLogoutRedirectUri || "/");
+    res.redirect(303, "/?signout=clerk");
   }));
 
   app.get("/api/session", asyncHandler(async (req, res) => {
     noStore(res);
+    if (clerkAuthConfig && requestHost(req, trustForwardedHost) === authHost) {
+      res.json({
+        authenticated: false,
+        context: "auth",
+        rootUrl: authOrigin,
+        ...clerkBrowserRuntimeConfig({
+          config: clerkAuthConfig,
+          currentOrigin: authOrigin,
+          isSatellite: false,
+          allowedRedirectOrigins: hostFamilies.map((family) => family.rootOrigin),
+          fallbackRedirectUrl: primaryHostFamily.rootOrigin
+        })
+      });
+      return;
+    }
     const requestContext = await resolveAccessContext(req, {
       accessStore,
       apiToken,
       legacyApiWorkspaceId,
       legacyStore,
       ownerLabel,
-      platformAuthConfig,
+      clerkAuthConfig,
       hostFamilies,
       primaryHostFamily,
       trustForwardedHost,
       workspaceStoreResolver
     });
+    const family = requestContext.hostFamily || primaryHostFamily;
+    const appRequest = clerkAuthConfig && requestContext.kind === "root"
+      ? webRequest(req, trustForwardedHost)
+      : null;
+    const logoutRetryPending = clerkAuthConfig && appRequest
+      ? Boolean(await verifyLogoutRetrySession(
+          appRequest,
+          clerkAuthConfig.sessionSecret,
+          isProductionRequest(appRequest)
+        ))
+      : false;
     if (!requestContext.auth) {
-      const family = requestContext.hostFamily || primaryHostFamily;
       res.json({
         authenticated: false,
         context: requestContext.kind,
         rootUrl: family.rootOrigin,
-        loginUrl: rootLoginUrl(family),
-        ...(platformAuthConfig ? { logoutUrl: rootLogoutUrl(family) } : {})
+        ...(clerkAuthConfig ? { logoutUrl: rootLogoutUrl(family) } : {}),
+        ...(clerkAuthConfig && requestContext.kind === "root" ? {
+          logoutRetryPending,
+          ...clerkBrowserRuntimeConfig({
+            config: clerkAuthConfig,
+            currentOrigin: family.rootOrigin,
+            isSatellite: true,
+            allowedRedirectOrigins: [],
+            fallbackRedirectUrl: primaryHostFamily.rootOrigin
+          })
+        } : {})
       });
       return;
     }
-    const family = requestContext.hostFamily || primaryHostFamily;
     res.json({
       authenticated: true,
       context: requestContext.kind,
       rootUrl: family.rootOrigin,
-      loginUrl: rootLoginUrl(family),
       logoutUrl: rootLogoutUrl(family),
+      ...(clerkAuthConfig && requestContext.kind === "root" ? {
+        logoutRetryPending,
+        ...clerkBrowserRuntimeConfig({
+          config: clerkAuthConfig,
+          currentOrigin: family.rootOrigin,
+          isSatellite: true,
+          allowedRedirectOrigins: [],
+          fallbackRedirectUrl: primaryHostFamily.rootOrigin
+        })
+      } : {}),
       label: requestContext.auth.actor.label,
       email: requestContext.identity?.email,
       ...(requestContext.workspace ? { workspace: publicAccessWorkspace(requestContext.workspace, family) } : {})
@@ -508,7 +592,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
   app.post("/api/session", asyncHandler(async (req, res) => {
     noStore(res);
     assertRequestOrigin(req, false, trustForwardedHost);
-    if (platformAuthConfigured) throw httpError(404, "API route not found.");
+    if (clerkAuthConfigured) throw httpError(404, "API route not found.");
     if (!apiToken) throw httpError(503, "Local owner authentication is not configured.");
     const suppliedToken = requiredString(asRecord(req.body).token, "Access key");
     if (!safeEqual(suppliedToken, apiToken)) throw httpError(401, "Invalid access key.");
@@ -525,17 +609,16 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
 
   app.delete("/api/session", asyncHandler(async (req, res) => {
     noStore(res);
-    assertRequestOrigin(req, Boolean(platformAuthConfig), trustForwardedHost);
+    assertRequestOrigin(req, Boolean(clerkAuthConfig), trustForwardedHost);
     res.clearCookie(SESSION_COOKIE, { httpOnly: true, secure: production, sameSite: "lax", path: "/" });
-    if (platformAuthConfig) {
-      const platformRequest = webRequest(req, trustForwardedHost);
-      const productionRequest = isProductionRequest(platformRequest);
+    if (clerkAuthConfig) {
+      const appRequest = webRequest(req, trustForwardedHost);
+      const productionRequest = isProductionRequest(appRequest);
       const family = requireKnownHost(req, hostFamilies, trustForwardedHost).family;
-      if (!family.authConfig) throw httpError(404, "Workspace unavailable.");
       const [rootSession, tenantSession, retrySession] = await Promise.all([
-        verifyRootSession(platformRequest, family.authConfig.sessionSecret, productionRequest),
-        verifyTenantSession(platformRequest, family.authConfig.sessionSecret, productionRequest),
-        verifyLogoutRetrySession(platformRequest, family.authConfig.sessionSecret, productionRequest)
+        verifyRootSession(appRequest, clerkAuthConfig.sessionSecret, productionRequest),
+        verifyTenantSession(appRequest, clerkAuthConfig.sessionSecret, productionRequest),
+        verifyLogoutRetrySession(appRequest, clerkAuthConfig.sessionSecret, productionRequest)
       ]);
       res.append("Set-Cookie", clearRootSessionCookie(productionRequest));
       res.append("Set-Cookie", clearTenantSessionCookie(productionRequest));
@@ -545,8 +628,8 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       } catch {
         if (session) {
           res.append("Set-Cookie", await createLogoutRetryCookie(
-            logoutRetrySession(session, family.rootOrigin, requestOrigin(platformRequest)),
-            family.authConfig.sessionSecret,
+            logoutRetrySession(session, family.rootOrigin, requestOrigin(appRequest)),
+            clerkAuthConfig.sessionSecret,
             productionRequest
           ));
         }
@@ -570,8 +653,8 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
 
   app.get("/api/workspaces", asyncHandler(async (req, res) => {
     const family = requireRootRequest(req, hostFamilies, trustForwardedHost);
-    if (!family.authConfig) throw httpError(404, "API route not found.");
-    const identity = await verifiedRootIdentity(req, family.authConfig, trustForwardedHost, accessStore);
+    if (!clerkAuthConfig) throw httpError(404, "API route not found.");
+    const identity = await verifiedRootIdentity(req, clerkAuthConfig, trustForwardedHost, accessStore);
     if (!identity) throw httpError(401, "Owner sign-in required.");
     const workspaces = await accessStore.listWorkspacesForOwner(identity.providerSubject);
     res.json({ workspaces: workspaces.filter((workspace) => supportsWorkspace(family, workspace.slug)).map((workspace) => publicAccessWorkspace(workspace, family)) });
@@ -580,8 +663,8 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
   app.post("/api/workspaces", asyncHandler(async (req, res) => {
     const family = requireRootRequest(req, hostFamilies, trustForwardedHost);
     assertRequestOrigin(req, true, trustForwardedHost);
-    if (!family.authConfig) throw httpError(404, "API route not found.");
-    const identity = await verifiedRootIdentity(req, family.authConfig, trustForwardedHost, accessStore);
+    if (!clerkAuthConfig) throw httpError(404, "API route not found.");
+    const identity = await verifiedRootIdentity(req, clerkAuthConfig, trustForwardedHost, accessStore);
     if (!identity) throw httpError(401, "Owner sign-in required.");
     rejectWorkspaceSelectors(req, true);
     const body = asRecord(req.body);
@@ -611,8 +694,8 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
   app.post("/api/workspace-handoffs", asyncHandler(async (req, res) => {
     const family = requireRootRequest(req, hostFamilies, trustForwardedHost);
     assertRequestOrigin(req, true, trustForwardedHost);
-    if (!family.authConfig) throw httpError(404, "API route not found.");
-    const identity = await verifiedRootIdentity(req, family.authConfig, trustForwardedHost, accessStore);
+    if (!clerkAuthConfig) throw httpError(404, "API route not found.");
+    const identity = await verifiedRootIdentity(req, clerkAuthConfig, trustForwardedHost, accessStore);
     if (!identity) throw httpError(401, "Owner sign-in required.");
     const slug = workspaceSlug(asRecord(req.body).slug);
     const workspace = (await accessStore.listWorkspacesForOwner(identity.providerSubject)).find((candidate) => candidate.slug === slug);
@@ -636,7 +719,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     const hostContext = await resolveKnownHost(host, hostFamilies, accessStore);
     const family = hostContext?.family;
     const workspace = hostContext?.kind === "workspace" ? hostContext.workspace : null;
-    if (!family?.authConfig) throw httpError(404, "API route not found.");
+    if (!family || !clerkAuthConfig) throw httpError(404, "API route not found.");
     if (!workspace) throw httpError(404, "Workspace unavailable.");
     assertExactOrigin(req, family.rootOrigin);
     try {
@@ -653,9 +736,9 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       };
       res.append("Set-Cookie", await createTenantSessionCookie(
         tenantSession,
-        family.authConfig.sessionSecret,
+        clerkAuthConfig.sessionSecret,
         isProductionRequest(webRequest(req, trustForwardedHost)),
-        family.authConfig.tenantSessionTtlSeconds
+        clerkAuthConfig.tenantSessionTtlSeconds
       ));
       if (req.is("application/x-www-form-urlencoded")) {
         res.redirect(303, "/");
@@ -670,6 +753,8 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
 
   app.get("/", serveIndex(staticDir));
   app.get("/index.html", serveIndex(staticDir));
+  app.get("/sign-in", serveIndex(staticDir));
+  app.get("/sign-up", serveIndex(staticDir));
   app.get("/app.js", sendStaticFile(staticDir, "public/app.js", "application/javascript; charset=utf-8"));
   app.get("/judgmentkit.css", sendStaticFile(staticDir, "public/judgmentkit.css", "text/css; charset=utf-8"));
   app.get("/styles.css", sendStaticFile(staticDir, "public/styles.css", "text/css; charset=utf-8"));
@@ -686,7 +771,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
         legacyApiWorkspaceId,
         legacyStore,
         ownerLabel,
-        platformAuthConfig,
+        clerkAuthConfig,
         hostFamilies,
         primaryHostFamily,
         trustForwardedHost,
@@ -913,7 +998,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
   return app;
 }
 
-function securityHeaders(): RequestHandler {
+function securityHeaders(clerkConfigured: boolean): RequestHandler {
   return (req, res, next) => {
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
@@ -921,7 +1006,9 @@ function securityHeaders(): RequestHandler {
     res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
     res.setHeader(
       "Content-Security-Policy",
-      "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'"
+      clerkConfigured
+        ? "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'; script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com https://*.protect.clerk.com; style-src 'self' 'unsafe-inline'; connect-src 'self' https://*.protect.clerk.com; img-src 'self' https://img.clerk.com; worker-src 'self' blob:; frame-src 'self' https://challenges.cloudflare.com https://*.protect.clerk.com"
+        : "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'"
     );
     if (req.path.startsWith("/api/")) noStore(res);
     next();
@@ -957,7 +1044,7 @@ async function resolveAccessContext(req: Request, config: AccessContextConfig): 
   const hostFamily = hostContext?.family || null;
   const tenantWorkspace = hostContext?.kind === "workspace" ? hostContext.workspace : null;
 
-  if (!config.platformAuthConfig) {
+  if (!config.clerkAuthConfig) {
     return {
       kind: "local",
       auth: authenticateLocal(req, { apiToken: config.apiToken, ownerLabel: config.ownerLabel, store: config.legacyStore }),
@@ -967,7 +1054,7 @@ async function resolveAccessContext(req: Request, config: AccessContextConfig): 
     };
   }
 
-  if (!hostContext || !hostFamily?.authConfig) {
+  if (!hostContext || !hostFamily) {
     throw httpError(404, "Workspace unavailable.");
   }
 
@@ -1010,7 +1097,7 @@ async function resolveAccessContext(req: Request, config: AccessContextConfig): 
   }
 
   if (hostContext.kind === "root") {
-    const identity = await verifiedRootIdentity(req, hostFamily.authConfig, config.trustForwardedHost, config.accessStore);
+    const identity = await verifiedRootIdentity(req, config.clerkAuthConfig, config.trustForwardedHost, config.accessStore);
     return {
       kind: "root",
       auth: identity ? {
@@ -1027,9 +1114,12 @@ async function resolveAccessContext(req: Request, config: AccessContextConfig): 
 
   if (!tenantWorkspace) return { kind: "workspace", auth: null, identity: null, workspace: null, hostFamily };
 
-  const platformRequest = webRequest(req, config.trustForwardedHost);
-  const tenantSession = await verifyTenantSession(platformRequest, hostFamily.authConfig.sessionSecret, isProductionRequest(platformRequest));
+  const appRequest = webRequest(req, config.trustForwardedHost);
+  const tenantSession = await verifyTenantSession(appRequest, config.clerkAuthConfig.sessionSecret, isProductionRequest(appRequest));
   if (!tenantSession || tenantSession.workspaceId !== tenantWorkspace.id) {
+    return { kind: "workspace", auth: null, identity: null, workspace: tenantWorkspace, hostFamily };
+  }
+  if (!config.clerkAuthConfig.allowedUserIds.includes(tenantSession.providerSubject)) {
     return { kind: "workspace", auth: null, identity: null, workspace: tenantWorkspace, hostFamily };
   }
   if (await config.accessStore.isSessionRevoked(tenantSession.providerSubject, tenantSession.sessionId)) {
@@ -1076,13 +1166,14 @@ function fixedWorkspaceStoreResolver(store: StateStore, storageId: string): Work
 
 async function verifiedRootIdentity(
   req: Request,
-  config: PlatformAuthConfig,
+  config: ClerkAuthConfig,
   trustForwardedHost: boolean,
   accessStore?: AccessStore
 ): Promise<RootSession | null> {
   const platformRequest = webRequest(req, trustForwardedHost);
   const identity = await verifyRootSession(platformRequest, config.sessionSecret, isProductionRequest(platformRequest));
   if (!identity) return null;
+  if (!config.allowedUserIds.includes(identity.providerSubject)) return null;
   if (accessStore && await accessStore.isSessionRevoked(identity.providerSubject, identity.sessionId)) return null;
   return identity;
 }
@@ -1106,22 +1197,14 @@ function logoutRetrySession(
   session: { providerSubject: string; sessionId: string; rootOrigin: string },
   rootOrigin: string,
   cookieOrigin: string
-): { providerSubject: string; sessionId: string; rootOrigin: string; cookieOrigin: string } {
+): LogoutRetrySession {
   if (session.rootOrigin !== rootOrigin) throw httpError(401, "Authentication required.");
-  return { providerSubject: session.providerSubject, sessionId: session.sessionId, rootOrigin, cookieOrigin };
-}
-
-function sendAuthRoute(res: Response, route: AuthRouteResponse): void {
-  for (const [name, raw] of Object.entries(route.headers || {})) {
-    const values = headerValues(raw);
-    for (const value of values) res.append(name, value);
-  }
-  if (route.json) res.status(route.status).json(route.json);
-  else res.status(route.status).end();
-}
-
-function headerValues(value: string | string[] | undefined): string[] {
-  return Array.isArray(value) ? value : value ? [value] : [];
+  return {
+    providerSubject: session.providerSubject,
+    sessionId: session.sessionId,
+    rootOrigin,
+    cookieOrigin
+  };
 }
 
 function canonicalConfiguredHost(raw: string): string {
@@ -1138,12 +1221,10 @@ function canonicalConfiguredHost(raw: string): string {
 
 function candidateHostFamilyFromEnv(env: Record<string, string | undefined> = process.env): CandidateHostFamilyOptions | null {
   const rootHost = env.KANBAN_CARDS_CANDIDATE_ROOT_HOST?.trim() || "";
-  const redirectUri = env.OIDC_CANDIDATE_REDIRECT_URI?.trim() || "";
-  const postLogoutRedirectUri = env.OIDC_CANDIDATE_POST_LOGOUT_REDIRECT_URI?.trim() || "";
   const tenantHostsJson = env.KANBAN_CARDS_CANDIDATE_TENANT_HOSTS?.trim() || "";
-  if (![rootHost, redirectUri, postLogoutRedirectUri, tenantHostsJson].some(Boolean)) return null;
-  if (!rootHost || !redirectUri || !tenantHostsJson) {
-    throw new Error("KANBAN_CARDS_CANDIDATE_ROOT_HOST, OIDC_CANDIDATE_REDIRECT_URI, and KANBAN_CARDS_CANDIDATE_TENANT_HOSTS must be set together.");
+  if (![rootHost, tenantHostsJson].some(Boolean)) return null;
+  if (!rootHost || !tenantHostsJson) {
+    throw new Error("KANBAN_CARDS_CANDIDATE_ROOT_HOST and KANBAN_CARDS_CANDIDATE_TENANT_HOSTS must be set together.");
   }
   let tenantHosts: Record<string, string>;
   try {
@@ -1153,24 +1234,16 @@ function candidateHostFamilyFromEnv(env: Record<string, string | undefined> = pr
   } catch {
     throw new Error("KANBAN_CARDS_CANDIDATE_TENANT_HOSTS must be a JSON object mapping Workspace slugs to exact hosts.");
   }
-  return { rootHost, redirectUri, ...(postLogoutRedirectUri ? { postLogoutRedirectUri } : {}), tenantHosts };
+  return { rootHost, tenantHosts };
 }
 
-function createCandidateHostFamily(input: CandidateHostFamilyOptions, primaryAuthConfig: PlatformAuthConfig | null): HostFamily {
-  if (!primaryAuthConfig) throw new Error("A candidate host family requires provider authentication.");
+function createCandidateHostFamily(input: CandidateHostFamilyOptions, clerkConfigured: boolean): HostFamily {
+  if (!clerkConfigured) throw new Error("A candidate host family requires Clerk authentication.");
   const candidateRootHost = canonicalConfiguredHost(input.rootHost);
-  const candidateRootOrigin = originForHost(candidateRootHost);
-  const redirectUri = String(input.redirectUri || "").trim();
-  const postLogoutRedirectUri = String(input.postLogoutRedirectUri || "/").trim();
-  const authConfig = validatePlatformAuthConfig({
-    ...primaryAuthConfig,
-    redirectUri,
-    postLogoutRedirectUri
-  });
-  requireFamilyRedirect(authConfig.redirectUri, candidateRootOrigin, "OIDC_CANDIDATE_REDIRECT_URI");
-  if (!authConfig.postLogoutRedirectUri.startsWith("/") && new URL(authConfig.postLogoutRedirectUri).origin.toLowerCase() !== candidateRootOrigin) {
-    throw new Error("OIDC_CANDIDATE_POST_LOGOUT_REDIRECT_URI must stay on the candidate root origin.");
+  if (isIP(new URL(`http://${candidateRootHost}`).hostname.replace(/^\[|\]$/g, ""))) {
+    throw new Error("A Clerk candidate root must use a DNS hostname.");
   }
+  const candidateRootOrigin = originForHost(candidateRootHost);
   const tenantHosts = new Map<string, string>();
   const tenantSlugs = new Set<string>();
   for (const [rawSlug, rawHost] of Object.entries(input.tenantHosts || {})) {
@@ -1187,16 +1260,54 @@ function createCandidateHostFamily(input: CandidateHostFamilyOptions, primaryAut
     rootHost: candidateRootHost,
     rootOrigin: candidateRootOrigin,
     deriveTenantHosts: false,
-    tenantHosts,
-    authConfig
+    tenantHosts
   };
 }
 
-function requireFamilyRedirect(redirectUri: string, rootOrigin: string, label: string): void {
-  const redirect = new URL(redirectUri);
-  if (redirect.origin.toLowerCase() !== rootOrigin || redirect.pathname !== "/auth/callback" || redirect.search || redirect.hash) {
-    throw new Error(`${label} must use the exact configured root origin and /auth/callback path without a query or fragment.`);
+function clerkBrowserRuntimeConfig(input: {
+  config: ClerkAuthConfig;
+  currentOrigin: string;
+  isSatellite: boolean;
+  allowedRedirectOrigins: readonly string[];
+  fallbackRedirectUrl: string;
+}): UnknownRecord {
+  return {
+    clerkPublishableKey: input.config.publishableKey,
+    clerkProxyUrl: `${input.currentOrigin}/__clerk`,
+    clerkIsSatellite: input.isSatellite,
+    clerkPrimarySignInUrl: clerkPrimarySignInUrl(input.config),
+    clerkPrimarySignUpUrl: clerkPrimarySignUpUrl(input.config),
+    clerkAllowedRedirectOrigins: [...input.allowedRedirectOrigins],
+    clerkFallbackRedirectUrl: input.fallbackRedirectUrl
+  };
+}
+
+function validateAuthHostTopology(authHost: string, families: readonly HostFamily[]): void {
+  if (!authHost) throw new Error("KANBAN_CARDS_AUTH_HOST is required for Clerk authentication.");
+  for (const family of families) {
+    if (
+      authHost === family.rootHost
+      || family.tenantHosts.has(authHost)
+      || family.deriveTenantHosts && isDerivedTenantHost(authHost, family.rootHost)
+    ) {
+      throw new Error("KANBAN_CARDS_AUTH_HOST must be distinct from every application root and tenant host.");
+    }
   }
+}
+
+function authHostSurfaceAllows(req: Request): boolean {
+  if (req.path === "/__clerk" || req.path.startsWith("/__clerk/")) return true;
+  if (req.method !== "GET" && req.method !== "HEAD") return false;
+  return new Set([
+    "/sign-in",
+    "/sign-up",
+    "/app.js",
+    "/judgmentkit.css",
+    "/styles.css",
+    "/robots.txt",
+    "/favicon.ico",
+    "/api/session"
+  ]).has(req.path);
 }
 
 function validateHostFamilies(families: readonly HostFamily[]): void {
@@ -1297,10 +1408,6 @@ function publicAccessWorkspace(workspace: AccessWorkspace, family: HostFamily): 
     name: workspace.name,
     url: originForHost(workspaceHost(workspace.slug, family))
   };
-}
-
-function rootLoginUrl(family: HostFamily): string {
-  return `${family.rootOrigin}/auth/login`;
 }
 
 function rootLogoutUrl(family: HostFamily): string {

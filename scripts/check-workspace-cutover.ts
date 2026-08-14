@@ -89,34 +89,46 @@ async function hydrateWithLiveFacts(snapshot: unknown, phase: CutoverPhase): Pro
     deploymentProtection: stringValue(protection.deploymentType)
   };
   root.candidate = liveCandidate;
-  const currentHealth = await publicJson(`https://${target.publicDomain}/api/health`);
-  root.currentProduction = { ...deploymentRecord(current), health: currentHealth };
+  const liveCurrent = deploymentRecord(current);
+  const currentHealth = phase === "pre-promotion"
+    ? await vercelRuntimeJson(stringValue(liveCurrent.url), "/api/health")
+    : await publicJson(`https://${target.publicDomain}/api/health`);
+  root.currentProduction = { ...liveCurrent, health: currentHealth };
 
   const evidence = record(root.evidence);
   const phaseKey = phase === "pre-promotion" ? "prePromotion" : "postPromotion";
   const receipt = record(evidence[phaseKey]);
   const proofOrigin = stringValue(receipt.origin);
+  const authOrigin = stringValue(receipt.authOrigin);
   const tenantOrigin = stringValue(receipt.tenantOrigin);
   if (!proofOrigin) throw new Error(`Live verification requires evidence.${phaseKey}.origin.`);
+  if (!authOrigin) throw new Error(`Live verification requires evidence.${phaseKey}.authOrigin.`);
   if (!tenantOrigin) throw new Error(`Live verification requires evidence.${phaseKey}.tenantOrigin.`);
-  const [routed, tenantRouted] = await Promise.all([
+  const [routed, authRouted, tenantRouted] = await Promise.all([
     vercelJson(["inspect", proofOrigin, "--format=json"]),
+    vercelJson(["inspect", authOrigin, "--format=json"]),
     vercelJson(["inspect", tenantOrigin, "--format=json"])
   ]);
   receipt.routeDeploymentId = stringValue(routed.id);
   receipt.routePinned = receipt.routeDeploymentId === candidateId ? "passed" : "failed";
+  receipt.authRouteDeploymentId = stringValue(authRouted.id);
+  receipt.authRoutePinned = receipt.authRouteDeploymentId === candidateId ? "passed" : "failed";
+  receipt.sameArtifactAuthHost = receipt.authRoutePinned;
   receipt.tenantRouteDeploymentId = stringValue(tenantRouted.id);
   receipt.tenantRoutePinned = receipt.tenantRouteDeploymentId === candidateId ? "passed" : "failed";
+  const [routeProtected, authRouteProtected, tenantRouteProtected] = await Promise.all([
+    unauthenticatedRouteIsProtected(proofOrigin),
+    unauthenticatedRouteIsProtected(authOrigin),
+    unauthenticatedRouteIsProtected(tenantOrigin)
+  ]);
   if (phase === "pre-promotion") {
-    const [routeProtected, tenantRouteProtected] = await Promise.all([
-      unauthenticatedRouteIsProtected(proofOrigin),
-      unauthenticatedRouteIsProtected(tenantOrigin)
-    ]);
     receipt.routeProtected = routeProtected ? "passed" : "failed";
+    receipt.authRouteProtected = authRouteProtected ? "passed" : "failed";
     receipt.tenantRouteProtected = tenantRouteProtected ? "passed" : "failed";
   } else {
-    receipt.routeProtected = "not-required";
-    receipt.tenantRouteProtected = "not-required";
+    receipt.routeProtected = routeProtected ? "failed" : "not-required";
+    receipt.authRouteProtected = authRouteProtected ? "failed" : "not-required";
+    receipt.tenantRouteProtected = tenantRouteProtected ? "failed" : "not-required";
   }
   const runtimeOrigin = phase === "pre-promotion" ? stringValue(record(root.candidate).url) : `https://${target.publicDomain}`;
   const [health, accessHealth] = phase === "pre-promotion"

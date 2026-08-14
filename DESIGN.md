@@ -28,7 +28,7 @@ The browser and skill are two clients of the same system:
 - A Project is the board. Columns express state. Cards carry the work. Comments and Activity preserve useful context.
 - Neither client maintains a second workflow model.
 
-Owners sign in through a provider-verified root experience, then enter one server-authorized Workspace at its canonical host. Zero Workspaces leads to creation, one opens directly, and many require an explicit choice. The skill credential remains a temporary owner-authority compatibility path bound server-side to the migrated Workspace; the next roadmap slice replaces that bridge with a verified agent principal.
+Owners sign up or sign in through Clerk's unified email-code experience at the root, then enter one server-authorized Workspace at its canonical host. Zero Workspaces leads to creation, one opens directly, and many require an explicit choice. The skill credential remains a temporary owner-authority compatibility path bound server-side to the migrated Workspace; the next roadmap slice replaces that bridge with a verified agent principal.
 
 The interface should feel like a focused work surface. It should not feel like an administration console for agents, permissions, or workflows.
 
@@ -57,7 +57,7 @@ The active Project and selected Card must be obvious. Changing Projects should n
 
 ### Authority stays simple and honest
 
-A verified owner session grants access only to Workspaces explicitly bound to that provider identity. Within a Workspace, authority remains Workspace-wide. The interface must not imply per-Project permissions, authenticated agent identities, or verified agent authorship that the system does not provide.
+A verified owner session grants access only to Workspaces explicitly bound to an admitted Clerk user ID. Email is profile data, never the binding or admission key. Within a Workspace, authority remains Workspace-wide. The interface must not imply per-Project permissions, authenticated agent identities, or verified agent authorship that the system does not provide.
 
 Activity may show the client channel and a caller-supplied actor label. The presentation should treat that information as attribution, not identity proof.
 
@@ -94,9 +94,9 @@ These qualities are outcomes, not inherited tokens. The new system must choose i
 
 ## Required surfaces
 
-### Sign-in
+### Sign-up and sign-in
 
-The production sign-in surface should send the owner through the configured identity provider without collecting credentials in kanban.cards. After sign-in, the root surface creates the first Workspace, opens the sole Workspace, or presents an explicit Workspace chooser. A one-time, exact-host handoff establishes a host-only tenant session without placing its token in a URL. Local development may retain the owner-key form when provider auth is deliberately absent.
+The dedicated auth host uses Clerk's unified passwordless email-code experience for both sign-up and sign-in. Clerk—not kanban.cards—collects and verifies the email code. `KANBAN_CARDS_AUTH_HOST` names that one stable Clerk primary, and the server derives its `/sign-in` and `/sign-up` routes from the exact host. The same artifact mounts Clerk UI only on those routes and serves the same-origin Clerk proxy there; Workspace, Project, handoff, and app-session exchange APIs are unavailable on the auth host. The canonical application root and a temporary release-candidate root are explicitly registered satellites: each offers Clerk-generated sign-in and sign-up links, completes authentication on the dedicated primary, and synchronizes the verified session back to its exact application origin. Neither application root mounts a second local sign-in component or invents a primary URL. The client then exchanges the verified Clerk browser session at `POST /api/clerk-session` on the application root; the server verifies the exact Clerk user ID and session ID, checks the explicit admission list, and issues the kanban.cards root session. Email must never select an owner or Workspace. After admission, the root surface creates the first Workspace, opens the sole Workspace, or presents an explicit Workspace chooser. A one-time, exact-host handoff establishes a host-only tenant session without placing its token in a URL. Local development may retain the owner-key form only when Clerk is deliberately absent.
 
 ### Empty workspace
 
@@ -131,7 +131,8 @@ The design must account for the full workflow, including states that are easy to
 | State | What the experience must communicate |
 | --- | --- |
 | Opening | The application is loading without exposing stale private data. |
-| Signed out | Provider sign-in opens only Workspaces owned by the verified identity; local fallback states their narrower development boundary. |
+| Signed out | Clerk's unified email-code sign-up/sign-in opens only Workspaces owned by an admitted exact Clerk user ID; local fallback states its narrower development boundary. |
+| Not admitted | The Clerk account is verified, but access is not enabled; no Workspace names or other private data are revealed. |
 | Invalid key | Access was refused; no Project names or content are revealed. |
 | Empty workspace | The owner can create a Project or ask the skill to create one. |
 | Empty Project | Columns are present and the next Card can be created. |
@@ -159,14 +160,14 @@ The design must account for the full workflow, including states that are easy to
 
 ## Access and context presentation
 
-The product has provider-verified owners, isolated Workspaces, and one Workspace-wide authority boundary inside each Workspace.
+The product has Clerk-verified, explicitly admitted owners, isolated Workspaces, and one Workspace-wide authority boundary inside each Workspace.
 
-- The account indicator may show the provider-verified display name, but it must not suggest a role system.
+- The account indicator may show the Clerk-verified display name, but it must not suggest a role system.
 - The canonical Workspace host and server-validated session select tenant context. A Project ID, request body, query, or header never selects it.
 - The active Project is navigation context, not an authorization scope.
 - Repository binding belongs to the skill workflow; the browser does not need to simulate repository permissions.
 - API actor labels still should not receive avatars, presence, or identity treatments that imply verification.
-- Provider secrets and the compatibility bearer must never appear in client-readable storage, markup, URLs, logs, or screenshots. A handoff token may exist only in the root response, an immediately removed hidden form control, and the exact-destination POST body; it never enters rendered content, persistent browser storage, a URL, a log, or a screenshot. Browser sessions remain only in signed, expiring, host-only HttpOnly cookies.
+- The Clerk secret key and compatibility bearer must never appear in client-readable storage, markup, URLs, logs, or screenshots. The Clerk publishable key may be returned only on the signed-out root session contract and Clerk assets are loaded through the exact same-origin `/__clerk` proxy. A handoff token may exist only in the root response, an immediately removed hidden form control, and the exact-destination POST body; it never enters rendered content, persistent browser storage, a URL, a log, or a screenshot. kanban.cards browser sessions remain only in signed, expiring, host-only HttpOnly cookies.
 
 ## Responsive and accessible behavior
 

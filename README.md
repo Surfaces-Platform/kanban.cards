@@ -1,6 +1,6 @@
 # kanban.cards
 
-kanban.cards is a small, skill-first Kanban system. Owners use provider-verified, tenant-aware browser sessions. During the migration slice, the skill uses a compatibility credential bound server-side to one Workspace and acts with the owner's authority. The website is the visual oversight surface; it is not a second workflow engine.
+kanban.cards is a small, skill-first Kanban system. Owners use Clerk-verified, tenant-aware browser sessions. During the migration slice, the skill uses a compatibility credential bound server-side to one Workspace and acts with the owner's authority. The website is the visual oversight surface; it is not a second workflow engine.
 
 The product model is deliberately narrow:
 
@@ -33,7 +33,7 @@ export KANBAN_CARDS_API_TOKEN='choose-a-local-owner-key'
 npm run dev
 ```
 
-Open `http://127.0.0.1:4317` and enter the same owner key. This form is the deliberate local fallback when OIDC is absent. Production requires provider sign-in; Project data requires either the tenant session or the Workspace-bound compatibility bearer.
+Open `http://127.0.0.1:4317` and enter the same owner key. This form is the deliberate local fallback when Clerk is absent. Production requires Clerk sign-up or sign-in; Project data requires either the tenant session or the Workspace-bound compatibility bearer.
 
 The runnable helper is included with the skill. Connect it to the local server:
 
@@ -72,7 +72,8 @@ Create operations accept `Idempotency-Key`, card imports can use `externalKey`, 
 Runtime source is TypeScript under `src/`:
 
 - `src/server.ts`: public shell, owner authentication, and resource API
-- `src/platform-auth.ts`: OIDC, claim validation, and signed root/tenant sessions
+- `src/clerk-auth.ts`: Clerk middleware, exact user admission, verified profile loading, and Clerk session revocation
+- `src/app-sessions.ts`: signed, origin-bound root/tenant sessions and logout retry cookies
 - `src/access-store.ts`: owner, Workspace, ownership, and one-time handoff registry
 - `src/state-store.ts`: local JSON and Postgres persistence
 - `src/client/app.ts`: sign-in, project list, Kanban board, and Card detail and editing
@@ -82,7 +83,9 @@ The TypeScript CLI source builds to the tracked `.agents/skills/kanban-cards/scr
 
 Local development stores state in `data/kanban-cards-v2-state.json` unless a database URL is configured. Production uses the independent `kanban_v2_workspaces` table. Old workspace rows are not imported or read.
 
-Production requires the database URL and the OIDC issuer/client/redirect/session/surface configuration. The optional legacy cutover requires the exact provider subject plus Workspace slug/name; verified email and display name always come from the matching provider callback. While the skill bridge remains enabled, configure `KANBAN_CARDS_API_TOKEN` and `KANBAN_CARDS_API_WORKSPACE_ID=default`; remove the token after provider access passes the retirement proof. Set `KANBAN_CARDS_ROOT_HOST=kanban.cards` in production. A bounded pre-promotion rehearsal may additionally configure one exact candidate root, one registered candidate redirect, and exactly one legacy-slug-to-candidate-host mapping; candidate and canonical credentials are origin-bound and cannot cross families. Local provider mode derives `localhost:<port>` from the validated OIDC redirect when the root host is absent.
+Production requires the database URL, Vercel Marketplace's `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY`, `CLERK_ENCRYPTION_KEY`, `SESSION_SECRET`, `KANBAN_CARDS_ROOT_HOST=kanban.cards`, `KANBAN_CARDS_AUTH_HOST=auth.kanban.cards`, and an exact comma-separated `KANBAN_CARDS_ALLOWED_CLERK_USER_IDS` admission list. `CLERK_PUBLISHABLE_KEY` remains accepted as a compatibility alias, but both names must match if both are set. A Vercel production runtime requires Marketplace production-instance keys beginning with `pk_live_` and `sk_live_`; development keys fail configuration before readiness. The server derives `https://auth.kanban.cards/sign-in` and `/sign-up` from that one exact auth host; operators do not configure independent primary flow URLs. The encryption and app-session secrets must each be at least 32 bytes. Clerk supplies the verified user ID, primary verified email, display name, and session ID; the server must never admit or bind an owner by email. The optional legacy cutover requires `KANBAN_CARDS_LEGACY_CLERK_USER_ID` plus the Workspace slug/name, and that user ID must also appear in the admission list. While the skill bridge remains enabled, configure `KANBAN_CARDS_API_TOKEN` and `KANBAN_CARDS_API_WORKSPACE_ID=default`; remove the token after Clerk access passes the retirement proof.
+
+The dedicated auth host is the one stable Clerk primary. The same artifact redirects its root entry to `/sign-in`, serves Clerk UI only at `/sign-in` and `/sign-up`, and serves the `/__clerk` proxy there, but it never serves Workspace, Project, handoff, or app-session exchange APIs. The canonical root and a bounded pre-promotion candidate root are Clerk satellites; each uses Clerk's generated sign-in/sign-up URLs so authentication completes on the dedicated primary and the verified Clerk session synchronizes back to that exact application origin. The primary allows only the canonical root and, while it exists, the exact candidate root as redirect origins. Tenant hosts never receive Clerk configuration and accept only separate origin-bound kanban.cards app sessions. App sessions and handoffs cannot cross candidate and canonical host families. The same-origin `/__clerk` proxy requires a Clerk production instance and an exact proxy entry for every exercised auth or application root in the Clerk Dashboard; Clerk documents that Frontend API proxying does not work for development instances.
 
 The access migration leaves the existing `kanban_v2_workspaces:default` JSON unchanged and adds an access-registry mapping around it. See [`docs/workspace-access-migration.md`](docs/workspace-access-migration.md) for the exact cutover and rollback proof.
 
@@ -92,6 +95,7 @@ The browser and helper use the same endpoints:
 
 ```text
 GET/POST/DELETE /api/session
+POST            /api/clerk-session
 GET             /api/access/health
 GET/POST        /api/workspaces
 POST            /api/workspace-handoffs
@@ -124,10 +128,10 @@ npm run release:preflight
 
 The repository deploys to Vercel as an Express function through `api/index.ts`. Automatic Vercel deployments from `main` are disabled in `vercel.json`, so a merge and a production traffic change are distinct events. The Vercel Project must also keep **Auto-assign Custom Production Domains** disabled as a remotely verified defense in depth.
 
-1. Configure provider auth, the explicit legacy Workspace mapping, Postgres, and—only while required—the Workspace-bound compatibility key.
+1. Configure Clerk, the exact admitted Clerk user IDs, the explicit legacy Workspace mapping, Postgres, and—only while required—the Workspace-bound compatibility key.
 2. Deploy the exact validated commit to a protected production-target candidate without moving the public domain.
-3. Verify provider sign-in, callback, exact binding, and canonical tenant handoff on an approved protected candidate hostname pinned to the exact deployment. The generated deployment hostname does not satisfy provider or bearer routing; if no separate registered candidate route exists, stop. Legacy cutover refuses a missing or invalid `kanban_v2_workspaces:default` row before it writes the access mapping; it does not initialize replacement legacy data.
-4. Confirm `/api/health` and `/api/access/health` are ready after the callback has created the exact binding. While the bridge is enabled, also complete the bounded read, Card create, comment, move, and archive proof before promotion.
+3. Verify the unified Clerk email-code sign-up/sign-in flow, server-side Clerk session exchange, exact user-ID admission and legacy binding, Clerk sign-out, and canonical tenant handoff on approved protected candidate hostnames pinned to the exact deployment. The generated deployment hostname does not satisfy Clerk or bearer routing; if no separate exact candidate routes exist, stop. Legacy cutover refuses a missing or invalid `kanban_v2_workspaces:default` row before it writes the access mapping; it does not initialize replacement legacy data.
+4. Confirm `/api/health` and `/api/access/health` are ready after the verified Clerk session has created the exact binding. While the bridge is enabled, also complete the bounded read, Card create, comment, move, and archive proof before promotion.
 5. Record distinct, artifact-bound pre/post receipts without credentials. Promote through `npm run release:gate -- --snapshot <evidence.json> --live --authorize-promotion --confirmation "PROMOTE EXACT VERIFIED CANDIDATE" --promote`; the controller live-verifies and supplies the evaluated deployment ID itself. Repeat the complete gate with `--phase post-promotion --live`.
 
 `npm run db:init` is an optional manual initializer only when a production database URL is already present in the current process. Treat it as successful production proof only when it reports `Initialized V2 postgres workspace at kanban_v2_workspaces:default`; a `file` result initialized local storage instead. Follow [the runbook](docs/runbook.md) for the complete candidate, promotion, rotation, and rollback procedure.

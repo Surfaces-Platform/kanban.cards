@@ -14,7 +14,7 @@ import {
 import { createWorkspaceStoreResolver, freshWorkspaceState } from "../src/state-store";
 
 const MIKE_IDENTITY = {
-  providerSubject: "auth0|mike",
+  providerSubject: "user_mike123",
   email: "mike@example.com",
   displayName: "Mike"
 } as const;
@@ -31,8 +31,8 @@ test("access registry normalization rejects duplicate identity and broken owners
   assert.throws(() => normalizeAccessRegistry({
     schemaVersion: 1,
     owners: [
-      { id: "owner-a", providerSubject: "oidc|same", email: "a@example.com", displayName: "A", createdAt: timestamp, updatedAt: timestamp },
-      { id: "owner-b", providerSubject: "oidc|same", email: "b@example.com", displayName: "B", createdAt: timestamp, updatedAt: timestamp }
+      { id: "owner-a", providerSubject: "user_same", email: "a@example.com", displayName: "A", createdAt: timestamp, updatedAt: timestamp },
+      { id: "owner-b", providerSubject: "user_same", email: "b@example.com", displayName: "B", createdAt: timestamp, updatedAt: timestamp }
     ],
     workspaces: [],
     handoffs: []
@@ -59,8 +59,8 @@ test("access registry normalization rejects duplicate identity and broken owners
     workspaces: [],
     handoffs: [],
     revokedSessions: [
-      { providerSubject: "oidc|unknown", sessionId: "session-one", revokedAt: timestamp },
-      { providerSubject: "oidc|unknown", sessionId: "session-one", revokedAt: timestamp }
+      { providerSubject: "user_unknown", sessionId: "session-one", revokedAt: timestamp },
+      { providerSubject: "user_unknown", sessionId: "session-one", revokedAt: timestamp }
     ]
   }), /Duplicate revoked session/);
 });
@@ -86,21 +86,21 @@ test("file access registry creates isolated Workspaces and binds legacy default 
     });
     assert.notEqual(newWorkspace.storageId, "default");
     assert.notEqual(newWorkspace.storageId, legacy.storageId);
-    assert.deepEqual((await store.listWorkspacesForOwner("auth0|mike")).map((workspace) => workspace.slug), ["mike", "studio"]);
-    const resolvedOwner = await store.resolveOwner("auth0|mike");
+    assert.deepEqual((await store.listWorkspacesForOwner("user_mike123")).map((workspace) => workspace.slug), ["mike", "studio"]);
+    const resolvedOwner = await store.resolveOwner("user_mike123");
     assert.deepEqual(resolvedOwner?.workspaces.map((workspace) => workspace.slug), ["mike", "studio"]);
     assert.equal(resolvedOwner?.owner.email, "mike.updated@example.com");
     assert.equal(resolvedOwner?.owner.displayName, "Michael Long");
     assert.equal(resolvedOwner?.owner.createdAt, "2026-08-12T12:00:00.000Z");
     assert.equal(resolvedOwner?.owner.updatedAt, "2026-08-12T12:01:00.000Z");
-    assert.equal(await store.resolveOwner("auth0|unknown"), null);
+    assert.equal(await store.resolveOwner("user_unknown"), null);
     assert.equal((await store.getWorkspaceById(newWorkspace.id))?.slug, "studio");
     assert.equal((await store.getWorkspaceBySlug("STUDIO"))?.id, newWorkspace.id);
-    assert.deepEqual(await store.listWorkspacesForOwner("auth0|unknown"), []);
+    assert.deepEqual(await store.listWorkspacesForOwner("user_unknown"), []);
 
     await assert.rejects(
       store.bindLegacyWorkspace({
-        providerSubject: "auth0|other",
+        providerSubject: "user_other",
         email: "other@example.com",
         displayName: "Other",
         slug: "mike",
@@ -123,22 +123,22 @@ test("session revocation is durable, idempotent, concurrent, and independent of 
   let clock = new Date("2026-08-12T12:00:00.000Z");
   const store = createFileAccessStore(dataPath, { now: () => clock });
   try {
-    assert.equal(await store.isSessionRevoked("auth0|not-admitted", "root-session-unknown"), false);
+    assert.equal(await store.isSessionRevoked("user_notadmitted", "root-session-unknown"), false);
     const [first, concurrentReplay] = await Promise.all([
-      store.revokeSession("auth0|not-admitted", "root-session-unknown"),
-      store.revokeSession("auth0|not-admitted", "root-session-unknown")
+      store.revokeSession("user_notadmitted", "root-session-unknown"),
+      store.revokeSession("user_notadmitted", "root-session-unknown")
     ]);
     assert.deepEqual(concurrentReplay, first);
     assert.equal(first.revokedAt, "2026-08-12T12:00:00.000Z");
-    assert.equal(await store.isSessionRevoked("auth0|not-admitted", "root-session-unknown"), true);
-    assert.equal(await store.resolveOwner("auth0|not-admitted"), null);
+    assert.equal(await store.isSessionRevoked("user_notadmitted", "root-session-unknown"), true);
+    assert.equal(await store.resolveOwner("user_notadmitted"), null);
 
     clock = new Date("2026-08-12T12:01:00.000Z");
-    assert.deepEqual(await store.revokeSession("auth0|not-admitted", "root-session-unknown"), first);
+    assert.deepEqual(await store.revokeSession("user_notadmitted", "root-session-unknown"), first);
     assert.equal((await store.read()).revokedSessions.length, 1);
 
     const reopened = createFileAccessStore(dataPath);
-    assert.equal(await reopened.isSessionRevoked("auth0|not-admitted", "root-session-unknown"), true);
+    assert.equal(await reopened.isSessionRevoked("user_notadmitted", "root-session-unknown"), true);
     assert.equal((await reopened.read()).owners.length, 0);
   } finally {
     await fs.rm(directory, { recursive: true, force: true });
@@ -197,7 +197,7 @@ test("handoffs are hashed, exact-host, expiring, and atomically one-time", async
   try {
     const workspace = await store.createWorkspace({ ...MIKE_IDENTITY, slug: "studio", name: "Studio" });
     const issued = await store.createHandoff({
-      providerSubject: "auth0|mike",
+      providerSubject: "user_mike123",
       workspaceId: workspace.id,
       sessionId: "root-session-handoff",
       destinationHost: "studio.kanban.cards",
@@ -231,7 +231,7 @@ test("handoffs are hashed, exact-host, expiring, and atomically one-time", async
     assert.equal(rejected.reason.code, "ACCESS_HANDOFF_CONSUMED");
 
     const expiring = await store.createHandoff({
-      providerSubject: "auth0|mike",
+      providerSubject: "user_mike123",
       workspaceId: workspace.id,
       sessionId: "root-session-expiring",
       destinationHost: "studio.kanban.cards",
@@ -279,7 +279,7 @@ test("Postgres access registry locks mutations and concurrent handoff consumptio
   });
   const workspace = await store.createWorkspace({ ...MIKE_IDENTITY, slug: "studio", name: "Studio" });
   const issued = await store.createHandoff({
-    providerSubject: "auth0|mike",
+    providerSubject: "user_mike123",
     workspaceId: workspace.id,
     sessionId: "root-session-postgres",
     destinationHost: "studio.kanban.cards"
@@ -290,12 +290,12 @@ test("Postgres access registry locks mutations and concurrent handoff consumptio
   ]);
   assert.equal(outcomes.filter((outcome) => outcome.status === "fulfilled").length, 1);
   const revocations = await Promise.all([
-    store.revokeSession("auth0|unknown", "root-session-unknown"),
-    store.revokeSession("auth0|unknown", "root-session-unknown")
+    store.revokeSession("user_unknown", "root-session-unknown"),
+    store.revokeSession("user_unknown", "root-session-unknown")
   ]);
   assert.deepEqual(revocations[1], revocations[0]);
   assert.equal((await store.read()).revokedSessions.length, 1);
-  assert.equal(await store.isSessionRevoked("auth0|unknown", "root-session-unknown"), true);
+  assert.equal(await store.isSessionRevoked("user_unknown", "root-session-unknown"), true);
   assert.ok(database.queries.some((query) => query.includes("FOR UPDATE")));
   assert.equal(database.queries.filter((query) => query.startsWith("CREATE TABLE")).length, 1);
   assert.equal(database.releaseCount, 6);

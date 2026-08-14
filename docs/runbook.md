@@ -4,7 +4,7 @@ This runbook covers local verification, tenant-aware access migration, candidate
 
 ## Operating boundary
 
-The provider-verified browser session is bound to one canonical Workspace host. The interim API credential grants read and write access only to the explicitly mapped legacy Workspace. Treat that credential like a password:
+The Clerk-verified browser session is bound to one canonical Workspace host. The interim API credential grants read and write access only to the explicitly mapped legacy Workspace. Treat that credential like a password:
 
 - Generate a high-entropy value with a password manager or secure random generator.
 - Store production values only in the deployment environment and user-scoped skill configuration.
@@ -20,24 +20,27 @@ openssl rand -hex 32
 
 Copy the result directly into the approved password manager and deployment environment. Do not put the generated value into another command.
 
-The browser uses separate signed root and tenant cookies after provider verification and a one-time exact-host handoff. The CLI stores the compatibility key in `~/.kanban-cards/config.json` with mode `0600` and sends it as a bearer token. A deployment using a rotated compatibility key requires CLI setup again but does not define browser identity. Older immutable deployment URLs retain their original environment snapshot; protect or retire them separately.
+The browser uses a Clerk session plus separate signed kanban.cards root and tenant cookies after server-side Clerk verification and a one-time exact-host handoff. The stable Clerk user ID is the owner identity and the Clerk session ID is the app session-family identifier; email is never an admission or binding key. The CLI stores the compatibility key in `~/.kanban-cards/config.json` with mode `0600` and sends it as a bearer token. A deployment using a rotated compatibility key requires CLI setup again but does not define browser identity. Older immutable deployment URLs retain their original environment snapshot; protect or retire them separately.
 
 ## Runtime contract
 
 Production requires:
 
 - `KANBAN_CARDS_ROOT_HOST=kanban.cards`
-- `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_REDIRECT_URI`, `SESSION_SECRET`, and `PLATFORM_SURFACE_ID=kanban.cards`
+- `KANBAN_CARDS_AUTH_HOST=auth.kanban.cards`, the exact stable Clerk primary. The server derives `https://auth.kanban.cards/sign-in` and `/sign-up`; there are no independently configured primary-flow URLs.
+- Vercel Marketplace's `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, plus `CLERK_SECRET_KEY`, `CLERK_ENCRYPTION_KEY`, and `SESSION_SECRET`. `CLERK_PUBLISHABLE_KEY` remains accepted as a compatibility alias, but both names must match if both are set. Vercel production rejects Clerk development-instance keys: the Marketplace values must start with `pk_live_` and `sk_live_`. The last two app-owned values must each be at least 32 bytes; the encryption key is required because Clerk middleware selects the exact root configuration at request time.
+- `KANBAN_CARDS_ALLOWED_CLERK_USER_IDS`, a comma-separated list of exact admitted Clerk user IDs. It is required in production; the configured legacy user ID must be included.
 - one of `KANBAN_CARDS_DATABASE_URL`, `POSTGRES_URL`, or `DATABASE_URL`
+
+The Clerk instance must be a production instance configured for email verification codes, unified sign-up/sign-in, and a required profile name. Configure `auth.kanban.cards` as the one primary and configure both `kanban.cards` and the exact candidate root as verified satellites. The same artifact serves all three: the auth host redirects `/` and `/index.html` to `/sign-in`, exposes the Clerk UI only at `/sign-in` and `/sign-up`, and otherwise exposes only the public session configuration needed by ClerkJS, static shell assets, and `/__clerk`; it rejects Workspace, Project, handoff, and app-session exchange APIs. Give the auth host and each application root its exact same-origin `/__clerk` proxy URL. Allow only the canonical and exact candidate application origins as primary redirect origins. Each satellite must use Clerk-generated sign-in and sign-up links; those links complete authentication on the dedicated primary and include the session-sync trigger for the initiating application return. Restrict Clerk's subdomain allowlist to the exercised auth and application roots. Do not list tenant hosts as Clerk applications: tenants accept only kanban.cards app-session cookies. The Clerk proxy does not work for development instances, and Clerk's production multi-domain feature requires a paid plan. The Clerk-compatible CSP intentionally permits Clerk's runtime inline styles, bot-protection frames/scripts, protected-service connections, image host, and blob workers; do not remove those directives without replacing them with a tested nonce-based policy.
 
 Optional:
 
 - `KANBAN_CARDS_API_TOKEN` and `KANBAN_CARDS_API_WORKSPACE_ID=default` while the skill compatibility bridge remains enabled
-- `KANBAN_CARDS_LEGACY_OWNER_SUBJECT`, `KANBAN_CARDS_LEGACY_WORKSPACE_SLUG`, and `KANBAN_CARDS_LEGACY_WORKSPACE_NAME` during legacy cutover; set all three together
+- `KANBAN_CARDS_LEGACY_CLERK_USER_ID`, `KANBAN_CARDS_LEGACY_WORKSPACE_SLUG`, and `KANBAN_CARDS_LEGACY_WORKSPACE_NAME` during legacy cutover; set all three together
 - `KANBAN_CARDS_OWNER_LABEL`
 - `KANBAN_CARDS_SESSION_TTL_SECONDS`
-- `OIDC_CLIENT_SECRET`, `OIDC_POST_LOGOUT_REDIRECT_URI`, `OIDC_SCOPE`, `ROOT_SESSION_TTL_SECONDS`, and `TENANT_SESSION_TTL_SECONDS`
-- the bounded pre-promotion family: `KANBAN_CARDS_CANDIDATE_ROOT_HOST`, `KANBAN_CARDS_CANDIDATE_TENANT_HOSTS`, and `OIDC_CANDIDATE_REDIRECT_URI`; set all three together. `OIDC_CANDIDATE_POST_LOGOUT_REDIRECT_URI` is optional. `KANBAN_CARDS_CANDIDATE_TENANT_HOSTS` is a JSON object containing exactly the configured legacy Workspace slug and its one exact candidate tenant host. Extra mappings are rejected because the cutover proves exactly one tenant route.
+- the bounded pre-promotion family: `KANBAN_CARDS_CANDIDATE_ROOT_HOST` and `KANBAN_CARDS_CANDIDATE_TENANT_HOSTS`; set both together. `KANBAN_CARDS_CANDIDATE_TENANT_HOSTS` is a JSON object containing exactly the configured legacy Workspace slug and its one exact candidate tenant host. Extra mappings are rejected because the cutover proves exactly one tenant route. The server derives Clerk's exact authorized parties from the dedicated auth host plus the configured canonical and candidate application roots; there is no callback URI and Clerk does not authenticate tenant requests.
 
 Local operator controls:
 
@@ -48,9 +51,9 @@ Local operator controls:
 
 `KANBAN_CARDS_POSTGRES_SSL=disable` is available for a trusted local database. Do not use it in production.
 
-Use `localhost` for local tenant-aware proof: set `HOST=localhost`, use an OIDC redirect such as `http://localhost:4317/auth/callback`, and open `http://localhost:4317`. When `KANBAN_CARDS_ROOT_HOST` is absent, the server derives the root host from the validated OIDC redirect; Workspace hosts use the same port at `<slug>.localhost`. Keep `127.0.0.1` for the OIDC-free owner-key fallback only. Numeric-IP subdomains are not a supported tenant topology.
+Use the Clerk-free owner-key fallback for ordinary local development. The same-origin Frontend API proxy is a production-instance feature and cannot prove a Clerk development instance locally. Real Clerk email-code proof therefore runs on the approved deployed candidate after its exact root proxy has been configured in the Clerk Dashboard. `localhost` remains available for deterministic Clerk gateway/browser tests; numeric-IP subdomains are not a supported tenant topology.
 
-The public shell and provider entry load without prior authentication. Project data returns `503` when required configuration is missing and `401` when the host/session or compatibility credential is invalid. Follow [`workspace-access-migration.md`](workspace-access-migration.md) before any tenant-aware promotion; it is the governing data, cutover, and rollback checklist.
+The public application shell and dedicated auth-host sign-up/sign-in entries load without prior authentication. The signed-out session contract contains only public configuration: the exact current origin, publishable key, exact same-origin `/__clerk` proxy URL, primary/satellite role, server-derived primary flow URLs, and finite primary redirect origins. Clerk and app secrets remain server-only. The auth primary denies application data and session-exchange routes; application Project data returns `503` when required configuration is missing and `401` when the host/session or compatibility credential is invalid. Follow [`workspace-access-migration.md`](workspace-access-migration.md) before any tenant-aware promotion; it is the governing data, cutover, and rollback checklist.
 
 ## Validate the candidate commit
 
@@ -67,7 +70,7 @@ git rev-parse HEAD
 
 `git status --short` must be empty. Record the full commit SHA. Do not deploy an uncommitted working tree or a different commit from the one that passed validation. `npm run check` includes `npm run check:release-policy`; that policy fails unless automatic deployments from `main` remain disabled in `vercel.json`.
 
-Passing automation confirms the implementation contract. It does not prove the deployed database, browser rendering, or provider environment.
+Passing automation confirms the implementation contract. It does not prove the deployed database, browser rendering, Clerk environment, real email-code flow, or exact admission list.
 
 The CLI test exercises setup, repository binding, create deduplication, comments, movement, stale-version protection, Activity, and credential permissions inside isolated temporary state. Do not overwrite the operator's real local workspace or user-scoped CLI connection merely to repeat that automated loop by hand.
 
@@ -91,12 +94,30 @@ Two independent controls keep a merge from moving production traffic:
 
 The first control is repository-enforced and covered by `npm run check:release-policy`. `npm run release:preflight` reads the linked Vercel Project and fails unless the exact Project/team/repository, `main` production branch, disabled domain auto-assignment, local `main` deployment block, and generated-deployment protection all agree. Run it before every candidate and immediately before promotion. If either control is absent, stop. Do not use `github.autoAlias: false`; that changes a merged build into a Preview-environment artifact and cannot prove the production environment that will serve after promotion.
 
-Configure provider auth, the canonical root host, and the database through the Vercel dashboard or interactive CLI. Do not use `--value` for secrets because it places them in command history. Add the compatibility token only when the recorded cutover plan still requires the skill bridge.
+Vercel Standard Protection (`all_except_custom_domains`) protects generated deployments but excludes production/custom domains. It therefore cannot satisfy the private pre-promotion proof for `auth.kanban.cards` and the two exact candidate aliases. Before assigning those aliases, an authorized Vercel administrator must explicitly approve any plan/add-on cost and the temporary production access impact, then change Project Settings → Deployment Protection to **All Deployments** with Vercel Authentication. This is a separate external billing/security mutation; neither `Land this` nor a deployment command authorizes it. All Deployments also protects the currently live canonical production routes, so schedule and communicate a bounded maintenance window. Re-run `vercel project protection` and `npm run release:preflight`; the pre-promotion gate requires the live policy value `all`.
+
+Keep All Deployments enabled through candidate proof and exact promotion. After promotion, first verify the canonical routes behind Vercel Authentication, remove both temporary candidate aliases, and only then have an authorized administrator restore **Standard Protection**. Re-run the preflight and verify `all_except_custom_domains` before public post-promotion proof. The post-promotion gate rejects All Deployments because a protected canonical route does not prove the intended public release.
+
+The Clerk Marketplace connection automatically syncs `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` and `CLERK_SECRET_KEY` to the connected Vercel environments. Verify those two names are present; do not manually add duplicate copies. The production values must belong to the Marketplace production instance (`pk_live_` and `sk_live_`), but do not print them to prove that condition—the deployed readiness check fails closed on development keys.
+
+Configure every app-owned value through the Vercel dashboard or interactive CLI. Do not use `--value` for secrets, identity lists, or JSON because it places values in command history. For this legacy cutover, the database, root/auth topology, exact admitted user, exact legacy binding, and finite candidate family must all be present before deployment. Add the compatibility token only when the recorded cutover plan still requires the skill bridge.
 
 ```bash
+vercel env list production
 vercel env add KANBAN_CARDS_DATABASE_URL production --sensitive
+vercel env add CLERK_ENCRYPTION_KEY production --sensitive
 vercel env add SESSION_SECRET production --sensitive
+vercel env add KANBAN_CARDS_ROOT_HOST production
+vercel env add KANBAN_CARDS_AUTH_HOST production
+vercel env add KANBAN_CARDS_ALLOWED_CLERK_USER_IDS production --sensitive
+vercel env add KANBAN_CARDS_LEGACY_CLERK_USER_ID production --sensitive
+vercel env add KANBAN_CARDS_LEGACY_WORKSPACE_SLUG production
+vercel env add KANBAN_CARDS_LEGACY_WORKSPACE_NAME production
+vercel env add KANBAN_CARDS_CANDIDATE_ROOT_HOST production
+vercel env add KANBAN_CARDS_CANDIDATE_TENANT_HOSTS production --sensitive
 ```
+
+Use `vercel env update` instead of `vercel env add` for a name that already exists. Re-run `vercel env list production` and verify the complete name/target inventory without revealing values. A partial topology is a deployment blocker.
 
 Bridge-only configuration:
 
@@ -120,7 +141,7 @@ vercel env list production
 
 ## Initialize storage
 
-For a legacy cutover, `kanban_v2_workspaces:default` must already exist and pass the V2 schema check. The provider callback uses a non-creating read before it binds the access registry. A missing table, missing row, unsupported schema, or storage error returns `503` before any owner or Workspace mapping is written. The candidate must never turn a wrong or empty database into a valid-looking legacy Workspace.
+For a legacy cutover, `kanban_v2_workspaces:default` must already exist and pass the V2 schema check. `KANBAN_CARDS_LEGACY_CLERK_USER_ID` must contain the exact stable Clerk user ID, that ID must appear in `KANBAN_CARDS_ALLOWED_CLERK_USER_IDS`, and the server-verified Clerk session exchange uses a non-creating read before it binds the access registry. A missing table, missing row, unsupported schema, storage error, unadmitted ID, or different Clerk ID returns a failure before any owner or Workspace mapping is written. The candidate must never turn a wrong or empty database into a valid-looking legacy Workspace.
 
 `npm run db:init` remains available only for an explicitly new V2 store when a database URL is already present in the current process. Do not run it as a repair during legacy migration; restore or select the intended existing database instead. Do not rely on `vercel env run` to inject a sensitive database value into the local shell. If an initializer is deliberately used for a new store, it must report:
 
@@ -128,7 +149,7 @@ For a legacy cutover, `kanban_v2_workspaces:default` must already exist and pass
 Initialized V2 postgres workspace at kanban_v2_workspaces:default
 ```
 
-Stop if it reports `file`. For legacy migration, record a backup or recovery point, the existing row count, and a canonical digest before the provider callback binds `default`. Repeat the count and digest after binding. The values must match.
+Stop if it reports `file`. For legacy migration, record a backup or recovery point, the existing row count, and a canonical digest before the verified Clerk session exchange binds `default`. Repeat the count and digest after binding. The values must match.
 
 For the first V2 release, preserve any environment configuration needed by the previous known-good deployment until V2 has passed production verification.
 
@@ -157,25 +178,27 @@ The deployment API response must report the recorded full commit SHA, `target: p
 
 ## Verify the candidate deployment
 
-Generated deployment URLs may be behind Vercel Deployment Protection even when the custom production domain is public. First read the fail-closed state through the exact immutable URL. On a first migration, `legacyBinding: pending` and HTTP `503` are expected until the verified provider callback creates the exact binding; they prove that promotion remains blocked, not that the candidate is ready:
+Generated deployment URLs may be behind Vercel Deployment Protection even when the custom production domain is public. First read the fail-closed state through the exact immutable URL. On a first migration, `legacyBinding: pending` and HTTP `503` are expected until the verified admitted Clerk session creates the exact binding; they prove that promotion remains blocked, not that the candidate is ready:
 
 ```bash
 vercel curl /api/health --deployment "$KANBAN_CARDS_DEPLOYMENT_URL"
 vercel curl /api/access/health --deployment "$KANBAN_CARDS_DEPLOYMENT_URL"
 ```
 
-Provider sign-in on a protected hostname pinned to the exact candidate is the action that creates and proves the binding. The generated immutable `*.vercel.app` hostname is useful for readiness calls but is not a valid provider or bearer proof: provider routes and the bounded bearer accept only an explicit root or tenant host. `/auth/login` on the generated hostname correctly returns `Workspace unavailable`.
+Clerk email-code sign-up/sign-in on the protected dedicated auth host, return session sync to the protected candidate satellite, and `POST /api/clerk-session` on that candidate root create and prove the binding. The generated immutable `*.vercel.app` hostname is useful for readiness calls but is not a valid Clerk or bearer proof: Clerk authentication and the bounded bearer accept only an explicit configured auth, application-root, or tenant host. A signed-out session request on an unknown generated hostname must fail closed with `Workspace unavailable`; there is no `/auth/login` route.
 
-Before continuing, establish an approved candidate root and tenant routing mechanism with all of these properties: both are exact `*.vercel.app` aliases distinct from `kanban.cards`; `vercel inspect` resolves both exact routes to the recorded candidate deployment ID; the live Project protection policy covers generated deployment URLs; an unauthenticated nonce-path probe on each route returns Vercel's SSO redirect bound back to that exact probe URL; the root callback is registered with the provider; and the same immutable artifact remains valid when later served on the canonical production hosts. Configure the finite candidate host family in the candidate environment; do not infer sibling `*.vercel.app` hosts or use a wildcard. OAuth state, root and tenant sessions, and handoffs are origin-bound, so candidate credentials cannot replay on canonical hosts or vice versa. Do not temporarily point `kanban.cards` at the candidate to manufacture proof. Until the exact routes and callback exist, this cutover is deliberately blocked.
+Before continuing, establish the exact dedicated auth, candidate-root, and candidate-tenant routes. All three must be HTTPS origins distinct from the generated immutable deployment URL, and the candidate application roots must remain distinct from `kanban.cards`. `auth.kanban.cards` is the Clerk production primary; both `kanban.cards` and the candidate root are its owned and verified satellites, with an exact `/__clerk` proxy configured for every auth or application root in the Clerk Dashboard. The primary allows only the canonical and exact candidate application redirect origins. `vercel inspect` must resolve the auth, candidate-root, and candidate-tenant routes to the recorded candidate deployment ID. Before any alias assignment, the approved protection transition above must already have placed the Project in All Deployments mode. An unauthenticated nonce-path probe on each exact route must return Vercel's SSO redirect bound back to that exact probe URL; Standard Protection is not acceptable evidence for these custom routes. After warming each protection boundary, the candidate must load Clerk through its same-origin proxy, its Clerk-generated sign-in/sign-up links must complete the real email-code flow on the dedicated primary, and Clerk must synchronize the verified session back to that same candidate root. Verify the auth host exposes only Clerk UI/proxy surfaces and rejects Workspace, Project, handoff, and app-session exchange APIs. The server must verify Clerk requests only for the exact dedicated auth and application-root authorized parties, and the same immutable artifact must remain valid when later served on the canonical production hosts. Configure the finite candidate host family explicitly; do not infer sibling hosts or use a wildcard. Root and tenant app sessions and handoffs are origin-bound, so candidate credentials cannot replay on canonical hosts or vice versa. Do not temporarily point `kanban.cards` at the candidate to manufacture proof. Until the approved All Deployments window, three exact routes, Clerk production proxy entries, dedicated-primary/satellite association, redirect allowlist, and authorized-party checks exist, this cutover is deliberately blocked.
 
 ```bash
+KANBAN_CARDS_AUTH_URL='https://auth.kanban.cards'
 KANBAN_CARDS_CANDIDATE_ROOT_URL='https://paste-approved-candidate-root'
 KANBAN_CARDS_CANDIDATE_TENANT_URL='https://paste-approved-candidate-tenant'
+vercel inspect "$KANBAN_CARDS_AUTH_URL" --format=json
 vercel inspect "$KANBAN_CARDS_CANDIDATE_ROOT_URL" --format=json
 vercel inspect "$KANBAN_CARDS_CANDIDATE_TENANT_URL" --format=json
 ```
 
-Capture the canonical digest and resource fingerprint of `kanban_v2_workspaces:default` immediately before the first provider callback. Complete provider sign-in and callback on that exact route, verify the owner binding, root Workspace list, canonical handoff, and tenant Project read. Immediately re-read the state before any tenant or compatibility write; the digest and fingerprint must equal the pre-callback values. This pair proves that access binding did not change default Workspace data. Only after capturing equality, perform and record a bounded tenant-session write.
+Capture the canonical digest and resource fingerprint of `kanban_v2_workspaces:default` immediately before the first verified Clerk session exchange. On the candidate satellite, use the rendered Clerk-generated link, complete the real email-code flow at `https://auth.kanban.cards/sign-in` or `/sign-up`, and prove that Clerk synchronizes the signed-in session back to the exact initiating candidate before `POST /api/clerk-session`. Verify the exact admitted Clerk user ID, Clerk session ID, owner binding, root Workspace list, canonical handoff, tenant Project read, and Clerk sign-out. Immediately re-read the state before any tenant or compatibility write; the digest and fingerprint must equal the pre-exchange values. This pair proves that access binding did not change default Workspace data. Only after capturing equality, perform and record a bounded tenant-session write.
 
 Now repeat both readiness calls against the immutable deployment URL. Both responses must report `ok: true`; `/api/health` must report `store: postgres` with no missing configuration, and `/api/access/health` must report `registryState: ready`, `legacyState: ready`, and `legacyBinding.status: ready` with `present: true`. `not-required` is not acceptable for this migration. Record whether `legacyBridge` is `enabled` or `disabled`.
 
@@ -190,7 +213,7 @@ printf 'header = "Authorization: Bearer %s"\nheader = "X-Kanban-Actor: release-c
   vercel curl /api/projects --deployment "$KANBAN_CARDS_CANDIDATE_ROOT_URL" -- --config -
 ```
 
-The authenticated bridge read must return the legacy Workspace Project list. It proves only that the bounded compatibility credential reaches the mapped `default` row; it does not prove provider identity or create missing legacy storage.
+The authenticated bridge read must return the legacy Workspace Project list. It proves only that the bounded compatibility credential reaches the mapped `default` row; it does not prove Clerk identity or create missing legacy storage.
 
 Use one persistent `Release verification` Project for deployment checks. Copy its ID from the Project list. If it does not exist, run this request once, then copy the returned ID:
 
@@ -276,7 +299,7 @@ unset KANBAN_CARDS_API_TOKEN
 
 The first Card request must return `201` with version `1`. The second uses a different idempotency key and the same external key; it must return `200`, `deduplicated: true`, and the same Card ID. Comment must return version `2`, Move version `3`, and archive version `4`. Re-read the Project with archived Cards included and confirm the same Card, Comment, move Activity, and archive Activity. This is the bounded compatibility-bridge proof that the candidate can read and complete create, comment, move, and archive against the mapped Postgres row before promotion.
 
-Open both approved exact-deployment candidate hostnames in the same browser and complete Vercel Authentication on each before beginning provider sign-in. Protection cookies are host-specific; warming the tenant route first prevents its protection redirect from consuming the later cross-host form POST and losing the one-time handoff body. Return to the candidate root, complete provider sign-in and callback, verify the root route lists only the owner's routed Workspaces, open the exact candidate tenant through the one-time handoff, and confirm the archived verification Card remains present in the Project and Activity evidence. Repeat at a narrow viewport. If either hostname cannot cross the Vercel protection boundary or is not pinned to the exact deployment ID, stop. API checks do not replace rendered candidate verification.
+Open the approved exact auth, candidate-root, and candidate-tenant hostnames in the same browser and complete Vercel Authentication on all three before beginning Clerk sign-up/sign-in. Protection cookies are host-specific; warm the auth host before the candidate redirects there, and warm the tenant route before the later cross-host form POST so its protection redirect cannot consume the one-time handoff body. Return to the candidate root, follow the Clerk-generated link to the dedicated primary, complete the real Clerk email-code flow, confirm the verified Clerk session synchronizes back to the candidate, and only then perform the server-side session exchange. Verify the root route lists only the admitted Clerk user's routed Workspaces, open the exact candidate tenant through the one-time handoff, and confirm the archived verification Card remains present in the Project and Activity evidence. On the auth host, verify `/sign-in`, `/sign-up`, static assets, the public Clerk session contract, and `/__clerk` are the only available surfaces; application and handoff APIs must fail closed. Sign out and verify both the app session family and Clerk browser session are gone. Repeat at a narrow viewport. If any hostname cannot cross its expected Vercel protection boundary or is not pinned to the exact deployment ID, stop. API checks do not replace rendered candidate verification.
 
 After the candidate smoke mutations, capture a new canonical digest and resource fingerprint in `prePromotion.dataIntegrityProof.finalCandidateDigest` and `finalCandidateResourceFingerprint`. This is the pre-promotion baseline for the post-promotion receipt; do not compare it with the pre-binding digest because the bounded verification Card intentionally changed the Workspace.
 
@@ -300,6 +323,8 @@ Confirm that this exact immutable URL is the intended known-good rollback target
 
 Copy [`workspace-cutover-evidence.example.json`](workspace-cutover-evidence.example.json) to an operator-controlled location outside the repository and replace every placeholder with evidence from the exact candidate, current production deployment, and real Postgres store. The record contains no credential values. Pre- and post-promotion receipts have distinct run IDs, timestamps no more than 30 minutes old, exercised origins, exact deployment ID/URL/SHA bindings, and concrete compatibility Card IDs/versions. A proof field may be `passed` only when that action was completed against that phase's exact origin; `not-run`, `failed`, missing, stale, and invented values block promotion.
 
+`authOrigin` must be exactly `https://auth.kanban.cards`. The live evaluator inspects that route together with the phase application root and tenant route. Before promotion, all three must be pinned to and protected on the exact candidate deployment and the Project policy must be All Deployments (`all`). After promotion, both candidate aliases must be removed and Standard Protection (`all_except_custom_domains`) restored before the public receipt; the stable auth route must still be pinned to the exact promoted artifact, while each canonical route explicitly records `not-required` for candidate-route protection. `sameArtifactAuthHost` may be `passed` only when that exact deployment identity agrees. `clerkAuthorizedParties` may be `passed` only after the server accepts the dedicated auth origin and exact exercised application-root origins, rejects an unknown root origin, and bypasses Clerk middleware entirely on tenant and unknown hosts. Tenant access is proven separately through the app handoff/session checks. `clerkDomainConfiguration` may be `passed` only after the dedicated primary, canonical and exact candidate satellites, all same-origin proxy entries, server-derived primary `/sign-in` and `/sign-up` routes, and exact canonical/candidate redirect origins are confirmed in the real Clerk production instance. `clerkProof` records distinct real-browser results for `authHostSurface`, `authHostIsolation`, `emailCodeAuth`, `primarySatelliteSync`, `sessionExchange`, `exactLegacyBinding`, `canonicalHandoff`, `tenantProjectAccess`, `tenantProjectWrite`, and `signOut`. `authHostSurface` requires the real Clerk sign-in/sign-up components on the dedicated primary; `authHostIsolation` requires Workspace, Project, handoff, and app-session exchange APIs to fail closed there. `primarySatelliteSync` requires the Clerk-generated candidate link, dedicated-primary email-code completion, and exact candidate return with a verified Clerk session. Do not record a user ID, email, code, cookie, token, or Clerk key in the evidence file.
+
 The data proof uses separate phase-bound pairs:
 
 - Pre-promotion compares the canonical digest and resource fingerprint immediately before and after the access binding, before compatibility writes.
@@ -314,11 +339,11 @@ KANBAN_CARDS_EVIDENCE_PATH='paste-operator-controlled-evidence-path'
 npm run release:gate -- --snapshot "$KANBAN_CARDS_EVIDENCE_PATH" --live
 ```
 
-Every blocker is named by gate and code. A pending binding, provider failure, compatibility-loop failure, exact-artifact mismatch, changed default Workspace, unverified rollback target, enabled automatic domain assignment, or automatic `main` deployment leaves current production unchanged and returns a failing exit status.
+Every blocker is named by gate and code. A pending binding, Clerk authentication, admission, session-exchange, or sign-out failure, compatibility-loop failure, exact-artifact mismatch, changed default Workspace, unverified rollback target, enabled automatic domain assignment, or automatic `main` deployment leaves current production unchanged and returns a failing exit status.
 
 ## Promote the verified artifact
 
-Promotion is a distinct explicit action. One controller re-reads the live Project policy, exact candidate metadata, public production/rollback identity, candidate route pin, and both runtime readiness endpoints; validates the phase-bound receipt and literal confirmation; and passes the evaluated deployment ID directly to `vercel promote`. It accepts no independent promotion target:
+Promotion is a distinct explicit action. One controller re-reads the live Project policy, exact candidate metadata, public production/rollback identity, dedicated-auth/candidate-root/candidate-tenant route pins, and both runtime readiness endpoints; validates the phase-bound receipt and literal confirmation; and passes the evaluated deployment ID directly to `vercel promote`. It accepts no independent promotion target:
 
 ```bash
 vercel whoami
@@ -331,9 +356,25 @@ npm run release:gate -- --snapshot "$KANBAN_CARDS_EVIDENCE_PATH" \
 vercel inspect https://kanban.cards
 ```
 
-Confirm the identity, linked Project, remote auto-assignment setting, and protection boundary again immediately before promotion. A different ID, URL, SHA, Project, branch, or alias state invalidates the evidence. Never substitute a branch alias or rebuild. While the compatibility bridge is enabled, configure the helper for the public production origin without placing the key on the command line. If the bridge is disabled, skip helper setup and run the retirement proof below.
+Confirm the identity, linked Project, remote auto-assignment setting, and All Deployments protection boundary again immediately before promotion. A different ID, URL, SHA, Project, branch, alias state, or protection mode invalidates the evidence. Never substitute a branch alias or rebuild.
 
-First open `https://kanban.cards` in a signed-out or private browser window. The provider sign-in surface must load without a Vercel login. Complete provider sign-in, confirm the root route exposes only the expected Workspaces, then open the canonical tenant and verify the Project list.
+Immediately after promotion, keep All Deployments enabled and inspect `https://auth.kanban.cards`, `https://kanban.cards`, and the canonical tenant route behind Vercel Authentication. All three must resolve to the promoted deployment. Perform a bounded authenticated readiness and Clerk primary-to-canonical sync smoke before changing the protection boundary. Then remove the two temporary candidate aliases while they are still protected; do not remove `auth.kanban.cards`, `kanban.cards`, or the canonical tenant domain:
+
+```bash
+vercel alias rm "$(node -p 'new URL(process.env.KANBAN_CARDS_CANDIDATE_ROOT_URL).hostname')"
+vercel alias rm "$(node -p 'new URL(process.env.KANBAN_CARDS_CANDIDATE_TENANT_URL).hostname')"
+```
+
+Re-list aliases and stop unless both candidate aliases are absent. An authorized administrator must then restore Project Settings → Deployment Protection to **Standard Protection**. This second security mutation is part of the same approved maintenance window; do not leave production indefinitely behind All Deployments and do not make the candidate aliases public. Re-run:
+
+```bash
+vercel project protection
+npm run release:preflight
+```
+
+Continue only when the live policy reports `all_except_custom_domains`, generated deployments remain protected, and the canonical auth/root/tenant routes load without a Vercel login. If the transition fails, production remains protected and release completion is blocked; rollback is still a separate authorization.
+
+Now inspect `https://auth.kanban.cards`, `https://kanban.cards`, and the canonical tenant route for the public post-promotion receipt. The auth and canonical application origins must still resolve to the exact promoted deployment; the post receipt records that candidate-route protection is no longer required and the temporary aliases are already absent. In a signed-out or private browser window, open `https://kanban.cards`, use its Clerk-generated sign-in/sign-up link, and verify the dedicated primary surface loads at `https://auth.kanban.cards/sign-in` or `/sign-up` through its same-origin `/__clerk` proxy without a Vercel login. Complete the real email-code flow, prove the verified Clerk session synchronizes back to `https://kanban.cards`, and then perform the server-side session exchange. Confirm the root route exposes only the expected Workspaces for the exact admitted Clerk user ID, then open the canonical tenant and verify the Project list. Recheck that application and handoff APIs remain unavailable on the auth host. Sign out and confirm the app session family and Clerk browser session are both cleared before signing in again for the remaining proof. While the compatibility bridge is enabled, configure the helper for the public production origin without placing the key on the command line. If the bridge is disabled, skip helper setup and run the retirement proof below.
 
 The helper has exactly one user-scoped connection and no named profiles or supported alternate config path. This verification requires `setup` so the following commands are pinned to the public production origin. Continue only when replacing that one connection with the production origin, actor, and owner credential is the intended outcome. If an existing connection must be retained, stop and run this verification from a designated production-operator account or machine instead. Do not copy the credential-bearing config into the repository or an ad hoc backup.
 
@@ -414,7 +455,7 @@ vercel logs --environment production --level error --since 15m --no-branch
 
 Record the commit SHA, candidate URL, production verification result, and the rollback URL captured before promotion.
 
-Update the evidence snapshot with the exact deployment now serving `kanban.cards` and the repeated readiness, provider, compatibility, and unchanged-data proofs. Then run:
+Update the evidence snapshot with the exact deployment now serving `kanban.cards` and the repeated readiness, Clerk, compatibility, and unchanged-data proofs. Then run:
 
 ```bash
 npm run release:gate -- --snapshot "$KANBAN_CARDS_EVIDENCE_PATH" --phase post-promotion --live
@@ -422,29 +463,22 @@ npm run release:gate -- --snapshot "$KANBAN_CARDS_EVIDENCE_PATH" --phase post-pr
 
 Do not describe the release as complete until this post-promotion gate passes. If it fails, report the exact blocker and keep the recorded rollback target available. Do not roll back automatically; rollback remains a separately authorized production mutation.
 
-After the post-promotion gate passes, remove the two candidate aliases from the deployment and verify that neither route resolves. This closes the temporary host family without rebuilding or changing the promoted artifact. Do not remove `kanban.cards` or the canonical tenant domain:
-
-```bash
-vercel alias rm "$(node -p 'new URL(process.env.KANBAN_CARDS_CANDIDATE_ROOT_URL).hostname')"
-vercel alias rm "$(node -p 'new URL(process.env.KANBAN_CARDS_CANDIDATE_TENANT_URL).hostname')"
-```
-
-Re-list aliases and record their absence in the cutover evidence. The candidate host-family environment values remain inert in the immutable artifact once no route points to them; remove those values from the Project environment before the next deployment.
+After the post-promotion gate passes, re-confirm that the two candidate aliases remain absent and that `auth.kanban.cards` still serves the exact promoted artifact. The candidate host-family environment values remain inert in the immutable artifact once no route points to them; remove those values from the Project environment before the next deployment.
 
 ## Retire the compatibility API key
 
-Retirement is complete only when provider access works without the bridge and no reachable deployment still accepts the retired key.
+Retirement is complete only when Clerk access works without the bridge and no reachable deployment still accepts the retired key.
 
-1. On the candidate, complete provider sign-in, open the legacy tenant, and verify a Project read and write through the tenant session.
+1. On the candidate, complete Clerk email-code sign-up/sign-in and server-side session exchange, open the legacy tenant, and verify a Project read and write through the tenant session.
 2. Confirm `/api/access/health` reports `legacyState: ready`, `legacyBinding.status: ready`, and `legacyBridge: enabled` before removal.
 3. Remove `KANBAN_CARDS_API_TOKEN` from the candidate environment without changing the stored `default` mapping. Keep `KANBAN_CARDS_API_WORKSPACE_ID=default` only if the deployment process requires the explicit compatibility boundary; it grants no authority without the token.
 4. Build and verify a new exact candidate. `/api/health` and `/api/access/health` must stay healthy, and `/api/access/health` must now report `legacyBridge: disabled`.
-5. Repeat provider root, tenant handoff, Project read/write, sign-out, and recovery checks. The browser path must not depend on the retired token.
+5. Repeat Clerk root, tenant handoff, Project read/write, app-family plus Clerk sign-out, and recovery checks. The browser path must not depend on the retired token.
 6. Provide the retired key through hidden input and call `https://kanban.cards/api/projects`. The response must be `401`. Repeat against the legacy tenant origin and one sibling tenant; neither may accept it.
 7. Promote only that verified artifact. Inventory and retire every older deployment that still contains the key, using the target-specific closure procedure in the rotation section below.
 8. Remove or replace user-scoped skill connections that contain the retired key. The next roadmap slice supplies the verified agent-principal path; do not relabel the retired bearer as an agent identity.
 
-Record the candidate SHA, health responses, provider browser proof, three `401` results, promoted deployment, and old-deployment closure. A disabled bridge with broken provider access is an outage, not successful retirement.
+Record the candidate SHA, health responses, Clerk browser proof, three `401` results, promoted deployment, and old-deployment closure. A disabled bridge with broken Clerk access is an outage, not successful retirement.
 
 ## Rotate the compatibility API key
 
@@ -524,17 +558,17 @@ Do not log either key during comparison. Never use an old-key deployment as a ro
 
 ## Failure interpretation
 
-- `401`: authentication failed. Check the provider session, canonical host, user-scoped CLI configuration, recent bridge rotation or retirement, and the active deployment's environment snapshot.
+- `401`: authentication failed. Check the Clerk session, exact admitted Clerk user ID, authorized party, canonical host, user-scoped CLI configuration, recent bridge rotation or retirement, and the active deployment's environment snapshot.
 - `409` with a stale-version message: read the current Project or Card, reconcile, and retry with the returned revision or version.
 - `409` for an idempotency-key mismatch: reuse the original request body or choose a new stable key for the changed request.
 - `409` for an archived Project: stop writing to it or restore it deliberately through the resource API.
 - `409` while changing Columns: move or archive every Card that would be stranded before removing its Column.
 - `400` naming `If-Match`: replace the legacy helper or caller; writes require `X-Kanban-Version` so a hosted response cannot be rewritten after the mutation commits.
 - `428`: the caller omitted the required `X-Kanban-Version` revision or version on an edit.
-- `503`: inspect both readiness endpoints. Required provider/database configuration may be missing, the access registry may be unavailable, the required `default` state may be missing or invalid, the legacy binding may be pending or mismatched, or global sign-out revocation may be incomplete.
+- `503`: inspect both readiness endpoints. Required Clerk/database configuration may be missing, the access registry may be unavailable, the required `default` state may be missing or invalid, the legacy binding may be pending or mismatched, or global sign-out revocation may be incomplete.
 - `/api/health` or `/api/access/health` fails: stop promotion. Do not initialize or replace legacy storage as a shortcut.
 - `main-git-deployments-enabled` or `auto-domain-assignment-enabled`: stop. Restore both release controls before creating another candidate; a merge is never promotion authorization.
-- `Workspace unavailable` on an immutable generated deployment hostname: that hostname cannot prove canonical provider or compatibility access. Configure and verify an approved protected candidate root and tenant route pinned to the exact deployment; do not weaken host validation.
+- `Workspace unavailable` on an immutable generated deployment hostname: that hostname cannot prove canonical Clerk or compatibility access. Configure and verify approved protected auth, candidate-root, and candidate-tenant routes pinned to the exact deployment; do not weaken host or Clerk authorized-party validation.
 - Any `npm run release:gate` blocker: leave the current production deployment serving. Correct and re-run the failed proof against the same candidate, or build and record a new candidate if its artifact or environment changed.
 - `Global sign-out could not be completed`: the current host instructed the browser to clear its cookie, but sibling sessions may remain active. Retry sign-out after the registry recovers and verify the full session family is revoked.
 - Duplicate Card creation: the caller omitted a stable external key and did not reuse the same idempotency key, or server deduplication regressed.
@@ -564,9 +598,10 @@ vercel rollback status
 After rollback:
 
 1. Inspect the active production deployment and confirm it is the intended target.
-2. Repeat that version's health, authentication, browser, and storage checks.
-3. Inspect production errors.
-4. Keep the V2 database intact. V2 work remains available when a compatible V2 deployment returns.
+2. Resolve the dedicated auth alias as part of the same rollback operation. If the rollback target implements this Clerk topology, pin `auth.kanban.cards` to that exact rollback deployment and verify it serves the same artifact as the canonical root. If the first migration rolls back to the owner-key version, remove the auth alias and verify it no longer resolves; never leave it serving the rejected candidate beside a different canonical artifact.
+3. Repeat that version's health, authentication, browser, and storage checks.
+4. Inspect production errors.
+5. Keep the V2 database intact. V2 work remains available when a compatible V2 deployment returns.
 
 If no committed, previously verified deployment exists, there is no reliable rollback target. Do not treat an uncommitted working tree as one.
 
