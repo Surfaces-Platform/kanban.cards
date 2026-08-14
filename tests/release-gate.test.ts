@@ -136,6 +136,38 @@ test("pre-promotion admitted and external probes cover all three exact release h
   assert.ok(evaluateCutoverSnapshot(canonicalExclusionFailure, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-canonical-root-exclusion"));
 });
 
+test("the canonical tenant is unrouted before promotion and public only after promotion", () => {
+  const prePublic = readySnapshot();
+  prePublic.evidence.prePromotion.firewallProof.externalDenyProbe!.canonicalTenant.status = 200;
+  prePublic.evidence.prePromotion.firewallProof.externalDenyProbe!.canonicalTenant.vercelError = "";
+  assert.ok(evaluateCutoverSnapshot(prePublic, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-canonical-tenant-exclusion"));
+
+  const arbitrary404 = readySnapshot();
+  arbitrary404.evidence.prePromotion.firewallProof.externalDenyProbe!.canonicalTenant.vercelError = "NOT_FOUND";
+  assert.ok(evaluateCutoverSnapshot(arbitrary404, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-canonical-tenant-exclusion"));
+
+  const preFailClosed = readySnapshot();
+  assert.equal(evaluateCutoverSnapshot(preFailClosed, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-canonical-tenant-exclusion"), false);
+
+  const postNotFound = readyPostSnapshot();
+  postNotFound.evidence.postPromotion.firewallProof.externalPublicProbe!.canonicalTenant.status = 404;
+  postNotFound.evidence.postPromotion.firewallProof.externalPublicProbe!.canonicalTenant.vercelError = "DEPLOYMENT_NOT_FOUND";
+  assert.ok(evaluateCutoverSnapshot(postNotFound, "post-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-post-external-canonicalTenant"));
+});
+
+test("complete pre-promotion alias inventory must exclude the canonical tenant", () => {
+  const incomplete = readySnapshot();
+  incomplete.policy.aliasInventoryComplete = false;
+  assert.ok(evaluateCutoverSnapshot(incomplete, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "alias-inventory-incomplete"));
+
+  for (const alias of ["mike.kanban.cards", "https://mike.kanban.cards"]) {
+    const prematurelyRouted = readySnapshot();
+    prematurelyRouted.policy.aliases.push(alias);
+    assert.equal(prematurelyRouted.evidence.prePromotion.firewallProof.externalDenyProbe!.canonicalTenant.vercelError, "DEPLOYMENT_NOT_FOUND");
+    assert.ok(evaluateCutoverSnapshot(prematurelyRouted, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "canonical-tenant-alias-premature"));
+  }
+});
+
 test("Standard Protection remains enabled before and after promotion", () => {
   const pre = readySnapshot();
   pre.policy.deploymentProtection = "all";
@@ -438,7 +470,7 @@ function readySnapshot() {
         candidateRoot: { status: 403, mitigated: "deny", wafAction: "deny", wafRuleId: firewallFacts.denyRuleId, vercelId: "iad1::deny-root", observedAt: "2026-08-13T05:50:00.000Z" },
         candidateTenant: { status: 403, mitigated: "deny", wafAction: "deny", wafRuleId: firewallFacts.denyRuleId, vercelId: "iad1::deny-tenant", observedAt: "2026-08-13T05:50:00.000Z" },
         canonicalRoot: { status: 200, ok: true, store: "postgres", mitigated: "none", vercelId: "iad1::public-root", observedAt: "2026-08-13T05:50:00.000Z" },
-        canonicalTenant: { status: 302, mitigated: "none", vercelId: "iad1::public-tenant", observedAt: "2026-08-13T05:50:00.000Z" }
+        canonicalTenant: { status: 404, mitigated: "none", vercelError: "DEPLOYMENT_NOT_FOUND", vercelId: "iad1::unrouted-tenant", observedAt: "2026-08-13T05:50:00.000Z" }
       }
     } : {
       removedRuleIds: [firewallFacts.bypassRuleId, firewallFacts.denyRuleId],
@@ -454,7 +486,7 @@ function readySnapshot() {
         configHash: postFirewallFacts.configHash,
         authHost: { status: 200, mitigated: "none", vercelId: "iad1::post-auth", observedAt: "2026-08-13T05:55:00.000Z" },
         canonicalRoot: { status: 200, ok: true, store: "postgres", mitigated: "none", vercelId: "iad1::post-root", observedAt: "2026-08-13T05:55:00.000Z" },
-        canonicalTenant: { status: 302, mitigated: "none", vercelId: "iad1::post-tenant", observedAt: "2026-08-13T05:55:00.000Z" }
+        canonicalTenant: { status: 302, mitigated: "none", vercelError: "", vercelId: "iad1::post-tenant", observedAt: "2026-08-13T05:55:00.000Z" }
       }
     },
     sameArtifactAuthHost: "passed",
@@ -475,7 +507,7 @@ function readySnapshot() {
     }
   });
   return {
-    policy: { projectId: TARGET.projectId, teamId: TARGET.teamId, repository: TARGET.repository, productionBranch: "main", autoAssignCustomDomains: false, mainGitDeploymentsEnabled: false, deploymentProtection: "all_except_custom_domains", firewall, aliases: ["auth.kanban.cards", "kanban.cards", "mike.kanban.cards"], aliasInventoryComplete: true },
+    policy: { projectId: TARGET.projectId, teamId: TARGET.teamId, repository: TARGET.repository, productionBranch: "main", autoAssignCustomDomains: false, mainGitDeploymentsEnabled: false, deploymentProtection: "all_except_custom_domains", firewall, aliases: ["auth.kanban.cards", "candidate.release.kanban.cards", "mike.candidate.release.kanban.cards", "kanban.cards"], aliasInventoryComplete: true },
     candidate: { id: "dpl_candidate", url: "https://candidate-abc.vercel.app", projectId: TARGET.projectId, commitSha: candidateSha, commitRef: "main", target: "production", readyState: "READY", aliases: [] },
     currentProduction: { id: "dpl_known_good", url: "https://known-good-abc.vercel.app", projectId: TARGET.projectId, commitSha: productionSha, commitRef: "main", target: "production", readyState: "READY", aliases: ["kanban.cards"], health: { status: 200, ok: true, store: "postgres" } },
     evidence: {
@@ -498,6 +530,7 @@ function readySnapshot() {
 function readyPostSnapshot() {
   const snapshot = readySnapshot();
   snapshot.policy.firewall = { firewallEnabled: true, hasDraft: false, pendingChanges: 0, rules: [] };
+  snapshot.policy.aliases = ["auth.kanban.cards", "kanban.cards", "mike.kanban.cards"];
   snapshot.currentProduction = { ...snapshot.candidate, aliases: ["auth.kanban.cards", "kanban.cards", "mike.kanban.cards"], health: { status: 200, ok: true, store: "postgres" } };
   return snapshot;
 }
