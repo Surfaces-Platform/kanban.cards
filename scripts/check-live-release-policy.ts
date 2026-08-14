@@ -28,10 +28,13 @@ async function main(): Promise<void> {
   const firewallOverview = JSON.parse(firewallResult.stdout) as Record<string, unknown>;
   const activeFirewall = record(firewallOverview.active);
   const draftFirewall = record(firewallOverview.draft);
+  const attackMode = record(firewallOverview.attackMode);
   const draftChanges = Array.isArray(draftFirewall.changes) ? draftFirewall.changes : [];
   const firewall = {
     firewallEnabled: activeFirewall.firewallEnabled === true,
     rules: (Array.isArray(activeFirewall.rules) ? activeFirewall.rules : []).map((rule) => ({ ...record(rule), _status: "live" })),
+    ipBlocks: Array.isArray(activeFirewall.ips) ? activeFirewall.ips : undefined,
+    attackModeEnabled: typeof attackMode.enabled === "boolean" ? attackMode.enabled : undefined,
     hasDraft: draftChanges.length > 0,
     pendingChanges: draftChanges.length
   };

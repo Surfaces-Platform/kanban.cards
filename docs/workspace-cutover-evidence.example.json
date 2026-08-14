@@ -11,6 +11,8 @@
       "firewallEnabled": true,
       "hasDraft": false,
       "pendingChanges": 0,
+      "ipBlocks": [],
+      "attackModeEnabled": false,
       "rules": [
         {
           "id": "rule_replacebypass",
@@ -92,11 +94,13 @@
           "candidateTenant": { "status": 0, "mitigated": "not-run", "vercelId": "" }
         },
         "externalDenyProbe": {
+          "runId": "replace-with-unique-pre-promotion-run-id",
+          "correlationMethod": "deterministic-live-policy",
           "observedSourceCidr": "replace-with-external-exact-ip/32-or-128",
           "configHash": "replace-with-live-config-hash",
-          "authHost": { "status": 0, "mitigated": "not-run", "wafAction": "not-run", "wafRuleId": "", "vercelId": "", "observedAt": "1970-01-01T00:00:00.000Z" },
-          "candidateRoot": { "status": 0, "mitigated": "not-run", "wafAction": "not-run", "wafRuleId": "", "vercelId": "", "observedAt": "1970-01-01T00:00:00.000Z" },
-          "candidateTenant": { "status": 0, "mitigated": "not-run", "wafAction": "not-run", "wafRuleId": "", "vercelId": "", "observedAt": "1970-01-01T00:00:00.000Z" },
+          "authHost": { "status": 0, "mitigated": "not-run", "vercelId": "", "observedAt": "1970-01-01T00:00:00.000Z" },
+          "candidateRoot": { "status": 0, "mitigated": "not-run", "vercelId": "", "observedAt": "1970-01-01T00:00:00.000Z" },
+          "candidateTenant": { "status": 0, "mitigated": "not-run", "vercelId": "", "observedAt": "1970-01-01T00:00:00.000Z" },
           "canonicalRoot": { "status": 0, "ok": false, "store": "", "mitigated": "not-run", "vercelId": "", "observedAt": "1970-01-01T00:00:00.000Z" },
           "canonicalTenant": { "status": 0, "mitigated": "not-run", "vercelError": "replace-with-x-vercel-error", "vercelId": "", "observedAt": "1970-01-01T00:00:00.000Z" }
         }
