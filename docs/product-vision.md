@@ -6,7 +6,7 @@ kanban.cards is a durable, visible execution surface for a person and the agents
 
 Recommendations and plans are easy to generate and hard to carry through. A repository needs a small shared record of what was proposed, what is happening now, what changed, and what remains.
 
-The browser uses a Clerk-verified owner identity and an isolated Workspace session. A dedicated auth-only host owns the Clerk sign-up/sign-in experience; canonical and release-candidate application roots receive the verified session as Clerk satellites, while tenant hosts receive only kanban.cards Workspace sessions. During the migration slice, the skill remains a client authenticated by a compatibility credential that is bound server-side to the migrated Workspace and acts with the owner's authority. Both clients operate on the same Projects, Cards, Comments, and Activity through the same API.
+The browser uses a Clerk-verified owner identity and an isolated Workspace session. A dedicated auth-only host owns the Clerk sign-up/sign-in experience. Canonical and release-candidate application roots share the same `kanban.cards` root domain and recognize the verified Clerk browser session after an exact-origin return; they are not Clerk satellites. Tenant hosts receive only kanban.cards Workspace sessions. During the migration slice, the skill remains a client authenticated by a compatibility credential that is bound server-side to the migrated Workspace and acts with the owner's authority. Both clients operate on the same Projects, Cards, Comments, and Activity through the same API.
 
 ## Why Kanban
 

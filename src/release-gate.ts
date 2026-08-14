@@ -150,11 +150,11 @@ export function evaluateCutoverSnapshot(
   if (legacyBinding.present !== true) add(blockers, "candidate-readiness", "legacy-binding-absent", "The phase access receipt must report the exact legacy binding as present.");
 
   requirePassed(blockers, "clerk-access", evidence, "clerkAuthorizedParties", "clerk-authorized-parties", "Exact Clerk authorized parties");
-  requirePassed(blockers, "clerk-access", evidence, "clerkDomainConfiguration", "clerk-domain-configuration", "Exact dedicated Clerk primary and application-satellite domain configuration");
-  requirePassed(blockers, "clerk-access", clerk, "authHostSurface", "clerk-auth-host-surface", "Dedicated Clerk primary sign-up and sign-in surface");
-  requirePassed(blockers, "clerk-access", clerk, "authHostIsolation", "clerk-auth-host-isolation", "Dedicated Clerk primary isolation from Workspace application APIs");
+  requirePassed(blockers, "clerk-access", evidence, "clerkDomainConfiguration", "clerk-domain-configuration", "Single Clerk production FAPI DNS/custom-domain and phase-exact finite effective allowed-origin configuration");
+  requirePassed(blockers, "clerk-access", clerk, "authHostSurface", "clerk-auth-host-surface", "Dedicated Clerk auth-host sign-up and sign-in surface");
+  requirePassed(blockers, "clerk-access", clerk, "authHostIsolation", "clerk-auth-host-isolation", "Dedicated Clerk auth-host isolation from Workspace application APIs");
   requirePassed(blockers, "clerk-access", clerk, "emailCodeAuth", "clerk-email-code-auth", "Clerk email-code authentication");
-  requirePassed(blockers, "clerk-access", clerk, "primarySatelliteSync", "clerk-primary-satellite-sync", "Clerk satellite-to-primary authentication and session sync");
+  requirePassed(blockers, "clerk-access", clerk, "sameRootSessionShare", "clerk-same-root-session-share", "Clerk auth-host completion, exact initiating application-root return, and per-origin Clerk session recognition");
   requirePassed(blockers, "clerk-access", clerk, "sessionExchange", "clerk-session-exchange", "Server-side Clerk session exchange");
   requirePassed(blockers, "clerk-access", clerk, "exactLegacyBinding", "exact-legacy-binding", "Exact Clerk user-to-legacy Workspace binding");
   requirePassed(blockers, "clerk-access", clerk, "canonicalHandoff", "canonical-handoff", "Canonical tenant handoff");
@@ -271,20 +271,20 @@ function requireReceiptBinding(blockers: CutoverBlocker[], proof: UnknownRecord,
   const origin = canonicalOrigin(proof.origin);
   const tenantOrigin = canonicalOrigin(proof.tenantOrigin);
   const authOrigin = canonicalOrigin(proof.authOrigin);
+  const candidateOrigin = canonicalOrigin(`candidate.release.${publicDomain}`);
+  const candidateTenantOrigin = canonicalOrigin(`mike.candidate.release.${publicDomain}`);
   requireMatch(blockers, "evidence-binding", "proof-auth-origin", authOrigin, canonicalOrigin(authDomain), "proof auth origin");
   if (phase === "post-promotion") {
     requireMatch(blockers, "evidence-binding", "proof-origin", origin, expectedOrigin, "proof origin");
     if (!isDirectTenantOrigin(tenantOrigin, publicDomain) || tenantOrigin === authOrigin) {
       add(blockers, "evidence-binding", "proof-post-tenant-origin", "Post-promotion proof requires an exact one-label tenant origin beneath the canonical public root.");
     }
-  } else if (!origin || origin === url || origin === canonicalOrigin(publicDomain) || origin === authOrigin) {
-    add(blockers, "evidence-binding", "proof-origin", "Pre-promotion Clerk proof requires a distinct approved Clerk candidate root origin; the dedicated auth host, generated deployment URL, and public domain do not qualify.");
+  } else if (origin !== candidateOrigin) {
+    add(blockers, "evidence-binding", "proof-origin", `Pre-promotion Clerk proof requires the exact candidate application origin ${candidateOrigin}.`);
   }
   if (phase === "pre-promotion") {
-    if (!tenantOrigin) {
-      add(blockers, "evidence-binding", "proof-tenant-origin", "Pre-promotion proof requires an exact HTTPS tenant origin without a path, query, or fragment.");
-    } else if (tenantOrigin === origin || tenantOrigin === authOrigin || tenantOrigin === url || tenantOrigin === canonicalOrigin(publicDomain)) {
-      add(blockers, "evidence-binding", "proof-tenant-origin-reused", "Pre-promotion tenant proof requires a distinct tenant origin; the dedicated auth host, candidate root, immutable deployment URL, and public domain do not qualify.");
+    if (tenantOrigin !== candidateTenantOrigin) {
+      add(blockers, "evidence-binding", "proof-tenant-origin", `Pre-promotion proof requires the exact candidate tenant origin ${candidateTenantOrigin}.`);
     }
   }
   requireMatch(blockers, "evidence-binding", "proof-route-deployment-id", text(proof.routeDeploymentId), id, "proof route deployment id");

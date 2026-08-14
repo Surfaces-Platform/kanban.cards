@@ -23,19 +23,39 @@ export interface LogoutRetrySession {
   cookieOrigin: string;
 }
 
+export interface LogoutContinuation {
+  completionId: string;
+  providerSubject: string;
+  sessionId: string;
+  rootOrigin: string;
+  initiatingOrigin: string;
+}
+
+export interface LogoutCompletionSession {
+  completionId: string;
+  providerSubject: string;
+  sessionId: string;
+  rootOrigin: string;
+}
+
 export const ROOT_SESSION_COOKIE_PROD = "__Host-kanban_root_session";
 export const ROOT_SESSION_COOKIE_DEV = "kanban_root_session";
 export const TENANT_SESSION_COOKIE_PROD = "__Host-kanban_tenant_session";
 export const TENANT_SESSION_COOKIE_DEV = "kanban_tenant_session";
 export const LOGOUT_RETRY_COOKIE_PROD = "__Host-kanban_logout_retry";
 export const LOGOUT_RETRY_COOKIE_DEV = "kanban_logout_retry";
+export const LOGOUT_COMPLETION_COOKIE_PROD = "__Host-kanban_logout_complete";
+export const LOGOUT_COMPLETION_COOKIE_DEV = "kanban_logout_complete";
 
 const DEFAULT_SESSION_TTL_SECONDS = 7 * 24 * 60 * 60;
 const DEFAULT_LOGOUT_RETRY_TTL_SECONDS = 10 * 60;
+const DEFAULT_LOGOUT_COMPLETION_TTL_SECONDS = 2 * 60;
 const SESSION_ISSUER = "kanban.cards";
 const ROOT_SESSION_AUDIENCE = "kanban.cards:root";
 const TENANT_SESSION_AUDIENCE = "kanban.cards:tenant";
 const LOGOUT_RETRY_AUDIENCE = "kanban.cards:logout-retry";
+const LOGOUT_CONTINUATION_AUDIENCE = "kanban.cards:logout-continuation";
+const LOGOUT_COMPLETION_AUDIENCE = "kanban.cards:logout-completion";
 const SESSION_ALGORITHM = "HS256";
 
 type JwtPayload = Record<string, unknown> & { sub?: string; jti?: string };
@@ -102,6 +122,96 @@ export function clearLogoutRetryCookie(production: boolean): string {
   return clearCookie(logoutRetryCookieName(production), production);
 }
 
+export async function createLogoutContinuationToken(
+  continuation: LogoutContinuation,
+  secret: string,
+  ttlSeconds = DEFAULT_LOGOUT_COMPLETION_TTL_SECONDS
+): Promise<string> {
+  const payload = requireLogoutContinuation(continuation);
+  assertSessionSecret(secret);
+  const ttl = positiveSeconds(ttlSeconds, "logout continuation TTL");
+  const jose = await loadJose();
+  return new jose.SignJWT({ ...payload })
+    .setProtectedHeader({ alg: SESSION_ALGORITHM, typ: "JWT" })
+    .setIssuer(SESSION_ISSUER)
+    .setAudience(LOGOUT_CONTINUATION_AUDIENCE)
+    .setSubject(payload.providerSubject)
+    .setJti(payload.completionId)
+    .setIssuedAt()
+    .setExpirationTime(`${ttl}s`)
+    .sign(secretKey(secret));
+}
+
+export async function verifyLogoutContinuationToken(
+  token: string,
+  secret: string
+): Promise<LogoutContinuation | null> {
+  if (!token) return null;
+  try {
+    assertSessionSecret(secret);
+    const jose = await loadJose();
+    const { payload } = await jose.jwtVerify(token, secretKey(secret), {
+      algorithms: [SESSION_ALGORITHM],
+      issuer: SESSION_ISSUER,
+      audience: LOGOUT_CONTINUATION_AUDIENCE
+    });
+    const continuation = requireLogoutContinuation(payload);
+    if (payload.sub !== continuation.providerSubject || payload.jti !== continuation.completionId) return null;
+    return continuation;
+  } catch {
+    return null;
+  }
+}
+
+export async function createLogoutCompletionCookie(
+  session: LogoutCompletionSession,
+  secret: string,
+  production: boolean,
+  ttlSeconds = DEFAULT_LOGOUT_COMPLETION_TTL_SECONDS
+): Promise<string> {
+  const payload = requireLogoutCompletionSession(session);
+  assertSessionSecret(secret);
+  const ttl = positiveSeconds(ttlSeconds, "logout completion TTL");
+  const jose = await loadJose();
+  const token = await new jose.SignJWT({ ...payload })
+    .setProtectedHeader({ alg: SESSION_ALGORITHM, typ: "JWT" })
+    .setIssuer(SESSION_ISSUER)
+    .setAudience(LOGOUT_COMPLETION_AUDIENCE)
+    .setSubject(payload.providerSubject)
+    .setJti(payload.completionId)
+    .setIssuedAt()
+    .setExpirationTime(`${ttl}s`)
+    .sign(secretKey(secret));
+  return createCookie(logoutCompletionCookieName(production), token, ttl, production);
+}
+
+export async function verifyLogoutCompletionSession(
+  request: Request,
+  secret: string,
+  production: boolean
+): Promise<LogoutCompletionSession | null> {
+  const token = parseCookie(request, logoutCompletionCookieName(production));
+  if (!token) return null;
+  try {
+    assertSessionSecret(secret);
+    const jose = await loadJose();
+    const { payload } = await jose.jwtVerify(token, secretKey(secret), {
+      algorithms: [SESSION_ALGORITHM],
+      issuer: SESSION_ISSUER,
+      audience: LOGOUT_COMPLETION_AUDIENCE
+    });
+    const session = requireLogoutCompletionSession(payload);
+    if (payload.sub !== session.providerSubject || payload.jti !== session.completionId) return null;
+    return new URL(request.url).origin === session.rootOrigin ? session : null;
+  } catch {
+    return null;
+  }
+}
+
+export function clearLogoutCompletionCookie(production: boolean): string {
+  return clearCookie(logoutCompletionCookieName(production), production);
+}
+
 export async function createTenantSessionCookie(
   session: TenantSession,
   secret: string,
@@ -143,6 +253,10 @@ export function tenantSessionCookieName(production: boolean): string {
 
 export function logoutRetryCookieName(production: boolean): string {
   return production ? LOGOUT_RETRY_COOKIE_PROD : LOGOUT_RETRY_COOKIE_DEV;
+}
+
+export function logoutCompletionCookieName(production: boolean): string {
+  return production ? LOGOUT_COMPLETION_COOKIE_PROD : LOGOUT_COMPLETION_COOKIE_DEV;
 }
 
 export function parseCookie(request: Request, name: string): string {
@@ -229,6 +343,27 @@ function requireLogoutRetrySession(value: unknown): LogoutRetrySession {
     sessionId: strictScalar(session.sessionId, "sessionId"),
     rootOrigin: strictOrigin(session.rootOrigin, "rootOrigin"),
     cookieOrigin: strictOrigin(session.cookieOrigin, "cookieOrigin")
+  };
+}
+
+function requireLogoutContinuation(value: unknown): LogoutContinuation {
+  const continuation = recordValue(value);
+  return {
+    completionId: strictScalar(continuation.completionId, "completionId"),
+    providerSubject: strictScalar(continuation.providerSubject, "providerSubject"),
+    sessionId: strictScalar(continuation.sessionId, "sessionId"),
+    rootOrigin: strictOrigin(continuation.rootOrigin, "rootOrigin"),
+    initiatingOrigin: strictOrigin(continuation.initiatingOrigin, "initiatingOrigin")
+  };
+}
+
+function requireLogoutCompletionSession(value: unknown): LogoutCompletionSession {
+  const session = recordValue(value);
+  return {
+    completionId: strictScalar(session.completionId, "completionId"),
+    providerSubject: strictScalar(session.providerSubject, "providerSubject"),
+    sessionId: strictScalar(session.sessionId, "sessionId"),
+    rootOrigin: strictOrigin(session.rootOrigin, "rootOrigin")
   };
 }
 
