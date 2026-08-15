@@ -1,4 +1,4 @@
 interface:
   display_name: "kanban.cards"
-  short_description: "Drive projects and cards through the owner API"
-  default_prompt: "Use $kanban-cards to turn this plan into an idempotent project board and keep its cards reconciled as work progresses."
+  short_description: "See and update project priorities and card progress"
+  default_prompt: "Use $kanban-cards to keep this project’s priorities, progress, and next steps visible and up to date."
