@@ -118,6 +118,15 @@ h3 {
   text-align: center;
 }
 
+.clerk-access-view {
+  justify-items: center;
+}
+
+.clerk-access-view > * {
+  inline-size: min(100%, 29rem);
+  margin-inline: auto;
+}
+
 .auth-card,
 .access-card {
   background: var(--jk-color-surface);

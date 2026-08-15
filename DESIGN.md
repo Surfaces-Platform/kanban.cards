@@ -28,7 +28,7 @@ The browser and skill are two clients of the same system:
 - A Project is the board. Columns express state. Cards carry the work. Comments and Activity preserve useful context.
 - Neither client maintains a second workflow model.
 
-Owners sign up or sign in through Clerk's unified email-code experience at the root, then enter one server-authorized Workspace at its canonical host. Zero Workspaces leads to creation, one opens directly, and many require an explicit choice. The skill credential remains a temporary owner-authority compatibility path bound server-side to the migrated Workspace; the next roadmap slice replaces that bridge with a verified agent principal.
+Owners enter through one email-code sign-in path, then continue through server-authorized Workspace routing. Zero Workspaces leads to creation, one opens directly, and many require an explicit choice. An identity without pre-provisioned admission receives the generic denied state. The skill credential remains a temporary owner-authority compatibility path bound server-side to the migrated Workspace; the next roadmap slice replaces that bridge with a verified agent principal.
 
 The interface should feel like a focused work surface. It should not feel like an administration console for agents, permissions, or workflows.
 
@@ -94,9 +94,21 @@ These qualities are outcomes, not inherited tokens. The new system must choose i
 
 ## Required surfaces
 
-### Sign-up and sign-in
+### Sign in
 
-The dedicated auth host uses Clerk's unified passwordless email-code experience for both sign-up and sign-in. Clerk—not kanban.cards—collects and verifies the email code. `KANBAN_CARDS_AUTH_HOST` names the stable auth-only application host, and the server derives its `/sign-in` and `/sign-up` routes from that exact host. The same artifact mounts Clerk UI only on those routes; Workspace, Project, handoff, and app-session exchange APIs are unavailable on the auth host. ClerkJS on the auth host and each exact application root connects through the one normal Clerk production FAPI DNS/custom domain for `kanban.cards`; the application does not provide a per-root `/__clerk` proxy. During protected candidate proof, Clerk Allowed Subdomains contains only `auth.kanban.cards` and `candidate.release.kanban.cards`; Clerk inherently allows the primary root `kanban.cards`. Candidate teardown removes the candidate entry before public post-promotion proof, leaving only the stable auth host explicitly allowed. The canonical application root and temporary candidate root are same-root application origins, not Clerk satellites. Each offers a sign-in or sign-up link to the exact auth host with its own exact return origin. After email-code completion, the initiating application root must recognize its Clerk browser session before the client exchanges it at `POST /api/clerk-session`; the server then verifies the exact Clerk user ID and session ID, checks the explicit admission list and request-scoped exact `authorizedParties` origin, and issues the kanban.cards root session. Email must never select an owner or Workspace. After admission, the root surface creates the first Workspace, opens the sole Workspace, or presents an explicit Workspace chooser. A one-time, exact-host handoff establishes a host-only tenant session without placing its token in a URL. Local development may retain the owner-key form only when Clerk is deliberately absent.
+When a signed-out person opens an application root, the client continues directly to the dedicated sign-in form while preserving the exact return destination. It does not insert a separate landing page or `Sign in` action. The sign-in page contains the form and nothing around it: no eyebrow, product explanation, nested app-owned panel, host description, provider description, or Workspace and Project architecture copy.
+
+The first step asks for `Email address` and offers `Continue`. The second asks for the verification code and offers `Continue`. Resend or change-email controls appear only when they are useful for that step. There is no separate `Create account`, `Sign up`, registration choice, or required profile field.
+
+Visible app-owned sign-in language uses the product name and the words people need to complete the task. It must not expose a provider name, generated provider-resource name, environment name, host role, routing detail, session-exchange detail, or internal access model. The product must never show generated labels such as a provider resource or school name.
+
+The supported Clerk Hobby prebuilt form may retain its required small `Secured by Clerk` badge. The badge is the only provider reference allowed on the customer-facing surface, remains visually subordinate to the form, and receives no additional app-owned explanation. Removing it would require a different Clerk plan and is not part of this release.
+
+Access is private, and exact identity admission is provisioned before use. Verifying an email does not grant access or bind identity by email. An admitted identity with zero Workspaces may create its first Workspace after sign-in. An unadmitted identity sees the generic title `This account doesn’t have access`, the message `Try another email address.`, and one `Use another account` action. The state reveals no Workspace name, account-match result, or reason for denial.
+
+Operator configuration, provider integration, exact identity admission, host isolation, session exchange, and tenant handoff remain implementation and release concerns in [`UI_CONTRACT.md`](UI_CONTRACT.md) and [`docs/runbook.md`](docs/runbook.md). They do not become sign-in copy. Local development may retain the owner-key form only when the production identity provider is deliberately absent.
+
+This design follows the NN/g guidance to [remove unnecessary steps](https://www.nngroup.com/articles/affordable_care_act_usability_issues/) (Jen Cardello and Susan Farrell, “9. Remove unnecessary steps”), [limit the first screen to essential information](https://www.nngroup.com/articles/defer-secondary-content-for-mobile/) (Jakob Nielsen, “Summary”), [avoid unnecessary choices and their instructional overhead](https://www.nngroup.com/articles/simplicity-vs-choice/) (Hoa Loranger, “Simplicity Usually Wins”), [show only what is relevant at each form step](https://www.nngroup.com/articles/4-principles-reduce-cognitive-load/) (Huei-Hsin Wang, “Utilize Progressive Disclosure”), and [keep labels and instructions in plain language](https://www.nngroup.com/articles/4-principles-reduce-cognitive-load/) (Huei-Hsin Wang, “Use Plain Language”). NN/g's [visual-hierarchy guidance](https://www.nngroup.com/articles/4-principles-reduce-cognitive-load/) (Huei-Hsin Wang, “Create Visual Hierarchy”) supports keeping required secondary text subordinate to the primary form; the Clerk plan, not the corpus, determines that the badge must remain. The denied state follows NN/g's [plain, concise, actionable error-message guidance](https://www.nngroup.com/articles/error-messages-scoring-rubric/) (Evan Sunwall and Tim Neusesser, “Communication Guidelines”); the product's privacy boundary limits the explanation to a generic result.
 
 ### Empty workspace
 
@@ -131,8 +143,8 @@ The design must account for the full workflow, including states that are easy to
 | State | What the experience must communicate |
 | --- | --- |
 | Opening | The application is loading without exposing stale private data. |
-| Signed out | Clerk's unified email-code sign-up/sign-in opens only Workspaces owned by an admitted exact Clerk user ID; local fallback states its narrower development boundary. |
-| Not admitted | The Clerk account is verified, but access is not enabled; no Workspace names or other private data are revealed. |
+| Signed out | The application continues directly to email, then verification code. No landing-page action, registration choice, or technical explanation competes with the form. |
+| Access not available | An unadmitted identity sees `This account doesn’t have access`, `Try another email address.`, and `Use another account`. The state reveals no private data or denial reason. |
 | Invalid key | Access was refused; no Project names or content are revealed. |
 | Empty workspace | The owner can create a Project or ask the skill to create one. |
 | Empty Project | Columns are present and the next Card can be created. |

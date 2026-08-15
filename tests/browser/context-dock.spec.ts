@@ -948,6 +948,94 @@ test("archive removes the active Card and Undo restores both resource and focus"
   expectNoUnexpectedBrowserErrors(errors);
 });
 
+test("sign-out hides private DOM while a pending autosave finishes before revocation", async ({ page, context }) => {
+  const signOutHarness = await startBrowserHarness();
+  const errors = monitorBrowserErrors(page);
+  let markAutosaveReached = (): void => undefined;
+  const autosaveReached = new Promise<void>((resolve) => { markAutosaveReached = resolve; });
+  let releaseAutosave = (): void => undefined;
+  const autosaveHold = new Promise<void>((resolve) => { releaseAutosave = resolve; });
+  let markRevocationReached = (): void => undefined;
+  const revocationReached = new Promise<void>((resolve) => { markRevocationReached = resolve; });
+  let releaseRevocation = (): void => undefined;
+  const revocationHold = new Promise<void>((resolve) => { releaseRevocation = resolve; });
+  let deleteRequests = 0;
+
+  try {
+    const signOutSeed = await seedBrowserWorkspace(signOutHarness);
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await authenticate(page, signOutHarness);
+    const before = await readSeededProject(signOutHarness, signOutSeed.projectId);
+    const originalCard = before.cards.find((card) => card.id === signOutSeed.cards.privacy.id)!;
+    const pendingBody = "Private pending autosave must finish before sign-out revocation";
+    const autosaveRoute = `**/api/projects/${signOutSeed.projectId}/cards/${signOutSeed.cards.privacy.id}`;
+    await page.route(autosaveRoute, async (route) => {
+      if (route.request().method() !== "PATCH") {
+        await route.continue();
+        return;
+      }
+      markAutosaveReached();
+      await autosaveHold;
+      await route.continue();
+    });
+    await page.route("**/api/session", async (route) => {
+      if (route.request().method() !== "DELETE") {
+        await route.continue();
+        return;
+      }
+      deleteRequests += 1;
+      markRevocationReached();
+      await revocationHold;
+      await route.continue();
+    });
+
+    await openCard(page, originalCard.title);
+    await page.getByLabel("Description", { exact: true }).fill(pendingBody);
+    await page.getByRole("button", { name: "Close Card and return to Next" }).click();
+    await autosaveReached;
+    await page.getByRole("button", { name: "Open account panel" }).click();
+    await expect(page.getByText("Browser QA Owner", { exact: true })).toBeVisible();
+
+    await page.getByRole("button", { name: "Sign out", exact: true }).click();
+    await expect(page.locator("body")).toHaveAttribute("data-state", "signing-out");
+    await expect(page.locator(".card-inspector")).toHaveCount(0);
+    await expect(page.getByText("Finishing sign out…", { exact: true })).toBeVisible();
+    const privateMarkers = ["Context Dock regression", originalCard.title, originalCard.body, pendingBody, "Browser QA Owner"];
+    const pendingText = await page.locator("body").innerText();
+    for (const privateText of privateMarkers) {
+      expect(pendingText).not.toContain(privateText);
+    }
+    expect(deleteRequests).toBe(0);
+
+    releaseAutosave();
+    await revocationReached;
+    expect(deleteRequests).toBe(1);
+    expect((await context.cookies()).some((cookie) => cookie.name === "kanban_cards_session")).toBe(true);
+    await expect(page.locator("body")).toHaveAttribute("data-state", "signing-out");
+    const revocationText = await page.locator("body").innerText();
+    expect(revocationText).toContain("Finishing sign out…");
+    for (const privateText of privateMarkers) {
+      expect(revocationText).not.toContain(privateText);
+    }
+    expect(await page.evaluate(() => window.localStorage.getItem("kanban.cards:project-id"))).toBeNull();
+    const saved = await readSeededProject(signOutHarness, signOutSeed.projectId);
+    expect(saved.cards.find((card) => card.id === originalCard.id)?.body).toBe(pendingBody);
+
+    releaseRevocation();
+    await expect(page.getByRole("heading", { name: "Open your workspace" })).toBeVisible();
+    await expect(page.getByText("Signed out", { exact: true })).toBeVisible();
+    expect((await context.cookies()).some((cookie) => cookie.name === "kanban_cards_session")).toBe(false);
+  } finally {
+    releaseAutosave();
+    releaseRevocation();
+    if (!page.isClosed()) {
+      await page.unrouteAll({ behavior: "wait" });
+    }
+    await signOutHarness.stop();
+  }
+  expectNoUnexpectedBrowserErrors(errors, [/DELETE .*\/api\/session: net::ERR_ABORTED/i]);
+});
+
 test("sign-out clears rendered, cookie, and local Project data before reauthentication", async ({ page, context }) => {
   await page.setViewportSize({ width: 1440, height: 1000 });
   const errors = monitorBrowserErrors(page);

@@ -22,6 +22,15 @@ interface ClerkBrowser {
     signInUrl?: string;
     signUpUrl?: string;
     allowedRedirectOrigins?: string[];
+    localization?: {
+      formButtonPrimary?: string;
+      formFieldLabel__emailAddress?: string;
+      signIn?: {
+        start?: { title?: string; titleCombined?: string; subtitle?: string; subtitleCombined?: string };
+        emailCode?: { title?: string; subtitle?: string; formTitle?: string; resendButton?: string };
+      };
+    };
+    appearance?: { elements?: { headerSubtitle?: { display?: string } } };
   }): Promise<void>;
   buildSignInUrl?(options?: { redirectUrl?: string }): string;
   buildSignUpUrl?(options?: { redirectUrl?: string }): string;
@@ -30,6 +39,7 @@ interface ClerkBrowser {
     options?: {
       routing?: "hash" | "path";
       withSignUp?: boolean;
+      transferable?: boolean;
       forceRedirectUrl?: string;
       fallbackRedirectUrl?: string;
       signUpForceRedirectUrl?: string;
@@ -261,7 +271,7 @@ const ADD_COLUMN_PREPARING_STATUS: StatusMessage = {
 const UI_CONTRACT_STATES = [
   "opening", "signed-out", "invalid-key", "workspace-route", "empty-workspace", "empty-project", "populated", "selected",
   "refreshing", "refresh-success", "refresh-failure", "saving", "validation-error", "stale",
-  "session-expired", "service-unavailable", "archived", "sign-out-success"
+  "session-expired", "service-unavailable", "archived", "signing-out", "sign-out-success"
 ] as const;
 
 const rootElement = document.querySelector<HTMLElement>("#app");
@@ -284,6 +294,7 @@ let clerkFallbackRedirectUrl = "";
 let logoutRetryPending = false;
 let logoutCompletion = false;
 let logoutCompletionSessionId = "";
+let signOutPending = false;
 let clerkRuntimeSignature = "";
 let clerkRuntimePromise: Promise<ClerkBrowser> | null = null;
 let clerkSignInMount: HTMLDivElement | null = null;
@@ -661,11 +672,11 @@ function clerkConfigured(): boolean {
 }
 
 function clerkBundleUrl(packageName: "@clerk/ui@1" | "@clerk/clerk-js@6", filename: string): string {
-  if (!clerkConfigured()) throw new Error("Clerk sign-in is not configured for this host.");
+  if (!clerkConfigured()) throw new Error("Sign-in is unavailable.");
   const expectedPath = `/npm/${packageName}/dist/${filename}`;
   const bundle = new URL(expectedPath, `${clerkFrontendApiOrigin}/`);
   if (bundle.origin !== clerkFrontendApiOrigin || bundle.pathname !== expectedPath || bundle.search || bundle.hash) {
-    throw new Error("Clerk sign-in bundles must load from the configured Clerk Frontend API.");
+    throw new Error("Sign-in could not start.");
   }
   return bundle.toString();
 }
@@ -673,7 +684,7 @@ function clerkBundleUrl(packageName: "@clerk/ui@1" | "@clerk/clerk-js@6", filena
 async function loadClerkScript(source: string, configure?: (script: HTMLScriptElement) => void): Promise<void> {
   const parsed = new URL(source);
   if (parsed.origin !== clerkFrontendApiOrigin || !parsed.pathname.startsWith("/npm/@clerk/")) {
-    throw new Error("Clerk sign-in could not load outside the configured Clerk Frontend API.");
+    throw new Error("Sign-in could not start.");
   }
   const existing = [...document.scripts].find((script) => script.src === source);
   if (existing?.dataset.loaded === "true") return;
@@ -687,7 +698,7 @@ async function loadClerkScript(source: string, configure?: (script: HTMLScriptEl
     const failed = (): void => {
       cleanup();
       if (!existing) script.remove();
-      reject(new Error("The secure Clerk sign-in interface could not be loaded."));
+      reject(new Error("The sign-in form could not be loaded."));
     };
     const cleanup = (): void => {
       script.removeEventListener("load", loaded);
@@ -706,7 +717,7 @@ async function loadClerkScript(source: string, configure?: (script: HTMLScriptEl
 }
 
 async function loadClerkRuntime(): Promise<ClerkBrowser> {
-  if (!clerkConfigured()) throw new Error("Clerk sign-in is not configured for this host.");
+  if (!clerkConfigured()) throw new Error("Sign-in is unavailable.");
   const signature = [
     clerkPublishableKey,
     clerkFrontendApiOrigin,
@@ -718,7 +729,7 @@ async function loadClerkRuntime(): Promise<ClerkBrowser> {
   ].join("\n");
   if (clerkRuntimePromise && clerkRuntimeSignature === signature) return clerkRuntimePromise;
   if (clerkRuntimeSignature && clerkRuntimeSignature !== signature) {
-    throw new Error("Clerk sign-in configuration changed while this page was open.");
+    throw new Error("Sign-in changed while this page was open. Reload and try again.");
   }
   clerkRuntimeSignature = signature;
   clerkRuntimePromise = (async () => {
@@ -727,11 +738,20 @@ async function loadClerkRuntime(): Promise<ClerkBrowser> {
       script.dataset.clerkPublishableKey = clerkPublishableKey;
     });
     const clerk = window.Clerk;
-    if (!clerk) throw new Error("The secure Clerk sign-in interface did not initialize.");
+    if (!clerk) throw new Error("The sign-in form could not be loaded.");
     await clerk.load({
       ui: { ClerkUI: window.__internal_ClerkUICtor },
       signInUrl: clerkAuthSignInUrl,
       signUpUrl: clerkAuthSignUpUrl,
+      localization: {
+        formButtonPrimary: "Continue",
+        formFieldLabel__emailAddress: "Email address",
+        signIn: {
+          start: { title: "Sign in", titleCombined: "Sign in", subtitle: "", subtitleCombined: "" },
+          emailCode: { title: "Verification code", subtitle: "", formTitle: "Verification code", resendButton: "Resend code" }
+        }
+      },
+      appearance: { elements: { headerSubtitle: { display: "none" } } },
       ...(clerkSurfaceRole === "auth" ? { allowedRedirectOrigins: clerkAllowedRedirectOrigins } : {})
     });
     return clerk;
@@ -763,38 +783,25 @@ async function mountClerkSignIn(node: HTMLDivElement): Promise<void> {
         clerkAuthSignInUrl,
         rootUrl
       );
-      const signUpUrl = safeBuiltClerkFlowUrl(
-        clerk.buildSignUpUrl?.({ redirectUrl: rootUrl }),
-        clerkAuthSignUpUrl,
-        rootUrl
-      );
-      if (!signInUrl || !signUpUrl) throw new Error("Clerk did not provide secure auth-host sign-in links.");
-      node.innerHTML = `<div class="jk-actions"><a class="jk-button" data-priority="primary" href="${escapeHtml(signInUrl)}">Continue with email</a><a class="jk-button" data-priority="secondary" href="${escapeHtml(signUpUrl)}">Create account</a></div>`;
-      clerkSignInMount = node;
+      if (!signInUrl) throw new Error("Sign-in could not start. Try again.");
+      window.location.replace(signInUrl);
       return;
     }
-    if (window.location.pathname === "/sign-up") {
-      clerk.mountSignUp(node, {
-        routing: "hash",
-        fallbackRedirectUrl: clerkFallbackRedirectUrl,
-        signInUrl: clerkAuthSignInUrl
-      });
-    } else {
-      clerk.mountSignIn(node, {
-        routing: "hash",
-        withSignUp: true,
-        fallbackRedirectUrl: clerkFallbackRedirectUrl,
-        signUpFallbackRedirectUrl: clerkFallbackRedirectUrl
-      });
-    }
+    node.replaceChildren();
+    clerk.mountSignIn(node, {
+      routing: "hash",
+      withSignUp: false,
+      transferable: false,
+      fallbackRedirectUrl: clerkFallbackRedirectUrl
+    });
     clerkSignInMount = node;
-  } catch (error) {
+  } catch {
     if (!node.isConnected) return;
     clerkSignInBlocked = true;
     authNotice = {
       kind: "service-unavailable",
-      title: "Secure sign-in is unavailable",
-      message: error instanceof Error ? error.message : "Try again when the sign-in service is available."
+      title: "Sign-in is unavailable",
+      message: "Try again later."
     };
     render();
   }
@@ -1120,6 +1127,10 @@ function renderLoading(): string {
   return `<main class="centered-view"><strong>kanban.cards</strong><p class="quiet" role="status">Opening your workspace…</p></main>`;
 }
 
+function renderSignOutProgress(): string {
+  return `<main class="centered-view"><strong>kanban.cards</strong><p class="quiet" role="status">Finishing sign out…</p></main>`;
+}
+
 function renderSignIn(): string {
   const notice = authNotice
     ? renderStatus({
@@ -1127,7 +1138,7 @@ function renderSignIn(): string {
         title: authNotice.title,
         message: authNotice.message
       }, "access-status")
-    : renderStatus(null, "access-status");
+    : "";
   const errorId = authNotice?.kind === "invalid-key" ? "access-status" : undefined;
   if (accessContext !== "local") {
     const retry = authNotice?.kind === "sign-out-incomplete" && logoutUrl
@@ -1135,24 +1146,25 @@ function renderSignIn(): string {
       : "";
     if (accessContext === "auth") {
       const clerkSurface = clerkConfigured() && !clerkSignInBlocked
-        ? `<div id="clerk-sign-in" role="region" aria-label="${window.location.pathname === "/sign-up" ? "Sign up" : "Sign in"}"><p class="quiet" role="status">Loading secure ${window.location.pathname === "/sign-up" ? "sign-up" : "sign-in"}…</p></div>`
-        : `<div class="jk-actions"><button id="provider-sign-in" class="jk-button" data-priority="primary" type="button" data-action="provider-sign-in">Retry secure sign-in</button></div>`;
-      return `<main class="access-view"><section class="access-card jk-panel" aria-labelledby="access-title"><p class="product-name">kanban.cards</p><div><p class="eyebrow">Secure account access</p><h1 id="access-title">${window.location.pathname === "/sign-up" ? "Create your account" : "Sign in"}</h1><p class="access-description">This host verifies your Clerk account and returns you to kanban.cards. It does not serve Workspace or Project data.</p></div>${notice}${clerkSurface}</section></main>`;
+        ? `<div id="clerk-sign-in" role="region" aria-label="Sign in"><p class="quiet" role="status">Loading…</p></div>`
+        : `<div class="jk-actions"><button id="provider-sign-in" class="jk-button" data-priority="primary" type="button" data-action="provider-sign-in">Try again</button></div>`;
+      return `<main class="access-view clerk-access-view">${notice}${clerkSurface}</main>`;
     }
     if (accessContext === "root") {
-      const clerkSignIn = clerkConfigured() && !clerkSignInBlocked && !retry
-        ? `<div id="clerk-sign-in" role="region" aria-label="Sign in or sign up"><p class="quiet" role="status">Loading secure sign-in…</p></div>`
-        : retry
-          ? ""
-          : authNotice?.kind === "access-denied" && clerkConfigured()
-            ? `<div class="jk-actions"><button id="provider-sign-in" class="jk-button" data-priority="primary" type="button" data-action="clerk-change-account">Use a different account</button></div>`
-            : `<div class="jk-actions"><button id="provider-sign-in" class="jk-button" data-priority="primary" type="button" data-action="provider-sign-in">Retry secure sign-in</button></div>`;
+      if (clerkConfigured() && !clerkSignInBlocked && !retry && !authNotice) {
+        return `<main class="centered-view"><strong>kanban.cards</strong><p class="quiet" role="status">Opening sign in…</p><div id="clerk-sign-in" hidden></div></main>`;
+      }
+      const clerkSignIn = retry
+        ? ""
+        : authNotice?.kind === "access-denied" && clerkConfigured()
+          ? `<div class="jk-actions"><button id="provider-sign-in" class="jk-button" data-priority="primary" type="button" data-action="clerk-change-account">Use another account</button></div>`
+          : `<div class="jk-actions"><button id="provider-sign-in" class="jk-button" data-priority="primary" type="button" data-action="provider-sign-in">Continue</button></div>`;
       const configurationNotice = !clerkConfigured() && !authNotice
-        ? renderStatus({ tone: "error", title: "Secure sign-in is unavailable", message: "Clerk is not configured for this kanban.cards host." }, "clerk-configuration-status")
+        ? renderStatus({ tone: "error", title: "Sign-in is unavailable", message: "Try again later." }, "clerk-configuration-status")
         : "";
-      return `<main class="access-view"><section class="access-card jk-panel" aria-labelledby="access-title"><p class="product-name">kanban.cards</p><div><p class="eyebrow">Private workspaces</p><h1 id="access-title">Sign in or create your account</h1><p class="access-description">Clerk verifies your email before kanban.cards opens the Workspaces connected to you.</p></div>${notice}${configurationNotice}${retry}${clerkSignIn}</section></main>`;
+      return `<main class="access-view"><section class="access-card jk-panel" aria-labelledby="access-title"><p class="product-name">kanban.cards</p><h1 id="access-title">Sign in</h1>${notice}${configurationNotice}${retry}${clerkSignIn}</section></main>`;
     }
-    return `<main class="access-view"><section class="access-card jk-panel" aria-labelledby="access-title"><p class="product-name">kanban.cards</p><div><p class="eyebrow">Private workspaces</p><h1 id="access-title">Sign in to continue</h1><p class="access-description">Sign in at kanban.cards before opening this private Workspace address.</p></div>${notice}${retry}<button id="provider-sign-in" class="jk-button" data-priority="${retry ? "secondary" : "primary"}" type="button" data-action="provider-sign-in"${disabledAttribute(!rootUrl)}>Continue to sign in</button></section></main>`;
+    return `<main class="access-view"><section class="access-card jk-panel" aria-labelledby="access-title"><p class="product-name">kanban.cards</p><h1 id="access-title">Sign in</h1>${notice}${retry}<button id="provider-sign-in" class="jk-button" data-priority="${retry ? "secondary" : "primary"}" type="button" data-action="provider-sign-in"${disabledAttribute(!rootUrl)}>Continue</button></section></main>`;
   }
   return `<main class="access-view"><section class="access-card jk-panel" aria-labelledby="access-title"><p class="product-name">kanban.cards</p><div><p class="eyebrow">Local workspace</p><h1 id="access-title">Open your workspace</h1><p class="access-description">Use the local owner key to open this development workspace.</p></div>${notice}<form data-form="sign-in" class="access-form" novalidate>${renderField({
     id: "owner-key",
@@ -1588,6 +1600,7 @@ function renderWorkspace(): string {
 
 function currentUiState(): string {
   if (initialLoading) return "opening";
+  if (signOutPending) return "signing-out";
   if (!session) {
     if (authNotice?.kind === "signed-out") return "sign-out-success";
     if (authNotice?.kind === "invalid-key") return "invalid-key";
@@ -1656,9 +1669,11 @@ function render(): void {
   unmountClerkSignIn();
   root.innerHTML = initialLoading
     ? renderLoading()
-    : session
-      ? accessContext === "root" ? renderWorkspaceRoute() : renderWorkspace()
-      : renderSignIn();
+    : signOutPending
+      ? renderSignOutProgress()
+      : session
+        ? accessContext === "root" ? renderWorkspaceRoute() : renderWorkspace()
+        : renderSignIn();
   const clerkSignIn = root.querySelector<HTMLDivElement>("#clerk-sign-in");
   if (clerkSignIn) void mountClerkSignIn(clerkSignIn);
   restoreDescriptionSelection();
@@ -1825,7 +1840,7 @@ async function synchronizeClerkSession(): Promise<boolean> {
   if (!clerk.isSignedIn) return false;
   await api("/clerk-session", { method: "POST" });
   await loadSession();
-  if (!session) throw new Error("Clerk verified the account, but kanban.cards did not create a browser session.");
+  if (!session) throw new Error("Sign-in could not be completed. Try again.");
   clerkSignInBlocked = false;
   authNotice = null;
   return true;
@@ -1839,16 +1854,16 @@ function clearSignOutState(): void {
 }
 
 async function completeClerkSignOut(sessionId: string): Promise<void> {
-  if (!clerkConfigured()) throw new Error("Clerk sign-out is not configured for this host.");
-  if (!sessionId || sessionId !== sessionId.trim()) throw new Error("The Clerk session sign-out receipt is invalid.");
+  if (!clerkConfigured()) throw new Error("Sign-out is unavailable.");
+  if (!sessionId || sessionId !== sessionId.trim()) throw new Error("Sign-out could not be completed. Try again.");
   const clerk = await loadClerkRuntime();
   const browserSessions = clerk.client?.signedInSessions;
-  if (!Array.isArray(browserSessions)) throw new Error("Clerk did not return a verifiable browser-session list.");
+  if (!Array.isArray(browserSessions)) throw new Error("Sign-out could not be completed. Try again.");
   const targetSession = browserSessions.find((candidate) => candidate.id === sessionId);
   if (targetSession) await targetSession.end();
   const remainingSessions = clerk.client?.signedInSessions;
   if (!Array.isArray(remainingSessions) || remainingSessions.some((candidate) => candidate.id === sessionId)) {
-    throw new Error("Clerk did not confirm that the exact browser session ended.");
+    throw new Error("Sign-out could not be completed. Try again.");
   }
   await acknowledgeLogoutCompletion();
 }
@@ -2063,9 +2078,6 @@ async function signIn(form: HTMLFormElement): Promise<void> {
 }
 
 async function signOut(): Promise<void> {
-  setWorkspaceMutationsDisabled(true, "sign-in");
-  projectStatus = { tone: "neutral", title: "Signing out", message: "Conflicting actions are unavailable while private workspace data is cleared." };
-  render();
   let notice: AuthNotice | null = accessContext === "local"
     ? {
         kind: "signed-out",
@@ -2073,7 +2085,12 @@ async function signOut(): Promise<void> {
         message: "Private Project and Card data left the screen."
       }
     : null;
+  let completionSubmitted = false;
+  signOutPending = true;
+  render();
   try {
+    await flushCardAutosaves();
+    clearPrivateState(null);
     const response = objectValue(await api("/session", { method: "DELETE" }));
     const next = safeRootAccessUrl(response.logoutUrl, rootUrl, "/auth/logout") || "";
     const continuation = typeof response.logoutContinuation === "string"
@@ -2083,6 +2100,7 @@ async function signOut(): Promise<void> {
       : "";
     if (next && continuation) {
       submitLogoutCompletion(new URL(next), continuation);
+      completionSubmitted = true;
       return;
     }
     if (accessContext !== "local") throw new Error("Global sign-out did not return a trusted completion route.");
@@ -2102,6 +2120,8 @@ async function signOut(): Promise<void> {
           message: "Private data left this screen, but the service did not confirm session revocation. Try signing out again before leaving this device."
         };
   } finally {
+    if (completionSubmitted) return;
+    signOutPending = false;
     clearPrivateState(notice);
     render();
     pendingFocusId = accessContext === "local" ? "owner-key" : "provider-sign-in";
@@ -3202,14 +3222,14 @@ async function handleAction(button: HTMLElement): Promise<void> {
     try {
       const clerk = await loadClerkRuntime();
       const sessionId = clerk.session?.id;
-      if (!sessionId) throw new Error("Clerk did not identify the active browser session.");
+      if (!sessionId) throw new Error("The account could not be changed. Try again.");
       await clerk.signOut({ sessionId, redirectUrl: rootUrl });
-    } catch (error) {
+    } catch {
       clerkSignInBlocked = true;
       authNotice = {
         kind: "service-unavailable",
         title: "Account change is unavailable",
-        message: error instanceof Error ? error.message : "Try again when Clerk is available."
+        message: "Try again later."
       };
       render();
     }
@@ -3243,14 +3263,12 @@ async function handleAction(button: HTMLElement): Promise<void> {
           message: "Private Project and Card data left the screen."
         });
         render();
-      } catch (error) {
+      } catch {
         clerkSignInBlocked = true;
         clearPrivateState({
           kind: "sign-out-incomplete",
           title: "Sign-out incomplete",
-          message: error instanceof Error
-            ? error.message
-            : "The kanban.cards session ended, but Clerk sign-out could not be confirmed. Try again."
+          message: "Sign-out could not be completed. Try again."
         });
         render();
       }
@@ -3315,10 +3333,7 @@ async function handleAction(button: HTMLElement): Promise<void> {
   if (action === "discard-pending-post") return discardPendingPost(button.dataset.idempotencyScope || "");
   if (action === "archive-card") return archiveCard(button.dataset.cardId || "");
   if (action === "undo-archive") return undoArchive();
-  if (action === "sign-out") {
-    await flushCardAutosaves();
-    return signOut();
-  }
+  if (action === "sign-out") return signOut();
   if (action === "open-workspace") return openWorkspace(button.dataset.workspaceSlug || "");
 }
 
@@ -3499,6 +3514,9 @@ async function boot(): Promise<void> {
   render();
   try {
     await loadSession();
+    if (accessContext === "auth" && window.location.pathname === "/sign-up") {
+      window.history.replaceState(null, "", `/sign-in${window.location.search}${window.location.hash}`);
+    }
     const retryGlobalSignOut = logoutRetryPending;
     if (retryGlobalSignOut) {
       if (signOutState) clearSignOutState();
@@ -3521,14 +3539,12 @@ async function boot(): Promise<void> {
           title: "Signed out",
           message: "Private Project and Card data left the screen."
         });
-      } catch (error) {
+      } catch {
         clerkSignInBlocked = true;
         clearPrivateState({
           kind: "sign-out-incomplete",
           title: "Sign-out incomplete",
-          message: error instanceof Error
-            ? error.message
-            : "The kanban.cards session ended, but Clerk sign-out could not be confirmed. Try again."
+          message: "Sign-out could not be completed. Try again."
         });
       }
       return;
@@ -3553,8 +3569,8 @@ async function boot(): Promise<void> {
       clearPrivateState(error instanceof ApiError && error.status === 403
         ? {
             kind: "access-denied",
-            title: "Access is not enabled for this account",
-            message: "Clerk verified the account, but it is not admitted to this private kanban.cards release."
+            title: "This account doesn’t have access",
+            message: "Try another email address."
           }
         : {
             kind: "service-unavailable",
