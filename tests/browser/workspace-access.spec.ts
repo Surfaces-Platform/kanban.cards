@@ -202,8 +202,10 @@ test("the dedicated auth host renders only the email-code sign-in form", async (
     await expect(page.locator(".clerk-test-panel")).toHaveCount(1);
     await expect(page.locator(".access-card")).toHaveCount(0);
     await expect(page.getByText("Create account", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("Secured by Clerk", { exact: true })).toHaveCount(1);
     const visibleText = await page.locator("body").innerText();
-    for (const forbidden of ["Clerk", "Secure account access", "This host verifies", "Workspace or Project", "Private workspaces"]) {
+    expect(visibleText.replace("Secured by Clerk", "")).not.toContain("Clerk");
+    for (const forbidden of ["Secure account access", "This host verifies", "Workspace or Project", "Private workspaces"]) {
       expect(visibleText).not.toContain(forbidden);
     }
     await page.getByLabel("Email address").fill("mike@example.test");
@@ -242,15 +244,17 @@ test("the dedicated auth host renders only the email-code sign-in form", async (
     expect(primaryRuntime.buildSignInCalls).toBe(0);
     expect(primaryRuntime.buildSignUpCalls).toBe(0);
     const legacyHash = `#/?redirect_url=${encodeURIComponent(new URL(harness.rootOrigin).href)}`;
-    await page.goto(`${harness.authOrigin}/sign-up${legacyHash}`);
-    await expect(page).toHaveURL(`${harness.authOrigin}/sign-in${legacyHash}`);
+    const legacySuffix = `?source=legacy${legacyHash}`;
+    await page.goto(`${harness.authOrigin}/sign-up${legacySuffix}`);
+    await expect(page).toHaveURL(`${harness.authOrigin}/sign-in${legacySuffix}`);
     await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
     await expect(page.getByText("Create account", { exact: true })).toHaveCount(0);
-    await page.evaluate(() => window.localStorage.setItem("kanban.tests:clerk-mount-error", "1"));
-    await page.reload();
+    await page.evaluate(() => window.localStorage.setItem("kanban.tests:clerk-load-error", "1"));
+    await page.goto(`${harness.authOrigin}/sign-up${legacySuffix}`);
+    await expect(page).toHaveURL(`${harness.authOrigin}/sign-in${legacySuffix}`);
     await expect(page.getByText("Sign-in is unavailable", { exact: true })).toBeVisible();
     await expect(page.getByText("Try again later.", { exact: true })).toBeVisible();
-    expect(await page.locator("body").innerText()).not.toContain("Clerk internal provider failure");
+    expect(await page.locator("body").innerText()).not.toContain("Clerk internal provider load failure");
 
     for (const pathname of ["/api/health", "/api/access/health", "/api/workspaces", "/api/projects", "/api/workspace-handoffs"]) {
       expect((await request.get(`${harness.authOrigin}${pathname}`)).status()).toBe(404);
@@ -286,6 +290,54 @@ test("a verified Clerk browser session exchanges into the app without an OIDC re
     await expect(page.getByRole("heading", { name: "Create a Workspace" })).toBeVisible();
     expect((await context.cookies(harness.rootOrigin)).some((cookie) => cookie.name === ROOT_SESSION_COOKIE_DEV)).toBe(true);
     expect(page.url()).toBe(`${harness.rootOrigin}/`);
+  } finally {
+    await harness.stop();
+  }
+});
+
+test("an unadmitted Clerk account receives one generic recovery path", async ({ page, context }) => {
+  const unadmittedUserId = "user_unadmittedBrowserOwner456";
+  const harness = await startWorkspaceAccessHarness({ clerkUserId: unadmittedUserId });
+  await page.addInitScript((rootOrigin) => {
+    if (window.location.origin !== rootOrigin) return;
+    if (window.localStorage.getItem("kanban.tests:clerk-seed-applied") === "1") return;
+    window.localStorage.setItem("kanban.tests:clerk-seed-applied", "1");
+    window.localStorage.setItem("kanban.tests:clerk-signed-in", "1");
+  }, harness.rootOrigin);
+
+  try {
+    const exchangeResponsePromise = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return response.request().method() === "POST" && url.pathname === "/api/clerk-session";
+    });
+    await page.goto(`${harness.rootOrigin}/`);
+    expect((await exchangeResponsePromise).status()).toBe(403);
+
+    await expect(page.getByText("This account doesn’t have access", { exact: true })).toBeVisible();
+    await expect(page.getByText("Try another email address.", { exact: true })).toBeVisible();
+    const recovery = page.getByRole("button", { name: "Use another account", exact: true });
+    await expect(recovery).toHaveCount(1);
+    await expect(page.locator("main button")).toHaveCount(1);
+    await expect(page.locator("main a")).toHaveCount(0);
+    const deniedText = await page.locator("body").innerText();
+    for (const forbidden of [unadmittedUserId, "not admitted", "Workspace", "Project", "Clerk"]) {
+      expect(deniedText).not.toContain(forbidden);
+    }
+
+    await recovery.click();
+    const expectedAuthUrl = `${harness.authSignInUrl}#/?redirect_url=${encodeURIComponent(new URL(harness.rootOrigin).href)}`;
+    await expect(page).toHaveURL(expectedAuthUrl);
+    await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
+    await expect(page.getByText("Secured by Clerk", { exact: true })).toHaveCount(1);
+
+    const browserState = await context.storageState();
+    const rootStorage = Object.fromEntries(
+      (browserState.origins.find((origin) => origin.origin === harness.rootOrigin)?.localStorage || [])
+        .map((entry) => [entry.name, entry.value])
+    );
+    expect(rootStorage["kanban.tests:clerk-signed-in"]).toBeUndefined();
+    expect(rootStorage["kanban.tests:clerk-sign-out-calls"]).toBe("1");
+    expect(JSON.parse(rootStorage["kanban.tests:clerk-sign-out-session-ids"] || "[]")).toEqual([ROOT_SESSION.sessionId]);
   } finally {
     await harness.stop();
   }
@@ -496,6 +548,97 @@ test("multiple Workspaces render an explicit chooser at a narrow viewport", asyn
     expect((await context.cookies()).filter((cookie) => cookie.name === TENANT_SESSION_COOKIE_DEV)).toEqual([]);
     expectNoUnexpectedBrowserErrors(errors);
   } finally {
+    await harness.stop();
+  }
+});
+
+test("successful sign-out clears root state before revocation and completion navigation commit", async ({ page }) => {
+  const harness = await startWorkspaceAccessHarness();
+  const authRequests: string[] = [];
+  let releaseRevocation = (): void => undefined;
+  const revocationHold = new Promise<void>((resolve) => {
+    releaseRevocation = resolve;
+  });
+  let releaseCompletion = (): void => undefined;
+  const completionHold = new Promise<void>((resolve) => {
+    releaseCompletion = resolve;
+  });
+  page.on("request", (request) => {
+    if (request.url().startsWith(harness.authSignInUrl)) authRequests.push(request.url());
+  });
+  await page.addInitScript((rootOrigin) => {
+    if (window.location.origin !== rootOrigin) return;
+    if (window.localStorage.getItem("kanban.tests:clerk-seed-applied") === "1") return;
+    window.localStorage.setItem("kanban.tests:clerk-seed-applied", "1");
+    window.localStorage.setItem("kanban.tests:clerk-signed-in", "1");
+  }, harness.rootOrigin);
+
+  try {
+    await page.goto(`${harness.rootOrigin}/`);
+    await expect(page.getByRole("heading", { name: "Create a Workspace" })).toBeVisible();
+    await expect(page.getByText(ROOT_SESSION.displayName, { exact: true })).toBeVisible();
+    await page.route(`${harness.rootOrigin}/api/session`, async (route) => {
+      if (route.request().method() !== "DELETE") {
+        await route.continue();
+        return;
+      }
+      await revocationHold;
+      await route.continue();
+    });
+    await page.route(`${harness.rootOrigin}/auth/logout`, async (route) => {
+      await completionHold;
+      await route.continue();
+    });
+    const revocationRequestPromise = page.waitForRequest((request) => {
+      return request.method() === "DELETE" && request.url() === `${harness.rootOrigin}/api/session`;
+    });
+    const completionRequestPromise = page.waitForRequest((request) => {
+      return request.method() === "POST" && request.url() === `${harness.rootOrigin}/auth/logout`;
+    });
+    const pendingViewPromise = new Promise<{ state?: string; text: string; clerkMountPresent: boolean }>((resolve) => {
+      page.on("console", (message) => {
+        const prefix = "kanban.tests:signing-out:";
+        if (!message.text().startsWith(prefix)) return;
+        resolve(JSON.parse(message.text().slice(prefix.length)) as {
+          state?: string;
+          text: string;
+          clerkMountPresent: boolean;
+        });
+      });
+    });
+    await page.evaluate(() => {
+      const reportPendingView = (): void => {
+        if (document.body.dataset.state !== "signing-out") return;
+        console.info(`kanban.tests:signing-out:${JSON.stringify({
+          state: document.body.dataset.state,
+          text: document.body.innerText,
+          clerkMountPresent: Boolean(document.querySelector("#clerk-sign-in"))
+        })}`);
+        observer.disconnect();
+      };
+      const observer = new MutationObserver(reportPendingView);
+      observer.observe(document.body, { attributes: true, childList: true, subtree: true });
+      reportPendingView();
+    });
+
+    await page.getByRole("button", { name: "Sign out", exact: true }).click({ noWaitAfter: true });
+    await revocationRequestPromise;
+    const pendingView = await pendingViewPromise;
+    expect(pendingView).toMatchObject({ state: "signing-out", clerkMountPresent: false });
+    expect(pendingView.text).toContain("Finishing sign out…");
+    expect(pendingView.text).not.toContain(ROOT_SESSION.displayName);
+    expect(pendingView.text).not.toContain("Create a Workspace");
+    expect(authRequests).toEqual([]);
+
+    releaseRevocation();
+    await completionRequestPromise;
+    releaseCompletion();
+    await expect(page).toHaveURL(`${harness.rootOrigin}/`);
+    await expect(page.getByText("Signed out", { exact: true })).toBeVisible();
+    expect(authRequests).toEqual([]);
+  } finally {
+    releaseRevocation();
+    releaseCompletion();
     await harness.stop();
   }
 });
@@ -737,7 +880,7 @@ test("an already-absent target Clerk session completes without ending another br
   }
 });
 
-async function startWorkspaceAccessHarness(options: { candidateAliases?: boolean } = {}): Promise<WorkspaceAccessHarness> {
+async function startWorkspaceAccessHarness(options: { candidateAliases?: boolean; clerkUserId?: string } = {}): Promise<WorkspaceAccessHarness> {
   const temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-workspace-access-browser-"));
   const port = await availablePort();
   const primaryRootHost = `localhost:${port}`;
@@ -761,7 +904,11 @@ async function startWorkspaceAccessHarness(options: { candidateAliases?: boolean
   let revocationFailure = false;
   let clerkRevocationFailure = false;
   const revokedClerkSessionIds: string[] = [];
-  const clerkAuthGateway = createBrowserClerkGateway(revokedClerkSessionIds, () => clerkRevocationFailure);
+  const clerkAuthGateway = createBrowserClerkGateway(
+    revokedClerkSessionIds,
+    () => clerkRevocationFailure,
+    options.clerkUserId
+  );
   const applicationAccessStore: AccessStore = {
     ...accessStore,
     revokeSession(providerSubject, sessionId) {
@@ -832,7 +979,8 @@ async function startWorkspaceAccessHarness(options: { candidateAliases?: boolean
 
 function createBrowserClerkGateway(
   revokedSessionIds: string[],
-  shouldFailRevocation: () => boolean = () => false
+  shouldFailRevocation: () => boolean = () => false,
+  defaultUserId = ROOT_SESSION.providerSubject
 ): ClerkAuthGateway {
   return {
     middleware(rootDomains) {
@@ -840,7 +988,7 @@ function createBrowserClerkGateway(
       return (_req, _res, next) => next();
     },
     requestAuth(req) {
-      const clerkUserId = req.get("x-test-clerk-user") || ROOT_SESSION.providerSubject;
+      const clerkUserId = req.get("x-test-clerk-user") || defaultUserId;
       const clerkSessionId = req.get("x-test-clerk-session") || ROOT_SESSION.sessionId;
       return { authenticated: true, clerkUserId, clerkSessionId };
     },
@@ -900,7 +1048,13 @@ async function installClerkFrontendApiRoutes(page: Page): Promise<void> {
         isSignedIn: browserSessions.length > 0,
         session: browserSessions[0] || null,
         client: { signedInSessions: browserSessions },
-        load: async function (options) { window.__kanbanClerkTest.loadOptions = options; },
+        load: async function (options) {
+          window.__kanbanClerkTest.loadOptions = options;
+          if (window.localStorage.getItem("kanban.tests:clerk-load-error") === "1") {
+            window.localStorage.removeItem("kanban.tests:clerk-load-error");
+            throw new Error("Clerk internal provider load failure");
+          }
+        },
         buildSignInUrl: function (options) {
           window.__kanbanClerkTest.buildSignInCalls += 1;
           window.__kanbanClerkTest.buildSignInRedirects.push(options && options.redirectUrl || "");
@@ -949,7 +1103,10 @@ async function installClerkFrontendApiRoutes(page: Page): Promise<void> {
             input.type = "text";
             input.value = "";
           });
-          panel.append(brand, heading, form);
+          var providerBadge = document.createElement("small");
+          providerBadge.className = "clerk-test-provider-badge";
+          providerBadge.textContent = "Secured by Clerk";
+          panel.append(brand, heading, form, providerBadge);
           node.replaceChildren(panel);
         },
         mountSignUp: function (node) {

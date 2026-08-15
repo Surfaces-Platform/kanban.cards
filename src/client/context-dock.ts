@@ -271,7 +271,7 @@ const ADD_COLUMN_PREPARING_STATUS: StatusMessage = {
 const UI_CONTRACT_STATES = [
   "opening", "signed-out", "invalid-key", "workspace-route", "empty-workspace", "empty-project", "populated", "selected",
   "refreshing", "refresh-success", "refresh-failure", "saving", "validation-error", "stale",
-  "session-expired", "service-unavailable", "archived", "sign-out-success"
+  "session-expired", "service-unavailable", "archived", "signing-out", "sign-out-success"
 ] as const;
 
 const rootElement = document.querySelector<HTMLElement>("#app");
@@ -294,6 +294,7 @@ let clerkFallbackRedirectUrl = "";
 let logoutRetryPending = false;
 let logoutCompletion = false;
 let logoutCompletionSessionId = "";
+let signOutPending = false;
 let clerkRuntimeSignature = "";
 let clerkRuntimePromise: Promise<ClerkBrowser> | null = null;
 let clerkSignInMount: HTMLDivElement | null = null;
@@ -786,9 +787,6 @@ async function mountClerkSignIn(node: HTMLDivElement): Promise<void> {
       window.location.replace(signInUrl);
       return;
     }
-    if (window.location.pathname === "/sign-up") {
-      window.history.replaceState(null, "", `/sign-in${window.location.search}${window.location.hash}`);
-    }
     node.replaceChildren();
     clerk.mountSignIn(node, {
       routing: "hash",
@@ -1127,6 +1125,10 @@ function showConfirmation(title: string, message: string, uiState?: Confirmation
 
 function renderLoading(): string {
   return `<main class="centered-view"><strong>kanban.cards</strong><p class="quiet" role="status">Opening your workspace…</p></main>`;
+}
+
+function renderSignOutProgress(): string {
+  return `<main class="centered-view"><strong>kanban.cards</strong><p class="quiet" role="status">Finishing sign out…</p></main>`;
 }
 
 function renderSignIn(): string {
@@ -1598,6 +1600,7 @@ function renderWorkspace(): string {
 
 function currentUiState(): string {
   if (initialLoading) return "opening";
+  if (signOutPending) return "signing-out";
   if (!session) {
     if (authNotice?.kind === "signed-out") return "sign-out-success";
     if (authNotice?.kind === "invalid-key") return "invalid-key";
@@ -1666,9 +1669,11 @@ function render(): void {
   unmountClerkSignIn();
   root.innerHTML = initialLoading
     ? renderLoading()
-    : session
-      ? accessContext === "root" ? renderWorkspaceRoute() : renderWorkspace()
-      : renderSignIn();
+    : signOutPending
+      ? renderSignOutProgress()
+      : session
+        ? accessContext === "root" ? renderWorkspaceRoute() : renderWorkspace()
+        : renderSignIn();
   const clerkSignIn = root.querySelector<HTMLDivElement>("#clerk-sign-in");
   if (clerkSignIn) void mountClerkSignIn(clerkSignIn);
   restoreDescriptionSelection();
@@ -2073,9 +2078,6 @@ async function signIn(form: HTMLFormElement): Promise<void> {
 }
 
 async function signOut(): Promise<void> {
-  setWorkspaceMutationsDisabled(true, "sign-in");
-  projectStatus = { tone: "neutral", title: "Signing out", message: "Conflicting actions are unavailable while private workspace data is cleared." };
-  render();
   let notice: AuthNotice | null = accessContext === "local"
     ? {
         kind: "signed-out",
@@ -2084,7 +2086,11 @@ async function signOut(): Promise<void> {
       }
     : null;
   let completionSubmitted = false;
+  signOutPending = true;
+  render();
   try {
+    await flushCardAutosaves();
+    clearPrivateState(null);
     const response = objectValue(await api("/session", { method: "DELETE" }));
     const next = safeRootAccessUrl(response.logoutUrl, rootUrl, "/auth/logout") || "";
     const continuation = typeof response.logoutContinuation === "string"
@@ -2115,6 +2121,7 @@ async function signOut(): Promise<void> {
         };
   } finally {
     if (completionSubmitted) return;
+    signOutPending = false;
     clearPrivateState(notice);
     render();
     pendingFocusId = accessContext === "local" ? "owner-key" : "provider-sign-in";
@@ -3326,10 +3333,7 @@ async function handleAction(button: HTMLElement): Promise<void> {
   if (action === "discard-pending-post") return discardPendingPost(button.dataset.idempotencyScope || "");
   if (action === "archive-card") return archiveCard(button.dataset.cardId || "");
   if (action === "undo-archive") return undoArchive();
-  if (action === "sign-out") {
-    await flushCardAutosaves();
-    return signOut();
-  }
+  if (action === "sign-out") return signOut();
   if (action === "open-workspace") return openWorkspace(button.dataset.workspaceSlug || "");
 }
 
@@ -3510,6 +3514,9 @@ async function boot(): Promise<void> {
   render();
   try {
     await loadSession();
+    if (accessContext === "auth" && window.location.pathname === "/sign-up") {
+      window.history.replaceState(null, "", `/sign-in${window.location.search}${window.location.hash}`);
+    }
     const retryGlobalSignOut = logoutRetryPending;
     if (retryGlobalSignOut) {
       if (signOutState) clearSignOutState();
