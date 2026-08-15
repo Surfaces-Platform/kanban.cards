@@ -98,6 +98,8 @@ These qualities are outcomes, not inherited tokens. The new system must choose i
 
 When a signed-out person opens an application root, the client continues directly to the dedicated sign-in form while preserving the exact return destination. It does not insert a separate landing page or `Sign in` action. The sign-in page contains the form and nothing around it: no eyebrow, product explanation, nested app-owned panel, host description, provider description, or Workspace and Project architecture copy.
 
+After verified global sign-out, the application root instead keeps one bounded receipt until the person continues: the product name, the heading `Signed out`, and one `Continue` action. It does not label that receipt `Sign in`, render an email field, or explain private-data and session cleanup.
+
 The first step asks for `Email address` and offers `Continue`. The second asks for the verification code and offers `Continue`. Resend or change-email controls appear only when they are useful for that step. There is no separate `Create account`, `Sign up`, registration choice, or required profile field.
 
 Visible app-owned sign-in language uses the product name and the words people need to complete the task. It must not expose a provider name, generated provider-resource name, environment name, host role, routing detail, session-exchange detail, or internal access model. The product must never show generated labels such as a provider resource or school name.
