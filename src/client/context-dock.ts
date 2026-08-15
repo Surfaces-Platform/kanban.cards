@@ -13,6 +13,28 @@ interface ClerkBrowserSession {
   end(): Promise<unknown>;
 }
 
+type ClerkAppearanceVariable =
+  | "colorPrimary"
+  | "colorPrimaryForeground"
+  | "colorNeutral"
+  | "colorForeground"
+  | "colorMutedForeground"
+  | "colorBackground"
+  | "colorInput"
+  | "colorInputForeground"
+  | "colorBorder"
+  | "colorRing"
+  | "colorDanger"
+  | "borderRadius"
+  | "fontFamily";
+type ClerkAppearanceElement = "headerSubtitle" | "cardBox" | "formFieldInput" | "formButtonPrimary";
+
+interface ClerkAppearance {
+  theme?: "simple";
+  variables?: Partial<Record<ClerkAppearanceVariable, string>>;
+  elements?: Partial<Record<ClerkAppearanceElement, Record<string, string>>>;
+}
+
 interface ClerkBrowser {
   isSignedIn?: boolean;
   session?: ClerkBrowserSession | null;
@@ -30,7 +52,7 @@ interface ClerkBrowser {
         emailCode?: { title?: string; subtitle?: string; formTitle?: string; resendButton?: string };
       };
     };
-    appearance?: { elements?: { headerSubtitle?: { display?: string } } };
+    appearance?: ClerkAppearance;
   }): Promise<void>;
   buildSignInUrl?(options?: { redirectUrl?: string }): string;
   buildSignUpUrl?(options?: { redirectUrl?: string }): string;
@@ -299,6 +321,7 @@ let clerkRuntimeSignature = "";
 let clerkRuntimePromise: Promise<ClerkBrowser> | null = null;
 let clerkSignInMount: HTMLDivElement | null = null;
 let clerkSignInBlocked = false;
+let workspaceHandoffPending = false;
 let workspaceChoices: WorkspaceAccess[] = [];
 let accessFailure: AccessFailure | null = null;
 let projects: ProjectSummary[] = [];
@@ -751,7 +774,37 @@ async function loadClerkRuntime(): Promise<ClerkBrowser> {
           emailCode: { title: "Verification code", subtitle: "", formTitle: "Verification code", resendButton: "Resend code" }
         }
       },
-      appearance: { elements: { headerSubtitle: { display: "none" } } },
+      appearance: {
+        theme: "simple",
+        variables: {
+          colorPrimary: "var(--jk-color-focus)",
+          colorPrimaryForeground: "var(--jk-color-surface)",
+          colorNeutral: "var(--jk-color-text)",
+          colorForeground: "var(--jk-color-text)",
+          colorMutedForeground: "var(--jk-color-muted)",
+          colorBackground: "var(--jk-color-surface)",
+          colorInput: "var(--jk-color-surface)",
+          colorInputForeground: "var(--jk-color-text)",
+          colorBorder: "var(--jk-color-border)",
+          colorRing: "var(--jk-color-focus)",
+          colorDanger: "var(--jk-color-risk)",
+          borderRadius: "var(--jk-radius-control)",
+          fontFamily: "inherit"
+        },
+        elements: {
+          headerSubtitle: { display: "none" },
+          cardBox: {
+            borderColor: "var(--jk-color-border)",
+            borderRadius: "var(--jk-radius-panel)",
+            boxShadow: "none"
+          },
+          formFieldInput: { minHeight: "2.75rem" },
+          formButtonPrimary: {
+            minHeight: "2.75rem",
+            boxShadow: "none"
+          }
+        }
+      },
       ...(clerkSurfaceRole === "auth" ? { allowedRedirectOrigins: clerkAllowedRedirectOrigins } : {})
     });
     return clerk;
@@ -1081,7 +1134,8 @@ function renderButton(
 function renderStatus(message: StatusMessage | null, id: string): string {
   if (!message) return `<div id="${escapeHtml(id)}" class="status-slot" role="status" aria-live="polite" aria-atomic="true"></div>`;
   const marker = message.tone === "error" || message.tone === "warning" ? "!" : message.tone === "neutral" ? "…" : "✓";
-  return `<div id="${escapeHtml(id)}" class="jk-status" data-kind="${escapeHtml(message.tone)}" role="status" aria-live="polite" aria-atomic="true" tabindex="-1"><span class="jk-status-marker" aria-hidden="true">${marker}</span><div><strong>${escapeHtml(message.title)}</strong><p>${escapeHtml(message.message)}</p></div></div>`;
+  const detail = message.message ? `<p>${escapeHtml(message.message)}</p>` : "";
+  return `<div id="${escapeHtml(id)}" class="jk-status" data-kind="${escapeHtml(message.tone)}" role="status" aria-live="polite" aria-atomic="true" tabindex="-1"><span class="jk-status-marker" aria-hidden="true">${marker}</span><div><strong>${escapeHtml(message.title)}</strong>${detail}</div></div>`;
 }
 
 function clearConfirmation(): void {
@@ -1151,6 +1205,9 @@ function renderSignIn(): string {
       return `<main class="access-view clerk-access-view">${notice}${clerkSurface}</main>`;
     }
     if (accessContext === "root") {
+      if (authNotice?.kind === "signed-out") {
+        return `<main class="access-view"><section class="access-card jk-panel" aria-labelledby="access-title"><p class="product-name">kanban.cards</p><h1 id="access-title">Signed out</h1><div class="jk-actions"><button id="provider-sign-in" class="jk-button" data-priority="primary" type="button" data-action="provider-sign-in">Continue</button></div></section></main>`;
+      }
       if (clerkConfigured() && !clerkSignInBlocked && !retry && !authNotice) {
         return `<main class="centered-view"><strong>kanban.cards</strong><p class="quiet" role="status">Opening sign in…</p><div id="clerk-sign-in" hidden></div></main>`;
       }
@@ -1599,7 +1656,7 @@ function renderWorkspace(): string {
 }
 
 function currentUiState(): string {
-  if (initialLoading) return "opening";
+  if (initialLoading || workspaceHandoffPending) return "opening";
   if (signOutPending) return "signing-out";
   if (!session) {
     if (authNotice?.kind === "signed-out") return "sign-out-success";
@@ -1667,7 +1724,7 @@ function render(): void {
   }
   document.body.dataset.state = currentUiState();
   unmountClerkSignIn();
-  root.innerHTML = initialLoading
+  root.innerHTML = initialLoading || workspaceHandoffPending
     ? renderLoading()
     : signOutPending
       ? renderSignOutProgress()
@@ -1768,6 +1825,7 @@ function captureCardDraft(form: HTMLFormElement): CardDraft | null {
 
 function clearPrivateState(notice: AuthNotice | null): void {
   session = null;
+  workspaceHandoffPending = false;
   workspaceChoices = [];
   projects = [];
   activeProject = null;
@@ -1897,12 +1955,15 @@ async function openWorkspace(slug: string, selectedWorkspace?: WorkspaceAccess):
     const safeDestination = safeWorkspaceHandoffUrl(destination, workspace.url);
     if (!safeDestination || !token) throw new Error("The Workspace handoff was incomplete.");
     const parsed = new URL(safeDestination);
+    workspaceHandoffPending = true;
+    render();
     submitWorkspaceHandoff(parsed, token);
   } catch (error) {
+    workspaceHandoffPending = false;
     accessFailure = { title: "Workspace did not open", message: error instanceof Error ? error.message : "Try again." };
     throw error;
   } finally {
-    setWorkspaceMutationsDisabled(false);
+    if (!workspaceHandoffPending) setWorkspaceMutationsDisabled(false);
   }
 }
 
@@ -2082,7 +2143,7 @@ async function signOut(): Promise<void> {
     ? {
         kind: "signed-out",
         title: "Signed out",
-        message: "Private Project and Card data left the screen."
+        message: ""
       }
     : null;
   let completionSubmitted = false;
@@ -3260,7 +3321,7 @@ async function handleAction(button: HTMLElement): Promise<void> {
         clearPrivateState({
           kind: "signed-out",
           title: "Signed out",
-          message: "Private Project and Card data left the screen."
+          message: ""
         });
         render();
       } catch {
@@ -3537,7 +3598,7 @@ async function boot(): Promise<void> {
         clearPrivateState({
           kind: "signed-out",
           title: "Signed out",
-          message: "Private Project and Card data left the screen."
+          message: ""
         });
       } catch {
         clerkSignInBlocked = true;
