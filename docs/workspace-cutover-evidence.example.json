@@ -11,8 +11,6 @@
       "firewallEnabled": true,
       "hasDraft": false,
       "pendingChanges": 0,
-      "ipBlocks": [],
-      "attackModeEnabled": false,
       "rules": [
         {
           "id": "rule_replacebypass",
@@ -73,36 +71,24 @@
       "commitSha": "0000000000000000000000000000000000000000",
       "origin": "https://candidate.release.kanban.cards",
       "authOrigin": "https://auth.kanban.cards",
+      "tenantOrigin": "https://mike.candidate.release.kanban.cards",
       "routeDeploymentId": "dpl_exact-candidate-id",
       "routePinned": "not-run",
       "authRouteDeploymentId": "dpl_exact-candidate-id",
       "authRoutePinned": "not-run",
-      "clerkAuthorizedParties": "not-run",
-      "clerkDomainConfiguration": "not-run",
-      "tenantOrigin": "https://mike.candidate.release.kanban.cards",
       "tenantRouteDeploymentId": "dpl_exact-candidate-id",
       "tenantRoutePinned": "not-run",
+      "clerkAuthorizedParties": "not-run",
+      "clerkDomainConfiguration": "not-run",
       "firewallProof": {
-        "liveBypassRuleId": "written-by-live-hydrator",
-        "liveDenyRuleId": "written-by-live-hydrator",
-        "reviewedSourceCidr": "written-by-live-hydrator",
-        "configHash": "written-by-live-hydrator",
-        "admittedProbe": {
-          "configHash": "written-by-live-hydrator",
-          "authHost": { "status": 0, "mitigated": "not-run", "vercelId": "" },
-          "candidateRoot": { "status": 0, "mitigated": "not-run", "vercelId": "" },
-          "candidateTenant": { "status": 0, "mitigated": "not-run", "vercelId": "" }
-        },
         "externalDenyProbe": {
-          "runId": "replace-with-unique-pre-promotion-run-id",
-          "correlationMethod": "deterministic-live-policy",
-          "observedSourceCidr": "replace-with-external-exact-ip/32-or-128",
-          "configHash": "replace-with-live-config-hash",
-          "authHost": { "status": 0, "mitigated": "not-run", "vercelId": "", "observedAt": "1970-01-01T00:00:00.000Z" },
-          "candidateRoot": { "status": 0, "mitigated": "not-run", "vercelId": "", "observedAt": "1970-01-01T00:00:00.000Z" },
-          "candidateTenant": { "status": 0, "mitigated": "not-run", "vercelId": "", "observedAt": "1970-01-01T00:00:00.000Z" },
-          "canonicalRoot": { "status": 0, "ok": false, "store": "", "mitigated": "not-run", "vercelId": "", "observedAt": "1970-01-01T00:00:00.000Z" },
-          "canonicalTenant": { "status": 0, "mitigated": "not-run", "vercelError": "replace-with-x-vercel-error", "vercelId": "", "observedAt": "1970-01-01T00:00:00.000Z" }
+          "observedSourceCidr": "replace-with-independent-exact-ip/32-or-128",
+          "candidateRoot": {
+            "status": 0,
+            "mitigated": "not-run",
+            "vercelId": "",
+            "observedAt": "1970-01-01T00:00:00.000Z"
+          }
         }
       },
       "sameArtifactAuthHost": "not-run",
@@ -135,52 +121,9 @@
         "tenantProjectWrite": "not-run",
         "signOut": "not-run"
       },
-      "compatibilityProof": {
-        "required": true,
-        "read": "not-run",
-        "create": "not-run",
-        "comment": "not-run",
-        "move": "not-run",
-        "archive": "not-run",
-        "cardId": "",
-        "finalCardVersion": 0
-      },
-      "retirementProof": {
-        "required": false,
-        "public401": "not-run",
-        "legacy401": "not-run",
-        "sibling401": "not-run",
-        "oldDeploymentsClosed": "not-run"
-      },
-      "dataIntegrityProof": {
-        "realPostgres": true,
-        "beforeDigest": "",
-        "afterDigest": "",
-        "beforeResourceFingerprint": "",
-        "afterResourceFingerprint": "",
-        "finalCandidateDigest": "c7c7deeed5dbe9b1deeb604b9de3ebab9af2eaa18fc4849491eace8adc73b4ec",
-        "finalCandidateResourceFingerprint": "e6807ae1266d568360a4ea0c6e6746ef079e38573e74d96a1bc08e3294f344a0",
-        "historicalPreBindingException": {
-          "kind": "historical-pre-binding-receipt-unavailable",
-          "migration": "roadmap:v3-workspace-access-v1",
-          "runId": "replace-with-unique-pre-promotion-run-id",
-          "observedAt": "1970-01-01T00:00:00.000Z",
-          "candidateDeploymentId": "dpl_exact-candidate-id",
-          "candidateDeploymentUrl": "https://exact-immutable-candidate.vercel.app",
-          "candidateCommitSha": "0000000000000000000000000000000000000000",
-          "acceptedBy": "Mike",
-          "acceptedAt": "2026-08-22T02:19:24Z",
-          "acceptanceReceiptSha256": "c158f2351dc33b7a7b2d4862f08f3d2901fdd7acda58dc65914a9b8a66a62bb5",
-          "productionDumpSha256": "b79b370a4284872e255adf4f087fd85150f668fe89391ac17c06bdcf56db9097",
-          "rehearsalReceiptSha256": "1235ba3110d414f6a5755f05ae6c9954ca7322c5feadfbc1a1ce0b7e263588bd",
-          "finalCandidateReceiptSha256": "05db965e31144db3790729396e7feaf5af286d354286e522de293c6c80c791bc",
-          "finalCandidateDigest": "c7c7deeed5dbe9b1deeb604b9de3ebab9af2eaa18fc4849491eace8adc73b4ec",
-          "finalCandidateResourceFingerprint": "e6807ae1266d568360a4ea0c6e6746ef079e38573e74d96a1bc08e3294f344a0",
-          "limitation": "The restored PostgreSQL rehearsal and current candidate state are not historical production pre-binding proof.",
-          "rehearsalIsHistoricalProof": false,
-          "currentStateIsHistoricalProof": false
-        }
-      }
+      "compatibilityProof": { "required": true, "read": "not-run" },
+      "retirementProof": {},
+      "dataIntegrityProof": { "realPostgres": false, "afterDigest": "" }
     },
     "postPromotion": {
       "phase": "post-promotion",
@@ -191,31 +134,21 @@
       "commitSha": "0000000000000000000000000000000000000000",
       "origin": "https://kanban.cards",
       "authOrigin": "https://auth.kanban.cards",
+      "tenantOrigin": "https://mike.kanban.cards",
       "routeDeploymentId": "dpl_exact-candidate-id",
       "routePinned": "not-run",
       "authRouteDeploymentId": "dpl_exact-candidate-id",
       "authRoutePinned": "not-run",
-      "clerkAuthorizedParties": "not-run",
-      "clerkDomainConfiguration": "not-run",
-      "tenantOrigin": "https://mike.kanban.cards",
       "tenantRouteDeploymentId": "dpl_exact-candidate-id",
       "tenantRoutePinned": "not-run",
+      "clerkAuthorizedParties": "not-run",
+      "clerkDomainConfiguration": "not-run",
       "firewallProof": {
-        "removedRuleIds": ["written-from-pre-bypass-rule-id", "written-from-pre-deny-rule-id"],
-        "configHash": "written-by-live-hydrator-after-cleanup",
         "releaseRulesRemoved": "not-run",
-        "noDraft": "not-run",
         "authHostPublic": "not-run",
         "canonicalRootPublic": "not-run",
         "canonicalTenantPublic": "not-run",
-        "generatedDeploymentProtected": "not-run",
-        "externalPublicProbe": {
-          "observedSourceCidr": "replace-with-external-exact-ip/32-or-128",
-          "configHash": "replace-with-post-cleanup-live-config-hash",
-          "authHost": { "status": 0, "mitigated": "not-run", "vercelId": "", "observedAt": "1970-01-01T00:00:00.000Z" },
-          "canonicalRoot": { "status": 0, "ok": false, "store": "", "mitigated": "not-run", "vercelId": "", "observedAt": "1970-01-01T00:00:00.000Z" },
-          "canonicalTenant": { "status": 0, "mitigated": "not-run", "vercelId": "", "observedAt": "1970-01-01T00:00:00.000Z" }
-        }
+        "generatedDeploymentProtected": "not-run"
       },
       "sameArtifactAuthHost": "not-run",
       "sameArtifactCanonicalHost": "not-run",
@@ -233,9 +166,9 @@
         "tenantProjectWrite": "not-run",
         "signOut": "not-run"
       },
-      "compatibilityProof": {},
+      "compatibilityProof": { "required": true, "read": "not-run" },
       "retirementProof": {},
-      "dataIntegrityProof": {}
+      "dataIntegrityProof": { "realPostgres": false, "beforeDigest": "", "afterDigest": "" }
     }
   },
   "rollbackTarget": {
@@ -260,6 +193,8 @@
     "candidateDeploymentId": "written-by-release-controller",
     "candidateUrl": "written-by-release-controller",
     "candidateCommitSha": "written-by-release-controller",
+    "candidateApplicationRuntimeSha256": "written-by-release-controller",
+    "candidateRuntimeConfigurationSha256": "written-by-release-controller",
     "rollbackTarget": "written-by-release-controller",
     "authorizedAt": "written-by-release-controller",
     "promotedAt": "written-by-release-controller-after-success"

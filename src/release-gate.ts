@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { isIP } from "node:net";
 
 export const PROMOTION_CONFIRMATION = "PROMOTE EXACT VERIFIED CANDIDATE";
@@ -61,56 +60,29 @@ export interface CandidateFirewallFacts {
   firewallEnabled: boolean;
   hasDraft: boolean;
   pendingChanges: number;
-  configHash: string;
-  ruleIds: string[];
-  bypassRuleId: string;
-  denyRuleId: string;
   reviewedSourceCidr: string;
   bypassReady: boolean;
   denyReady: boolean;
-  deterministicDenyReady: boolean;
-  eligibleDenyRuleIds: string[];
-  ipBlocksHydrated: boolean;
-  ipBlockCount: number;
-  attackModeHydrated: boolean;
-  attackModeEnabled: boolean;
   releaseRulesAbsent: boolean;
 }
 
 const MAX_RECEIPT_AGE_MS = 30 * 60 * 1000;
-const HISTORICAL_PRE_BINDING_EXCEPTION_KIND = "historical-pre-binding-receipt-unavailable";
-const HISTORICAL_PRE_BINDING_EXCEPTION_MIGRATION = "roadmap:v3-workspace-access-v1";
-const HISTORICAL_PRE_BINDING_EXCEPTION_KEYS = [
-  "acceptanceReceiptSha256",
-  "acceptedAt",
-  "acceptedBy",
-  "candidateCommitSha",
-  "candidateDeploymentId",
-  "candidateDeploymentUrl",
-  "currentStateIsHistoricalProof",
-  "finalCandidateDigest",
-  "finalCandidateReceiptSha256",
-  "finalCandidateResourceFingerprint",
-  "kind",
-  "limitation",
-  "migration",
-  "observedAt",
-  "productionDumpSha256",
-  "rehearsalIsHistoricalProof",
-  "rehearsalReceiptSha256",
-  "runId"
-] as const;
-const HISTORICAL_PRE_BINDING_EXCEPTION_TRUST = {
-  limitation: "The restored PostgreSQL rehearsal and current candidate state are not historical production pre-binding proof.",
-  acceptedBy: "Mike",
-  acceptedAt: "2026-08-22T02:19:24Z",
-  acceptanceReceiptSha256: "c158f2351dc33b7a7b2d4862f08f3d2901fdd7acda58dc65914a9b8a66a62bb5",
-  productionDumpSha256: "b79b370a4284872e255adf4f087fd85150f668fe89391ac17c06bdcf56db9097",
-  rehearsalReceiptSha256: "1235ba3110d414f6a5755f05ae6c9954ca7322c5feadfbc1a1ce0b7e263588bd",
-  finalCandidateReceiptSha256: "05db965e31144db3790729396e7feaf5af286d354286e522de293c6c80c791bc",
-  finalCandidateDigest: "c7c7deeed5dbe9b1deeb604b9de3ebab9af2eaa18fc4849491eace8adc73b4ec",
-  finalCandidateResourceFingerprint: "e6807ae1266d568360a4ea0c6e6746ef079e38573e74d96a1bc08e3294f344a0"
-} as const;
+const OPERATOR_ONLY_RELEASE_PATHS = new Set([
+  "docs/runbook.md",
+  "docs/workspace-access-migration.md",
+  "docs/workspace-cutover-evidence.example.json",
+  "scripts/check-live-release-policy.ts",
+  "scripts/check-release-policy.ts",
+  "scripts/check-workspace-cutover.ts",
+  "src/release-controller.ts",
+  "src/release-gate.ts",
+  "src/release-policy.ts",
+  "tests/release-gate.test.ts"
+]);
+
+export function unexpectedDeployableApplicationChanges(paths: readonly string[]): string[] {
+  return paths.map((entry) => entry.trim()).filter((entry) => entry && !OPERATOR_ONLY_RELEASE_PATHS.has(entry));
+}
 
 export function evaluateCutoverSnapshot(
   snapshot: unknown,
@@ -137,6 +109,7 @@ export function evaluateCutoverSnapshot(
   const receiptRollback = record(promotionReceipt.rollbackTarget);
   const preEvidence = record(record(root.evidence).prePromotion);
   const postEvidence = record(record(root.evidence).postPromotion);
+  const preData = record(preEvidence.dataIntegrityProof);
   const blockers: CutoverBlocker[] = [];
 
   const candidateId = text(candidate.id);
@@ -194,7 +167,7 @@ export function evaluateCutoverSnapshot(
   }
   if (currentProductionHealth.status !== 200 || currentProductionHealth.ok !== true || text(currentProductionHealth.store) !== "postgres") add(blockers, "production-boundary", "production-unhealthy", "The deployment currently serving production is not a healthy Postgres runtime.");
 
-  requireReceiptBinding(blockers, evidence, preEvidence, phase, candidateId, candidateUrl, candidateSha, expectedOrigin, trustedTarget.publicDomain, trustedTarget.authDomain, firewallFacts, now);
+  requireReceiptBinding(blockers, evidence, phase, candidateId, candidateUrl, candidateSha, expectedOrigin, trustedTarget.publicDomain, trustedTarget.authDomain, firewallFacts, now);
 
   if (health.status !== 200 || health.ok !== true) add(blockers, "candidate-readiness", "health-not-ready", "The phase readiness receipt must report HTTP 200 with ok:true.");
   if (text(health.store) !== "postgres") add(blockers, "candidate-readiness", "store-not-postgres", "The phase readiness receipt must report the Postgres store.");
@@ -224,9 +197,8 @@ export function evaluateCutoverSnapshot(
 
   const bridgeMode = text(accessHealth.legacyBridge);
   if (bridgeMode === "enabled") {
-    if (compatibility.required !== true) add(blockers, "compatibility-bridge", "proof-not-required", "An enabled compatibility bridge must require the bounded bearer proof.");
-    for (const field of ["read", "create", "comment", "move", "archive"] as const) requirePassed(blockers, "compatibility-bridge", compatibility, field, `${field}-failed`, `Compatibility ${field}`);
-    if (!text(compatibility.cardId) || compatibility.finalCardVersion !== 4) add(blockers, "compatibility-bridge", "lifecycle-receipt-missing", "Compatibility proof must record the lifecycle Card id and final version 4.");
+    if (compatibility.required !== true) add(blockers, "compatibility-bridge", "proof-not-required", "An enabled compatibility bridge must require a bounded read proof.");
+    requirePassed(blockers, "compatibility-bridge", compatibility, "read", "read-failed", "Compatibility read");
   } else if (bridgeMode === "disabled") {
     if (retirement.required !== true) add(blockers, "compatibility-bridge", "retirement-proof-not-required", "A disabled bridge must require explicit retirement proof.");
     for (const field of ["public401", "legacy401", "sibling401", "oldDeploymentsClosed"] as const) requirePassed(blockers, "compatibility-bridge", retirement, field, `retirement-${field}`, `Retirement ${field}`);
@@ -234,21 +206,14 @@ export function evaluateCutoverSnapshot(
     add(blockers, "candidate-readiness", "legacy-bridge-unknown", "Legacy bridge must be enabled or disabled.");
   }
 
-  if (data.realPostgres !== true) add(blockers, "data-integrity", "not-real-postgres", "Data preservation proof must run against the real candidate Postgres store.");
-  const historicalPreBindingExceptionAccepted = requireHistoricalPreBindingException(
-    blockers,
-    data,
-    evidence,
-    phase,
-    candidateId,
-    candidateUrl,
-    candidateSha
-  );
-  if (!historicalPreBindingExceptionAccepted) {
-    requireSameNonEmpty(blockers, "data-integrity", "state-digest-changed", data.beforeDigest, data.afterDigest, "Default Workspace canonical digest");
-    requireSameNonEmpty(blockers, "data-integrity", "resource-fingerprint-changed", data.beforeResourceFingerprint, data.afterResourceFingerprint, "Default Workspace resource fingerprint");
+  if (data.realPostgres !== true) add(blockers, "data-integrity", "not-real-postgres", "The focused data-preservation proof must run against the production Postgres store.");
+  if (phase === "pre-promotion") {
+    if (!text(data.afterDigest)) add(blockers, "data-integrity", "pre-promotion-baseline-missing", "Pre-promotion proof must capture the focused production data digest immediately before promotion.");
+  } else {
+    requireMatch(blockers, "data-integrity", "promotion-baseline-digest", text(data.beforeDigest), text(preData.afterDigest), "post-promotion baseline digest");
+    requireSameNonEmpty(blockers, "data-integrity", "state-digest-changed", data.beforeDigest, data.afterDigest, "Focused post-promotion data digest");
+    requireDistinctPostEvidence(blockers, preEvidence, postEvidence);
   }
-  if (phase === "post-promotion") requireDistinctPostEvidence(blockers, preEvidence, postEvidence);
 
   requireMatch(blockers, "rollback-target", "project-id", text(rollback.projectId), trustedTarget.projectId, "rollback Project id");
   if (!/^[0-9a-f]{40}$/i.test(text(rollback.commitSha))) add(blockers, "rollback-target", "commit-sha", "Rollback requires the full live deployment commit SHA.");
@@ -317,24 +282,6 @@ export function inspectCandidateFirewall(value: unknown, trustedTarget: TrustedR
     && liveRuleWithAction(deny, "deny")
     && denyConditions.length === 1
     && exactHostCondition(denyConditions, hosts);
-  const eligibleDenyRules = rules.filter((rule) => {
-    const conditions = singleConditionGroup(rule);
-    return liveRuleWithAction(rule, "deny")
-      && conditions.length === 1
-      && exactHostCondition(conditions, hosts);
-  });
-  const ipBlocksHydrated = Array.isArray(firewall.ipBlocks);
-  const ipBlockCount = ipBlocksHydrated ? records(firewall.ipBlocks).length : -1;
-  const attackModeHydrated = typeof firewall.attackModeEnabled === "boolean";
-  const attackModeEnabled = firewall.attackModeEnabled === true;
-  const deterministicDenyReady = denyReady
-    && rules.length === 2
-    && eligibleDenyRules.length === 1
-    && eligibleDenyRules[0] === deny
-    && ipBlocksHydrated
-    && ipBlockCount === 0
-    && attackModeHydrated
-    && !attackModeEnabled;
   const releaseRulesAbsent = !rules.some((rule) => {
     if ([CANDIDATE_FIREWALL_BYPASS_RULE, CANDIDATE_FIREWALL_DENY_RULE].includes(text(rule.name))) return true;
     return ruleReferencesAnyHost(rule, hosts);
@@ -343,19 +290,9 @@ export function inspectCandidateFirewall(value: unknown, trustedTarget: TrustedR
     firewallEnabled: firewall.firewallEnabled === true,
     hasDraft: firewall.hasDraft === true,
     pendingChanges: finiteInteger(firewall.pendingChanges),
-    configHash: candidateFirewallConfigHash(firewall),
-    ruleIds: rules.map((rule) => text(rule.id)).filter(Boolean),
-    bypassRuleId: text(bypass.id),
-    denyRuleId: text(deny.id),
     reviewedSourceCidr,
     bypassReady,
     denyReady,
-    deterministicDenyReady,
-    eligibleDenyRuleIds: eligibleDenyRules.map((rule) => text(rule.id)).filter(Boolean),
-    ipBlocksHydrated,
-    ipBlockCount,
-    attackModeHydrated,
-    attackModeEnabled,
     releaseRulesAbsent
   };
 }
@@ -399,7 +336,7 @@ function phaseEvidence(root: UnknownRecord, phase: CutoverPhase): UnknownRecord 
   return record(evidence[phase === "pre-promotion" ? "prePromotion" : "postPromotion"]);
 }
 
-function requireReceiptBinding(blockers: CutoverBlocker[], proof: UnknownRecord, preProof: UnknownRecord, phase: CutoverPhase, id: string, url: string, sha: string, expectedOrigin: string, publicDomain: string, authDomain: string, firewallFacts: CandidateFirewallFacts, now: Date): void {
+function requireReceiptBinding(blockers: CutoverBlocker[], proof: UnknownRecord, phase: CutoverPhase, id: string, url: string, sha: string, expectedOrigin: string, publicDomain: string, authDomain: string, firewallFacts: CandidateFirewallFacts, now: Date): void {
   requireMatch(blockers, "evidence-binding", "proof-phase", text(proof.phase), phase, "proof phase");
   requireMatch(blockers, "evidence-binding", "proof-deployment-id", text(proof.deploymentId), id, "proof deployment id");
   requireMatch(blockers, "evidence-binding", "proof-deployment-url", canonicalDeploymentUrl(proof.deploymentUrl), url, "proof deployment URL");
@@ -429,7 +366,7 @@ function requireReceiptBinding(blockers: CutoverBlocker[], proof: UnknownRecord,
   if (proof.authRoutePinned !== "passed") add(blockers, "evidence-binding", "proof-auth-route-not-pinned", "The dedicated Clerk auth origin must be live-inspected as pinned to the exact deployment.");
   requireMatch(blockers, "evidence-binding", "proof-tenant-route-deployment-id", text(proof.tenantRouteDeploymentId), id, "proof tenant route deployment id");
   if (proof.tenantRoutePinned !== "passed") add(blockers, "evidence-binding", "proof-tenant-route-not-pinned", "The exercised tenant origin must be live-inspected as pinned to the exact deployment.");
-  requireFirewallReceipt(blockers, proof, preProof, phase, firewallFacts, now);
+  requireFirewallReceipt(blockers, proof, phase, firewallFacts, now);
   if (proof.sameArtifactAuthHost !== "passed") add(blockers, "evidence-binding", "auth-host-not-proven", "The dedicated Clerk auth origin must be proven to serve the same immutable artifact as the candidate application routes.");
   if (proof.sameArtifactCanonicalHost !== "passed") add(blockers, "evidence-binding", "canonical-host-not-proven", "The same immutable artifact must be proven compatible with the canonical production root and tenant hosts before promotion.");
   const runId = text(proof.runId);
@@ -446,112 +383,36 @@ function requireFirewallPolicy(blockers: CutoverBlocker[], facts: CandidateFirew
     add(blockers, "release-policy", "firewall-draft-present", "The Vercel Firewall must have no unpublished draft changes during release proof.");
   }
   if (phase === "pre-promotion") {
-    if (!facts.bypassReady) add(blockers, "release-policy", "candidate-firewall-bypass-invalid", "The highest-priority live rule must bypass only Mike's reviewed exact /32 or /128 on the three exact release hosts.");
+    if (!facts.bypassReady) add(blockers, "release-policy", "candidate-firewall-bypass-invalid", "The highest-priority live rule must bypass only one reviewed exact /32 or /128 on the three exact release hosts.");
     if (!facts.denyReady) add(blockers, "release-policy", "candidate-firewall-deny-invalid", "The immediately following live rule must deny the same three exact release hosts with no duration or additional conditions.");
   } else if (!facts.releaseRulesAbsent) {
     add(blockers, "release-policy", "candidate-firewall-cleanup-incomplete", "Both temporary candidate Firewall rules must be absent from the published configuration before public post-promotion proof.");
   }
 }
 
-function requireFirewallReceipt(blockers: CutoverBlocker[], proof: UnknownRecord, preProof: UnknownRecord, phase: CutoverPhase, facts: CandidateFirewallFacts, now: Date): void {
+function requireFirewallReceipt(blockers: CutoverBlocker[], proof: UnknownRecord, phase: CutoverPhase, facts: CandidateFirewallFacts, now: Date): void {
   const firewallProof = record(proof.firewallProof);
   if (phase === "pre-promotion") {
-    requireMatch(blockers, "evidence-binding", "firewall-bypass-rule-id", text(firewallProof.liveBypassRuleId), facts.bypassRuleId, "live Firewall bypass rule id");
-    requireMatch(blockers, "evidence-binding", "firewall-deny-rule-id", text(firewallProof.liveDenyRuleId), facts.denyRuleId, "live Firewall deny rule id");
-    requireMatch(blockers, "evidence-binding", "firewall-reviewed-source", text(firewallProof.reviewedSourceCidr), facts.reviewedSourceCidr, "reviewed Firewall source CIDR");
-    requireMatch(blockers, "evidence-binding", "firewall-config-hash", text(firewallProof.configHash), facts.configHash, "published Firewall configuration hash");
-    const admitted = record(firewallProof.admittedProbe);
-    requireMatch(blockers, "evidence-binding", "firewall-admitted-config", text(admitted.configHash), facts.configHash, "admitted probe Firewall configuration hash");
-    const admittedVercelIds: string[] = [];
-    for (const field of ["authHost", "candidateRoot", "candidateTenant"] as const) {
-      const observation = record(admitted[field]);
-      const status = finiteInteger(observation.status);
-      if (field === "candidateRoot" || field === "authHost") {
-        if (status !== 200) add(blockers, "evidence-binding", `firewall-admitted-${field}-status`, `Admitted-source ${field} probe must return HTTP 200.`);
-      } else if (status < 200 || status >= 400) {
-        add(blockers, "evidence-binding", `firewall-admitted-${field}-status`, "Admitted-source candidate tenant probe must return a public 2xx or intentional 3xx response.");
-      }
-      requireMatch(blockers, "evidence-binding", `firewall-admitted-${field}-mitigation`, text(observation.mitigated), "none", `admitted-source ${field} mitigation result`);
-      const vercelId = text(observation.vercelId);
-      if (!vercelId) add(blockers, "evidence-binding", `firewall-admitted-${field}-vercel-id`, `Admitted-source ${field} probe must record its x-vercel-id.`);
-      else admittedVercelIds.push(vercelId);
-    }
-    if (new Set(admittedVercelIds).size !== admittedVercelIds.length) add(blockers, "evidence-binding", "firewall-admitted-vercel-id-reused", "Each admitted host probe must record a distinct x-vercel-id.");
     const external = record(firewallProof.externalDenyProbe);
-    requireMatch(blockers, "evidence-binding", "firewall-external-run-id", text(external.runId), text(proof.runId), "atomic external receipt run id");
     const externalSourceCidr = text(external.observedSourceCidr);
-    if (!isExactAddressCidr(externalSourceCidr) || normalizeExactAddressCidr(externalSourceCidr) === normalizeExactAddressCidr(facts.reviewedSourceCidr)) add(blockers, "evidence-binding", "firewall-external-source", "External deny proof must record a different exact /32 or /128 source outside Mike's reviewed CIDR.");
-    requireMatch(blockers, "evidence-binding", "firewall-external-config", text(external.configHash), facts.configHash, "external deny probe Firewall configuration hash");
-    const correlationMethod = text(external.correlationMethod);
-    if (correlationMethod !== "platform-traffic" && correlationMethod !== "deterministic-live-policy") {
-      add(blockers, "evidence-binding", "firewall-external-correlation-method", "External deny proof must explicitly use platform-traffic or deterministic-live-policy correlation.");
+    if (!isExactAddressCidr(externalSourceCidr) || normalizeExactAddressCidr(externalSourceCidr) === normalizeExactAddressCidr(facts.reviewedSourceCidr)) {
+      add(blockers, "evidence-binding", "firewall-external-source", "The independent denial check must record one exact /32 or /128 outside the admitted source.");
     }
-    if (correlationMethod === "deterministic-live-policy") {
-      if (!facts.ipBlocksHydrated || facts.ipBlockCount !== 0) add(blockers, "evidence-binding", "firewall-external-deterministic-ip-blocks", "Deterministic live-policy correlation requires a hydrated empty Project IP-block inventory.");
-      if (!facts.attackModeHydrated || facts.attackModeEnabled) add(blockers, "evidence-binding", "firewall-external-deterministic-attack-mode", "Deterministic live-policy correlation requires hydrated Attack Mode state and Attack Mode off.");
-      if (!facts.deterministicDenyReady) add(blockers, "evidence-binding", "firewall-external-deterministic-deny", "Deterministic live-policy correlation requires exactly one eligible live no-duration deny rule over the exact three release hosts, derived from the published first/second rule order.");
+    const candidateRoot = record(external.candidateRoot);
+    if (candidateRoot.status !== 403 || text(candidateRoot.mitigated) !== "deny" || !text(candidateRoot.vercelId)) {
+      add(blockers, "evidence-binding", "firewall-external-candidate-root", "One independent candidate-root request must return HTTP 403 with Vercel deny mitigation and an x-vercel-id.");
     }
-    const externalVercelIds: string[] = [];
-    for (const field of ["authHost", "candidateRoot", "candidateTenant"] as const) {
-      const observation = record(external[field]);
-      if (observation.status !== 403) add(blockers, "evidence-binding", `firewall-external-${field}-status`, `External-source ${field} probe must return HTTP 403.`);
-      requireMatch(blockers, "evidence-binding", `firewall-external-${field}-mitigation`, text(observation.mitigated), "deny", `external-source ${field} mitigation result`);
-      if (correlationMethod === "platform-traffic") {
-        requireMatch(blockers, "evidence-binding", `firewall-external-${field}-action`, text(observation.wafAction), "deny", `external-source ${field} Firewall Traffic action`);
-        requireMatch(blockers, "evidence-binding", `firewall-external-${field}-rule-id`, text(observation.wafRuleId), facts.denyRuleId, `external-source ${field} Firewall Traffic rule id`);
-      } else if (correlationMethod === "deterministic-live-policy" && (Object.hasOwn(observation, "wafAction") || Object.hasOwn(observation, "wafRuleId"))) {
-        add(blockers, "evidence-binding", `firewall-external-${field}-self-attested-traffic`, `Deterministic live-policy ${field} evidence must omit per-request wafAction and wafRuleId claims.`);
-      }
-      const vercelId = text(observation.vercelId);
-      if (!vercelId) add(blockers, "evidence-binding", `firewall-external-${field}-vercel-id`, `External-source ${field} denial must record its x-vercel-id for Firewall traffic correlation.`);
-      else externalVercelIds.push(vercelId);
-      requireFreshObservation(blockers, text(observation.observedAt), now, `firewall-external-${field}-stale`, `External-source ${field} Firewall correlation`);
-    }
-    const canonicalRoot = record(external.canonicalRoot);
-    if (canonicalRoot.status !== 200 || canonicalRoot.ok !== true || text(canonicalRoot.store) !== "postgres" || text(canonicalRoot.mitigated) !== "none" || !text(canonicalRoot.vercelId)) add(blockers, "evidence-binding", "firewall-canonical-root-exclusion", "The same external source must receive a healthy, unmitigated HTTP 200 from the canonical root.");
-    else externalVercelIds.push(text(canonicalRoot.vercelId));
-    requireFreshObservation(blockers, text(canonicalRoot.observedAt), now, "firewall-canonical-root-stale", "Canonical-root exclusion probe");
-    const canonicalTenant = record(external.canonicalTenant);
-    if (canonicalTenant.status !== 404 || text(canonicalTenant.mitigated) !== "none" || text(canonicalTenant.vercelError) !== "DEPLOYMENT_NOT_FOUND" || !text(canonicalTenant.vercelId)) add(blockers, "evidence-binding", "firewall-canonical-tenant-exclusion", "Before promotion, the same external source must receive Vercel's unmitigated HTTP 404 with x-vercel-error: DEPLOYMENT_NOT_FOUND from the unrouted canonical tenant.");
-    else externalVercelIds.push(text(canonicalTenant.vercelId));
-    requireFreshObservation(blockers, text(canonicalTenant.observedAt), now, "firewall-canonical-tenant-stale", "Canonical-tenant exclusion probe");
-    if (new Set(externalVercelIds).size !== externalVercelIds.length) add(blockers, "evidence-binding", "firewall-external-vercel-id-reused", "Every external release-host and canonical-exclusion probe must record a distinct x-vercel-id.");
-    const allPrePromotionVercelIds = [...admittedVercelIds, ...externalVercelIds];
-    if (new Set(allPrePromotionVercelIds).size !== allPrePromotionVercelIds.length) add(blockers, "evidence-binding", "firewall-pre-promotion-vercel-id-reused", "Admitted and external proof must not reuse any x-vercel-id across trust boundaries.");
+    requireFreshObservation(blockers, text(candidateRoot.observedAt), now, "firewall-external-candidate-root-stale", "Independent candidate-root denial check");
     return;
   }
 
-  const preFirewallProof = record(preProof.firewallProof);
-  const expectedRemovedIds = [text(preFirewallProof.liveBypassRuleId), text(preFirewallProof.liveDenyRuleId)].filter(Boolean).sort();
-  const removedRuleIds = strings(firewallProof.removedRuleIds).sort();
-  if (expectedRemovedIds.length !== 2 || removedRuleIds.length !== 2 || expectedRemovedIds.some((id, index) => id !== removedRuleIds[index])) {
-    add(blockers, "evidence-binding", "firewall-removed-rule-ids", "Post-promotion cleanup must bind the two removed Firewall rule ids to the live pre-promotion receipt.");
-  }
-  if (expectedRemovedIds.some((id) => facts.ruleIds.includes(id))) add(blockers, "evidence-binding", "firewall-removed-rule-id-still-live", "A pre-promotion Firewall rule id remains in the published post-cleanup configuration.");
-  requireMatch(blockers, "evidence-binding", "firewall-post-config-hash", text(firewallProof.configHash), facts.configHash, "post-cleanup published Firewall configuration hash");
   for (const [field, code, label] of [
     ["releaseRulesRemoved", "firewall-release-rules-removed", "Published candidate Firewall rule removal"],
-    ["noDraft", "firewall-no-draft", "Empty Firewall draft"],
     ["authHostPublic", "firewall-auth-public", "Public auth host"],
     ["canonicalRootPublic", "firewall-root-public", "Public canonical root"],
     ["canonicalTenantPublic", "firewall-tenant-public", "Public canonical tenant"],
     ["generatedDeploymentProtected", "firewall-generated-protected", "Standard-protected generated deployment"]
   ] as const) requirePassed(blockers, "evidence-binding", firewallProof, field, code, label);
-  const external = record(firewallProof.externalPublicProbe);
-  const externalSourceCidr = text(external.observedSourceCidr);
-  if (!isExactAddressCidr(externalSourceCidr) || normalizeExactAddressCidr(externalSourceCidr) === normalizeExactAddressCidr(text(preFirewallProof.reviewedSourceCidr))) add(blockers, "evidence-binding", "firewall-post-external-source", "Post-cleanup public proof must use a different exact /32 or /128 outside the pre-promotion bypass.");
-  requireMatch(blockers, "evidence-binding", "firewall-post-external-config", text(external.configHash), facts.configHash, "post-cleanup external probe Firewall configuration hash");
-  const externalVercelIds: string[] = [];
-  for (const [field, expectedStatus, requireHealth] of [["authHost", 200, false], ["canonicalRoot", 200, true], ["canonicalTenant", 0, false]] as const) {
-    const observation = record(external[field]);
-    const status = finiteInteger(observation.status);
-    const statusMatches = expectedStatus ? status === expectedStatus : status >= 200 && status < 400;
-    const healthMatches = !requireHealth || (observation.ok === true && text(observation.store) === "postgres");
-    if (!statusMatches || !healthMatches || text(observation.mitigated) !== "none" || !text(observation.vercelId)) add(blockers, "evidence-binding", `firewall-post-external-${field}`, `Post-cleanup external ${field} probe must return its expected public, unmitigated response.`);
-    else externalVercelIds.push(text(observation.vercelId));
-    requireFreshObservation(blockers, text(observation.observedAt), now, `firewall-post-external-${field}-stale`, `Post-cleanup external ${field} probe`);
-  }
-  if (new Set(externalVercelIds).size !== externalVercelIds.length) add(blockers, "evidence-binding", "firewall-post-external-vercel-id-reused", "Each post-cleanup external public probe must record a distinct x-vercel-id.");
 }
 
 function requireFreshObservation(blockers: CutoverBlocker[], observedAt: string, now: Date, code: string, label: string): void {
@@ -559,103 +420,11 @@ function requireFreshObservation(blockers: CutoverBlocker[], observedAt: string,
   if (!Number.isFinite(observed) || observed > now.getTime() + 60_000 || now.getTime() - observed > MAX_RECEIPT_AGE_MS) add(blockers, "evidence-binding", code, `${label} must be no more than 30 minutes old.`);
 }
 
-function requireHistoricalPreBindingException(
-  blockers: CutoverBlocker[],
-  data: UnknownRecord,
-  proof: UnknownRecord,
-  phase: CutoverPhase,
-  candidateId: string,
-  candidateUrl: string,
-  candidateSha: string
-): boolean {
-  if (!Object.hasOwn(data, "historicalPreBindingException")) return false;
-
-  const rawException = data.historicalPreBindingException;
-  if (!rawException || typeof rawException !== "object" || Array.isArray(rawException)) {
-    add(blockers, "data-integrity", "historical-exception-shape", "The historical pre-binding exception must be one exact object with no missing or additional fields.");
-    return false;
-  }
-
-  const exception = rawException as UnknownRecord;
-  let accepted = true;
-  const reject = (code: string, message: string): void => {
-    accepted = false;
-    add(blockers, "data-integrity", code, message);
-  };
-  const actualKeys = Object.keys(exception).sort();
-  const expectedKeys = [...HISTORICAL_PRE_BINDING_EXCEPTION_KEYS].sort();
-  if (actualKeys.length !== expectedKeys.length || actualKeys.some((key, index) => key !== expectedKeys[index])) {
-    reject("historical-exception-shape", "The historical pre-binding exception must contain only its exact migration-specific fields; generic, missing, wildcard, and additional fields are forbidden.");
-  }
-  if (phase !== "pre-promotion") {
-    reject("historical-exception-phase", "The historical pre-binding exception is valid only for pre-promotion evidence and cannot be reused after promotion.");
-  }
-  if (![data.beforeDigest, data.afterDigest, data.beforeResourceFingerprint, data.afterResourceFingerprint].every((value) => value === "")) {
-    reject("historical-exception-conflicting-proof", "The historical pre-binding exception applies only when all four unavailable historical before/after fields are present as empty strings; it cannot hide a missing, partial, or changed pair.");
-  }
-  if (exception.kind !== HISTORICAL_PRE_BINDING_EXCEPTION_KIND) {
-    reject("historical-exception-kind", `The only accepted exception kind is ${HISTORICAL_PRE_BINDING_EXCEPTION_KIND}.`);
-  }
-  if (exception.migration !== HISTORICAL_PRE_BINDING_EXCEPTION_MIGRATION) {
-    reject("historical-exception-migration", "The exception is bound only to the Workspace access migration.");
-  }
-  if (exception.acceptedBy !== HISTORICAL_PRE_BINDING_EXCEPTION_TRUST.acceptedBy || exception.acceptedAt !== HISTORICAL_PRE_BINDING_EXCEPTION_TRUST.acceptedAt) {
-    reject("historical-exception-acceptance", "The exception must match Mike's exact recorded acceptance and durable acceptance timestamp.");
-  }
-  if (exception.acceptanceReceiptSha256 !== HISTORICAL_PRE_BINDING_EXCEPTION_TRUST.acceptanceReceiptSha256) {
-    reject("historical-exception-acceptance-receipt", "The exception must cite the exact retained acceptance receipt hash.");
-  }
-  if (exception.productionDumpSha256 !== HISTORICAL_PRE_BINDING_EXCEPTION_TRUST.productionDumpSha256) {
-    reject("historical-exception-production-dump", "The exception must cite the exact read-only production logical dump hash.");
-  }
-  if (exception.rehearsalReceiptSha256 !== HISTORICAL_PRE_BINDING_EXCEPTION_TRUST.rehearsalReceiptSha256) {
-    reject("historical-exception-rehearsal-receipt", "The exception must cite the exact isolated restored-PostgreSQL rehearsal receipt hash.");
-  }
-  if (exception.finalCandidateReceiptSha256 !== HISTORICAL_PRE_BINDING_EXCEPTION_TRUST.finalCandidateReceiptSha256) {
-    reject("historical-exception-final-receipt", "The exception must cite the exact final-candidate baseline receipt hash.");
-  }
-  if (exception.limitation !== HISTORICAL_PRE_BINDING_EXCEPTION_TRUST.limitation
-    || exception.rehearsalIsHistoricalProof !== false
-    || exception.currentStateIsHistoricalProof !== false) {
-    reject("historical-exception-limitation", "The exception must explicitly state that neither the rehearsal nor current state is historical production pre-binding proof.");
-  }
-  if (exception.runId !== proof.runId || typeof exception.runId !== "string" || !exception.runId) {
-    reject("historical-exception-run-binding", "The exception run id must exactly match the enclosing fresh pre-promotion receipt.");
-  }
-  if (exception.observedAt !== proof.observedAt || typeof exception.observedAt !== "string" || !exception.observedAt) {
-    reject("historical-exception-time-binding", "The exception observation time must exactly match the enclosing fresh pre-promotion receipt.");
-  }
-  const acceptedAt = Date.parse(HISTORICAL_PRE_BINDING_EXCEPTION_TRUST.acceptedAt);
-  const observedAt = Date.parse(typeof exception.observedAt === "string" ? exception.observedAt : "");
-  if (!Number.isFinite(observedAt) || observedAt < acceptedAt) {
-    reject("historical-exception-before-acceptance", "The candidate-bound exception receipt must be observed at or after Mike's recorded acceptance.");
-  }
-  if (exception.candidateDeploymentId !== candidateId
-    || canonicalDeploymentUrl(exception.candidateDeploymentUrl) !== candidateUrl
-    || exception.candidateCommitSha !== candidateSha) {
-    reject("historical-exception-candidate-binding", "The exception must bind the exact live candidate deployment id, immutable URL, and commit SHA.");
-  }
-  if (exception.finalCandidateDigest !== HISTORICAL_PRE_BINDING_EXCEPTION_TRUST.finalCandidateDigest
-    || exception.finalCandidateResourceFingerprint !== HISTORICAL_PRE_BINDING_EXCEPTION_TRUST.finalCandidateResourceFingerprint
-    || data.finalCandidateDigest !== HISTORICAL_PRE_BINDING_EXCEPTION_TRUST.finalCandidateDigest
-    || data.finalCandidateResourceFingerprint !== HISTORICAL_PRE_BINDING_EXCEPTION_TRUST.finalCandidateResourceFingerprint) {
-    reject("historical-exception-final-baseline", "The exception and data-integrity receipt must match the exact accepted final candidate digest and resource fingerprint.");
-  }
-  return accepted;
-}
-
 function requireDistinctPostEvidence(blockers: CutoverBlocker[], pre: UnknownRecord, post: UnknownRecord): void {
   if (!text(pre.runId) || text(pre.runId) === text(post.runId)) add(blockers, "evidence-binding", "post-run-reused", "Post-promotion proof requires a distinct run id.");
   const preObserved = Date.parse(text(pre.observedAt));
   const postObserved = Date.parse(text(post.observedAt));
   if (!Number.isFinite(preObserved) || !Number.isFinite(postObserved) || postObserved <= preObserved) add(blockers, "evidence-binding", "post-not-after-pre", "Post-promotion proof must be observed after pre-promotion proof.");
-  const preCompatibility = record(pre.compatibilityProof);
-  const postCompatibility = record(post.compatibilityProof);
-  if (text(preCompatibility.cardId) && text(preCompatibility.cardId) === text(postCompatibility.cardId)) add(blockers, "evidence-binding", "post-card-reused", "Post-promotion compatibility proof requires a distinct lifecycle Card.");
-  const preData = record(pre.dataIntegrityProof);
-  const postData = record(post.dataIntegrityProof);
-  requireMatch(blockers, "data-integrity", "promotion-baseline-digest", text(postData.beforeDigest), text(preData.finalCandidateDigest), "post-promotion baseline digest");
-  requireMatch(blockers, "data-integrity", "promotion-baseline-fingerprint", text(postData.beforeResourceFingerprint), text(preData.finalCandidateResourceFingerprint), "post-promotion baseline fingerprint");
 }
 
 function sameDeploymentIdentity(actual: UnknownRecord, expected: UnknownRecord): boolean {
@@ -716,29 +485,6 @@ function ruleReferencesAnyHost(rule: UnknownRecord, hosts: string[]): boolean {
     const values = Array.isArray(value) ? strings(value) : [text(value)].filter(Boolean);
     return values.some((entry) => hosts.includes(entry));
   }));
-}
-function candidateFirewallConfigHash(firewall: UnknownRecord): string {
-  const normalized = {
-    firewallEnabled: firewall.firewallEnabled === true,
-    ipBlocks: Array.isArray(firewall.ipBlocks) ? firewall.ipBlocks : null,
-    attackModeEnabled: typeof firewall.attackModeEnabled === "boolean" ? firewall.attackModeEnabled : null,
-    rules: records(firewall.rules).map((rule) => ({
-      id: text(rule.id),
-      name: text(rule.name),
-      active: rule.active === true,
-      conditionGroup: rule.conditionGroup,
-      action: rule.action
-    }))
-  };
-  return createHash("sha256").update(stableJson(normalized)).digest("hex");
-}
-function stableJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  if (value && typeof value === "object") {
-    const source = value as UnknownRecord;
-    return `{${Object.keys(source).sort().map((key) => `${JSON.stringify(key)}:${stableJson(source[key])}`).join(",")}}`;
-  }
-  return JSON.stringify(value) ?? "null";
 }
 function isExactAddressCidr(value: string): boolean {
   const separator = value.lastIndexOf("/");

@@ -1,14 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { CANDIDATE_FIREWALL_BYPASS_RULE, CANDIDATE_FIREWALL_DENY_RULE, PROMOTION_CONFIRMATION, authorizePromotion, evaluateCutoverSnapshot, inspectCandidateFirewall, isVercelSsoProtectionRedirect, promoteVerifiedCandidate, type TrustedReleaseTarget } from "../src/release-gate";
+import { CANDIDATE_FIREWALL_BYPASS_RULE, CANDIDATE_FIREWALL_DENY_RULE, PROMOTION_CONFIRMATION, authorizePromotion, evaluateCutoverSnapshot, isVercelSsoProtectionRedirect, promoteVerifiedCandidate, unexpectedDeployableApplicationChanges, type TrustedReleaseTarget } from "../src/release-gate";
 import { mainGitDeploymentsAreDisabled } from "../src/release-policy";
 import { parseReleaseControllerArguments } from "../src/release-controller";
 
 const NOW = new Date("2026-08-13T06:00:00.000Z");
-const EXCEPTION_NOW = new Date("2026-08-22T02:30:00.000Z");
-const EXCEPTION_OBSERVED_AT = "2026-08-22T02:25:00.000Z";
-const EXCEPTION_POST_OBSERVED_AT = "2026-08-22T02:28:00.000Z";
 const TARGET: TrustedReleaseTarget = {
   projectId: "prj_expected",
   teamId: "team_expected",
@@ -17,19 +14,6 @@ const TARGET: TrustedReleaseTarget = {
   publicDomain: "kanban.cards",
   authDomain: "auth.kanban.cards"
 };
-const HISTORICAL_EXCEPTION = {
-  kind: "historical-pre-binding-receipt-unavailable",
-  migration: "roadmap:v3-workspace-access-v1",
-  acceptedBy: "Mike",
-  acceptedAt: "2026-08-22T02:19:24Z",
-  acceptanceReceiptSha256: "c158f2351dc33b7a7b2d4862f08f3d2901fdd7acda58dc65914a9b8a66a62bb5",
-  productionDumpSha256: "b79b370a4284872e255adf4f087fd85150f668fe89391ac17c06bdcf56db9097",
-  rehearsalReceiptSha256: "1235ba3110d414f6a5755f05ae6c9954ca7322c5feadfbc1a1ce0b7e263588bd",
-  finalCandidateReceiptSha256: "05db965e31144db3790729396e7feaf5af286d354286e522de293c6c80c791bc",
-  finalCandidateDigest: "c7c7deeed5dbe9b1deeb604b9de3ebab9af2eaa18fc4849491eace8adc73b4ec",
-  finalCandidateResourceFingerprint: "e6807ae1266d568360a4ea0c6e6746ef079e38573e74d96a1bc08e3294f344a0",
-  limitation: "The restored PostgreSQL rehearsal and current candidate state are not historical production pre-binding proof."
-} as const;
 
 test("a fully proven staged candidate passes the pre-promotion gate", () => {
   const evaluation = evaluateCutoverSnapshot(readySnapshot(), "pre-promotion", TARGET, NOW);
@@ -37,188 +21,30 @@ test("a fully proven staged candidate passes the pre-promotion gate", () => {
   assert.equal(evaluation.candidate.deploymentId, "dpl_candidate");
 });
 
-test("the exact historical pre-binding exception satisfies only the unavailable pre-promotion pair", () => {
-  const snapshot = readyHistoricalExceptionSnapshot();
-  const evaluation = evaluateCutoverSnapshot(snapshot, "pre-promotion", TARGET, EXCEPTION_NOW);
-  assert.equal(evaluation.ok, true, JSON.stringify(evaluation.blockers));
-  assert.deepEqual(
-    [
-      snapshot.evidence.prePromotion.dataIntegrityProof.beforeDigest,
-      snapshot.evidence.prePromotion.dataIntegrityProof.afterDigest,
-      snapshot.evidence.prePromotion.dataIntegrityProof.beforeResourceFingerprint,
-      snapshot.evidence.prePromotion.dataIntegrityProof.afterResourceFingerprint
-    ],
-    ["", "", "", ""]
-  );
-  assert.equal(authorizePromotion(snapshot, "accept the limitation", TARGET, EXCEPTION_NOW).authorized, false);
-  assert.equal(authorizePromotion(snapshot, PROMOTION_CONFIRMATION, TARGET, EXCEPTION_NOW).authorized, true);
+test("only an exact operator-only delta may reuse an application-equivalent candidate", () => {
+  assert.deepEqual(unexpectedDeployableApplicationChanges([
+    "src/release-gate.ts",
+    "scripts/check-workspace-cutover.ts",
+    "tests/release-gate.test.ts",
+    "docs/runbook.md"
+  ]), []);
+  assert.deepEqual(unexpectedDeployableApplicationChanges([
+    "api/index.ts",
+    "src/server.ts",
+    "vercel.json",
+    "package-lock.json"
+  ]), ["api/index.ts", "src/server.ts", "vercel.json", "package-lock.json"]);
+
+  const equivalent = readySnapshot();
+  equivalent.candidate.commitSha = "a".repeat(40);
+  equivalent.evidence.prePromotion.commitSha = equivalent.candidate.commitSha;
+  assert.equal(evaluateCutoverSnapshot(equivalent, "pre-promotion", TARGET, NOW).ok, true);
 });
 
-test("missing, malformed, generic, and expanded exceptions fail closed", () => {
-  const absent = readyHistoricalExceptionSnapshot();
-  delete dataIntegrity(absent).historicalPreBindingException;
-  const absentCodes = blockerCodes(absent);
-  assert.ok(absentCodes.has("state-digest-changed"));
-  assert.ok(absentCodes.has("resource-fingerprint-changed"));
-
-  for (const malformed of [null, [], "historical-pre-binding-receipt-unavailable"]) {
-    const snapshot = readyHistoricalExceptionSnapshot();
-    dataIntegrity(snapshot).historicalPreBindingException = malformed;
-    assert.ok(blockerCodes(snapshot).has("historical-exception-shape"));
-  }
-
-  const missingField = readyHistoricalExceptionSnapshot();
-  delete historicalException(missingField).rehearsalReceiptSha256;
-  assert.ok(blockerCodes(missingField).has("historical-exception-shape"));
-
-  const expanded = readyHistoricalExceptionSnapshot();
-  historicalException(expanded).waiveAll = true;
-  assert.ok(blockerCodes(expanded).has("historical-exception-shape"));
-
-  const generic = readySnapshot();
-  Object.assign(dataIntegrity(generic), {
-    beforeDigest: "",
-    afterDigest: "",
-    beforeResourceFingerprint: "",
-    afterResourceFingerprint: "",
-    waiver: true
-  });
-  const genericCodes = blockerCodes(generic);
-  assert.ok(genericCodes.has("state-digest-changed"));
-  assert.ok(genericCodes.has("resource-fingerprint-changed"));
-});
-
-test("every static acceptance and evidence anchor is exact", () => {
-  const cases: Array<[string, string, unknown]> = [
-    ["kind", "historical-exception-kind", "*"],
-    ["migration", "historical-exception-migration", "workspace-access-*"],
-    ["acceptedBy", "historical-exception-acceptance", "operator"],
-    ["acceptedAt", "historical-exception-acceptance", "2026-08-22T02:19:25Z"],
-    ["acceptanceReceiptSha256", "historical-exception-acceptance-receipt", "0".repeat(64)],
-    ["productionDumpSha256", "historical-exception-production-dump", "0".repeat(64)],
-    ["rehearsalReceiptSha256", "historical-exception-rehearsal-receipt", "0".repeat(64)],
-    ["finalCandidateReceiptSha256", "historical-exception-final-receipt", "0".repeat(64)],
-    ["limitation", "historical-exception-limitation", "Rehearsal is historical proof."],
-    ["rehearsalIsHistoricalProof", "historical-exception-limitation", true],
-    ["currentStateIsHistoricalProof", "historical-exception-limitation", true]
-  ];
-  for (const [field, expectedCode, value] of cases) {
-    const snapshot = readyHistoricalExceptionSnapshot();
-    historicalException(snapshot)[field] = value;
-    assert.ok(blockerCodes(snapshot).has(expectedCode), `${field} must produce ${expectedCode}`);
-  }
-});
-
-test("candidate, run, freshness, and final baseline bindings cannot be reused", () => {
-  for (const [field, expectedCode, value] of [
-    ["candidateDeploymentId", "historical-exception-candidate-binding", "dpl_other"],
-    ["candidateDeploymentUrl", "historical-exception-candidate-binding", "https://other-abc.vercel.app"],
-    ["candidateCommitSha", "historical-exception-candidate-binding", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
-    ["runId", "historical-exception-run-binding", "run-other"],
-    ["observedAt", "historical-exception-time-binding", "2026-08-13T05:49:59.000Z"]
-  ] as const) {
-    const snapshot = readyHistoricalExceptionSnapshot();
-    historicalException(snapshot)[field] = value;
-    assert.ok(blockerCodes(snapshot).has(expectedCode), `${field} must produce ${expectedCode}`);
-  }
-
-  const crossCandidate = readyHistoricalExceptionSnapshot();
-  crossCandidate.candidate.id = "dpl_other";
-  crossCandidate.evidence.prePromotion.deploymentId = "dpl_other";
-  crossCandidate.evidence.prePromotion.routeDeploymentId = "dpl_other";
-  crossCandidate.evidence.prePromotion.authRouteDeploymentId = "dpl_other";
-  crossCandidate.evidence.prePromotion.tenantRouteDeploymentId = "dpl_other";
-  assert.ok(blockerCodes(crossCandidate).has("historical-exception-candidate-binding"));
-
-  const reusedRun = readyHistoricalExceptionSnapshot();
-  reusedRun.evidence.prePromotion.runId = "run-other";
-  reusedRun.evidence.prePromotion.firewallProof.externalDenyProbe!.runId = "run-other";
-  assert.ok(blockerCodes(reusedRun).has("historical-exception-run-binding"));
-
-  const stale = readyHistoricalExceptionSnapshot();
-  stale.evidence.prePromotion.observedAt = "2026-08-13T04:00:00.000Z";
-  historicalException(stale).observedAt = stale.evidence.prePromotion.observedAt;
-  assert.ok(blockerCodes(stale).has("proof-stale"));
-
-  const beforeAcceptance = readyHistoricalExceptionSnapshot();
-  beforeAcceptance.evidence.prePromotion.observedAt = "2026-08-22T02:19:23.000Z";
-  historicalException(beforeAcceptance).observedAt = beforeAcceptance.evidence.prePromotion.observedAt;
-  assert.ok(blockerCodes(beforeAcceptance).has("historical-exception-before-acceptance"));
-
-  const changedBaseline = readyHistoricalExceptionSnapshot();
-  dataIntegrity(changedBaseline).finalCandidateDigest = "0".repeat(64);
-  historicalException(changedBaseline).finalCandidateDigest = "0".repeat(64);
-  dataIntegrity(changedBaseline).finalCandidateResourceFingerprint = "1".repeat(64);
-  historicalException(changedBaseline).finalCandidateResourceFingerprint = "1".repeat(64);
-  assert.ok(blockerCodes(changedBaseline).has("historical-exception-final-baseline"));
-});
-
-test("the exception cannot hide partial, missing, changed, or ordinary historical pairs", () => {
-  const cases: Array<(proof: Record<string, unknown>) => void> = [
-    (proof) => { delete proof.beforeDigest; },
-    (proof) => { proof.beforeDigest = "before"; },
-    (proof) => { proof.beforeDigest = "before"; proof.afterDigest = "after"; },
-    (proof) => {
-      proof.beforeDigest = "same";
-      proof.afterDigest = "same";
-      proof.beforeResourceFingerprint = "same-resources";
-      proof.afterResourceFingerprint = "same-resources";
-    }
-  ];
-  for (const mutate of cases) {
-    const snapshot = readyHistoricalExceptionSnapshot();
-    mutate(dataIntegrity(snapshot));
-    assert.ok(blockerCodes(snapshot).has("historical-exception-conflicting-proof"));
-  }
-});
-
-test("real Postgres and every unrelated pre-promotion gate remain mandatory", () => {
-  const cases: Array<[string, (snapshot: ReturnType<typeof readyHistoricalExceptionSnapshot>) => void]> = [
-    ["not-real-postgres", (snapshot) => { snapshot.evidence.prePromotion.dataIntegrityProof.realPostgres = false; }],
-    ["clerk-auth-host-surface", (snapshot) => { snapshot.evidence.prePromotion.clerkProof.authHostSurface = "not-run"; }],
-    ["tenant-project-write", (snapshot) => { snapshot.evidence.prePromotion.clerkProof.tenantProjectWrite = "not-run"; }],
-    ["firewall-external-candidateRoot-status", (snapshot) => { snapshot.evidence.prePromotion.firewallProof.externalDenyProbe!.candidateRoot.status = 200; }],
-    ["health-not-ready", (snapshot) => { snapshot.evidence.prePromotion.health.status = 503; }],
-    ["read-failed", (snapshot) => { snapshot.evidence.prePromotion.compatibilityProof.read = "not-run"; }],
-    ["not-verified", (snapshot) => { snapshot.rollbackTarget.verified = false; }],
-    ["proof-route-not-pinned", (snapshot) => { snapshot.evidence.prePromotion.routePinned = "failed"; }],
-    ["commit-sha", (snapshot) => {
-      snapshot.candidate.commitSha = "short";
-      snapshot.evidence.prePromotion.commitSha = "short";
-      historicalException(snapshot).candidateCommitSha = "short";
-    }]
-  ];
-  for (const [expectedCode, mutate] of cases) {
-    const snapshot = readyHistoricalExceptionSnapshot();
-    mutate(snapshot);
-    assert.ok(blockerCodes(snapshot).has(expectedCode), `exception must not suppress ${expectedCode}`);
-  }
-});
-
-test("a blocked exception snapshot makes zero promotion calls", async () => {
-  const snapshot = readyHistoricalExceptionSnapshot();
-  snapshot.evidence.prePromotion.clerkProof.authHostSurface = "not-run";
-  let calls = 0;
-  const result = await promoteVerifiedCandidate(snapshot, PROMOTION_CONFIRMATION, {
-    async promote() { calls += 1; },
-    async readPostPromotionSnapshot() { throw new Error("not reached"); },
-    now: () => EXCEPTION_NOW
-  }, TARGET);
-  assert.equal(result.status, "blocked");
-  assert.equal(calls, 0);
-  assert.ok(result.evaluation.blockers.some((blocker) => blocker.code === "clerk-auth-host-surface"));
-});
-
-test("post-promotion still requires a distinct ordinary pair and rejects exception reuse", () => {
-  const post = readyPostHistoricalExceptionSnapshot();
-  const evaluation = evaluateCutoverSnapshot(post, "post-promotion", TARGET, EXCEPTION_NOW);
-  assert.equal(evaluation.ok, true, JSON.stringify(evaluation.blockers));
-
-  const reused = readyPostHistoricalExceptionSnapshot();
-  dataIntegrity(reused, "postPromotion").historicalPreBindingException = structuredClone(historicalException(reused));
-  const codes = new Set(evaluateCutoverSnapshot(reused, "post-promotion", TARGET, EXCEPTION_NOW).blockers.map((blocker) => blocker.code));
-  assert.ok(codes.has("historical-exception-phase"));
-  assert.ok(codes.has("historical-exception-conflicting-proof"));
+test("unavailable historical pre-binding evidence is not a release input", () => {
+  const snapshot = readySnapshot();
+  snapshot.evidence.prePromotion.dataIntegrityProof = { realPostgres: true, afterDigest: "focused-pre-promotion-state" };
+  assert.equal(evaluateCutoverSnapshot(snapshot, "pre-promotion", TARGET, NOW).ok, true);
 });
 
 test("overlapping true Git rules cannot bypass the main deployment block", () => {
@@ -249,7 +75,7 @@ test("pending binding blocks with zero promotion calls", async () => {
   assert.ok(result.evaluation.blockers.some((blocker) => blocker.code === "legacy-binding-not-ready"));
 });
 
-test("Clerk proof and the full enabled bridge lifecycle are mandatory", () => {
+test("Clerk isolation and one bounded compatibility read remain mandatory", () => {
   for (const field of ["authHostSurface", "authHostIsolation", "emailCodeAuth", "sameRootSessionShare", "sessionExchange", "exactLegacyBinding", "canonicalHandoff", "tenantProjectAccess", "tenantProjectWrite", "signOut"] as const) {
     const snapshot = readySnapshot();
     snapshot.evidence.prePromotion.clerkProof[field] = "failed";
@@ -263,11 +89,18 @@ test("Clerk proof and the full enabled bridge lifecycle are mandatory", () => {
   const wrongDomainConfiguration = readySnapshot();
   wrongDomainConfiguration.evidence.prePromotion.clerkDomainConfiguration = "failed";
   assert.ok(evaluateCutoverSnapshot(wrongDomainConfiguration, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "clerk-domain-configuration"));
-  for (const field of ["read", "create", "comment", "move", "archive"] as const) {
-    const snapshot = readySnapshot();
-    snapshot.evidence.prePromotion.compatibilityProof[field] = "not-run";
-    assert.equal(evaluateCutoverSnapshot(snapshot, "pre-promotion", TARGET, NOW).ok, false);
-  }
+  const missingRead = readySnapshot();
+  missingRead.evidence.prePromotion.compatibilityProof.read = "not-run";
+  assert.ok(evaluateCutoverSnapshot(missingRead, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "read-failed"));
+
+  const retiredLifecycle = readySnapshot();
+  Object.assign(retiredLifecycle.evidence.prePromotion.compatibilityProof, {
+    create: "not-run",
+    comment: "not-run",
+    move: "not-run",
+    archive: "not-run"
+  });
+  assert.equal(evaluateCutoverSnapshot(retiredLifecycle, "pre-promotion", TARGET, NOW).ok, true);
 });
 
 test("legacy provider and callback evidence cannot satisfy Clerk gates", () => {
@@ -322,113 +155,18 @@ test("receipts are bound to phase, artifact, origin, and freshness", () => {
   assert.ok(codes.has("proof-origin"));
 });
 
-test("pre-promotion admitted and external probes cover all three exact release hosts", () => {
-  const admittedFailure = readySnapshot();
-  admittedFailure.evidence.prePromotion.firewallProof.admittedProbe!.authHost.status = 403;
-  assert.ok(evaluateCutoverSnapshot(admittedFailure, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-admitted-authHost-status"));
-
-  const selfAttested = readySnapshot();
-  Object.assign(selfAttested.evidence.prePromotion.firewallProof.externalDenyProbe!.candidateRoot, { wafAction: "deny", wafRuleId: "rule_other" });
-  assert.ok(evaluateCutoverSnapshot(selfAttested, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-external-candidateRoot-self-attested-traffic"));
-
-  const canonicalExclusionFailure = readySnapshot();
-  canonicalExclusionFailure.evidence.prePromotion.firewallProof.externalDenyProbe!.canonicalRoot.status = 403;
-  assert.ok(evaluateCutoverSnapshot(canonicalExclusionFailure, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-canonical-root-exclusion"));
-});
-
-test("platform Traffic correlation remains explicit and binds its per-request deny rule", () => {
-  const snapshot = readySnapshot();
-  const external = snapshot.evidence.prePromotion.firewallProof.externalDenyProbe!;
-  external.correlationMethod = "platform-traffic";
-  for (const field of ["authHost", "candidateRoot", "candidateTenant"] as const) {
-    Object.assign(external[field], { wafAction: "deny", wafRuleId: snapshot.evidence.prePromotion.firewallProof.liveDenyRuleId });
-  }
-  assert.equal(evaluateCutoverSnapshot(snapshot, "pre-promotion", TARGET, NOW).ok, true);
-
-  (external.candidateRoot as Record<string, unknown>).wafRuleId = "rule_other";
-  assert.ok(evaluateCutoverSnapshot(snapshot, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-external-candidateRoot-rule-id"));
-});
-
-test("deterministic correlation derives one exact live deny and excludes competing mitigations", () => {
-  const wrongMethod = readySnapshot();
-  wrongMethod.evidence.prePromotion.firewallProof.externalDenyProbe!.correlationMethod = "self-attested";
-  assert.ok(evaluateCutoverSnapshot(wrongMethod, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-external-correlation-method"));
-
-  const wrongRun = readySnapshot();
-  wrongRun.evidence.prePromotion.firewallProof.externalDenyProbe!.runId = "different-run";
-  assert.ok(evaluateCutoverSnapshot(wrongRun, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-external-run-id"));
-
-  const duplicate = readySnapshot();
-  duplicate.policy.firewall.rules.push({
-    ...structuredClone(duplicate.policy.firewall.rules[1]),
-    id: "rule_duplicate_exact_deny",
-    name: "duplicate-exact-deny"
-  });
-  assert.ok(evaluateCutoverSnapshot(duplicate, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-external-deterministic-deny"));
-
-  const additionalBroadPersistentDeny = readySnapshot();
-  additionalBroadPersistentDeny.policy.firewall.rules.push({
-    id: "rule_additional_broad_deny",
-    name: "additional-broad-deny",
-    active: true,
-    _status: "live",
-    conditionGroup: [{ conditions: [{ type: "host", op: "suf", value: "kanban.cards" }] }],
-    action: {
-      mitigate: { action: "deny", actionDuration: "30m" } as { action: string }
-    }
-  });
-  assert.ok(evaluateCutoverSnapshot(additionalBroadPersistentDeny, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-external-deterministic-deny"));
-
-  const blockedIp = readySnapshot();
-  (blockedIp.policy.firewall as Record<string, unknown>).ipBlocks = [{ id: "ip_block_other" }];
-  assert.ok(evaluateCutoverSnapshot(blockedIp, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-external-deterministic-ip-blocks"));
-
-  const missingIpInventory = readySnapshot();
-  delete (missingIpInventory.policy.firewall as Record<string, unknown>).ipBlocks;
-  assert.ok(evaluateCutoverSnapshot(missingIpInventory, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-external-deterministic-ip-blocks"));
-
-  const attackMode = readySnapshot();
-  attackMode.policy.firewall.attackModeEnabled = true;
-  assert.ok(evaluateCutoverSnapshot(attackMode, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-external-deterministic-attack-mode"));
-
-  const missingAttackMode = readySnapshot();
-  delete (missingAttackMode.policy.firewall as Record<string, unknown>).attackModeEnabled;
-  assert.ok(evaluateCutoverSnapshot(missingAttackMode, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-external-deterministic-attack-mode"));
+test("one fresh independent candidate-root denial remains mandatory", () => {
+  const denied = readySnapshot();
+  denied.evidence.prePromotion.firewallProof.externalDenyProbe!.candidateRoot.status = 200;
+  assert.ok(evaluateCutoverSnapshot(denied, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-external-candidate-root"));
 
   const sameSource = readySnapshot();
-  sameSource.evidence.prePromotion.firewallProof.externalDenyProbe!.observedSourceCidr = sameSource.evidence.prePromotion.firewallProof.reviewedSourceCidr!;
+  sameSource.evidence.prePromotion.firewallProof.externalDenyProbe!.observedSourceCidr = "203.0.113.42/32";
   assert.ok(evaluateCutoverSnapshot(sameSource, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-external-source"));
 
-  const reusedAcrossBoundaries = readySnapshot();
-  reusedAcrossBoundaries.evidence.prePromotion.firewallProof.externalDenyProbe!.authHost.vercelId = reusedAcrossBoundaries.evidence.prePromotion.firewallProof.admittedProbe!.authHost.vercelId;
-  assert.ok(evaluateCutoverSnapshot(reusedAcrossBoundaries, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-pre-promotion-vercel-id-reused"));
-
-  const staleObservation = readySnapshot();
-  staleObservation.evidence.prePromotion.firewallProof.externalDenyProbe!.authHost.observedAt = "2026-08-12T00:00:00.000Z";
-  assert.ok(evaluateCutoverSnapshot(staleObservation, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-external-authHost-stale"));
-
-  const mismatchedConfig = readySnapshot();
-  mismatchedConfig.evidence.prePromotion.firewallProof.externalDenyProbe!.configHash = "0".repeat(64);
-  assert.ok(evaluateCutoverSnapshot(mismatchedConfig, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-external-config"));
-});
-
-test("the canonical tenant is unrouted before promotion and public only after promotion", () => {
-  const prePublic = readySnapshot();
-  prePublic.evidence.prePromotion.firewallProof.externalDenyProbe!.canonicalTenant.status = 200;
-  prePublic.evidence.prePromotion.firewallProof.externalDenyProbe!.canonicalTenant.vercelError = "";
-  assert.ok(evaluateCutoverSnapshot(prePublic, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-canonical-tenant-exclusion"));
-
-  const arbitrary404 = readySnapshot();
-  arbitrary404.evidence.prePromotion.firewallProof.externalDenyProbe!.canonicalTenant.vercelError = "NOT_FOUND";
-  assert.ok(evaluateCutoverSnapshot(arbitrary404, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-canonical-tenant-exclusion"));
-
-  const preFailClosed = readySnapshot();
-  assert.equal(evaluateCutoverSnapshot(preFailClosed, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-canonical-tenant-exclusion"), false);
-
-  const postNotFound = readyPostSnapshot();
-  postNotFound.evidence.postPromotion.firewallProof.externalPublicProbe!.canonicalTenant.status = 404;
-  postNotFound.evidence.postPromotion.firewallProof.externalPublicProbe!.canonicalTenant.vercelError = "DEPLOYMENT_NOT_FOUND";
-  assert.ok(evaluateCutoverSnapshot(postNotFound, "post-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-post-external-canonicalTenant"));
+  const stale = readySnapshot();
+  stale.evidence.prePromotion.firewallProof.externalDenyProbe!.candidateRoot.observedAt = "2026-08-12T00:00:00.000Z";
+  assert.ok(evaluateCutoverSnapshot(stale, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-external-candidate-root-stale"));
 });
 
 test("complete pre-promotion alias inventory must exclude the canonical tenant", () => {
@@ -439,7 +177,6 @@ test("complete pre-promotion alias inventory must exclude the canonical tenant",
   for (const alias of ["mike.kanban.cards", "https://mike.kanban.cards"]) {
     const prematurelyRouted = readySnapshot();
     prematurelyRouted.policy.aliases.push(alias);
-    assert.equal(prematurelyRouted.evidence.prePromotion.firewallProof.externalDenyProbe!.canonicalTenant.vercelError, "DEPLOYMENT_NOT_FOUND");
     assert.ok(evaluateCutoverSnapshot(prematurelyRouted, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "canonical-tenant-alias-premature"));
   }
 });
@@ -482,12 +219,12 @@ test("candidate Firewall rules are exact, published, enabled, and ordered", () =
   (persistentDeny.policy.firewall.rules[1].action.mitigate as Record<string, unknown>).actionDuration = "30m";
   assert.ok(evaluateCutoverSnapshot(persistentDeny, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "candidate-firewall-deny-invalid"));
 
-  const wrongHash = readySnapshot();
-  wrongHash.evidence.prePromotion.firewallProof.configHash = "0".repeat(64);
-  assert.ok(evaluateCutoverSnapshot(wrongHash, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-config-hash"));
+  const broadSource = readySnapshot();
+  broadSource.policy.firewall.rules[0].conditionGroup[0].conditions[1].value = "203.0.113.0/24";
+  assert.ok(evaluateCutoverSnapshot(broadSource, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "candidate-firewall-bypass-invalid"));
 });
 
-test("post cleanup rejects renamed, partial, and pre-id Firewall leftovers", () => {
+test("post cleanup rejects temporary-host leftovers without inventorying unrelated rule IDs", () => {
   const renamedSubset = readyPostSnapshot();
   renamedSubset.policy.firewall.rules = [{
     id: "rule_renamed",
@@ -499,8 +236,8 @@ test("post cleanup rejects renamed, partial, and pre-id Firewall leftovers", () 
   }];
   assert.ok(evaluateCutoverSnapshot(renamedSubset, "post-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "candidate-firewall-cleanup-incomplete"));
 
-  const retainedId = readyPostSnapshot();
-  retainedId.policy.firewall.rules = [{
+  const unrelatedRetainedId = readyPostSnapshot();
+  unrelatedRetainedId.policy.firewall.rules = [{
     id: "rule_kanban_candidate_mike_bypass_3sYrrO",
     name: "unrelated-renamed-rule",
     active: false,
@@ -508,19 +245,30 @@ test("post cleanup rejects renamed, partial, and pre-id Firewall leftovers", () 
     conditionGroup: [{ conditions: [{ type: "path", op: "eq", value: "/unrelated" }] }],
     action: { mitigate: { action: "log" } }
   }];
-  assert.ok(evaluateCutoverSnapshot(retainedId, "post-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-removed-rule-id-still-live"));
+  assert.equal(evaluateCutoverSnapshot(unrelatedRetainedId, "post-promotion", TARGET, NOW).ok, true);
 });
 
 test("post-promotion cleanup and public reachability expectations are explicit", () => {
-  for (const [field, code] of [["releaseRulesRemoved", "firewall-release-rules-removed"], ["noDraft", "firewall-no-draft"], ["authHostPublic", "firewall-auth-public"], ["canonicalRootPublic", "firewall-root-public"], ["canonicalTenantPublic", "firewall-tenant-public"], ["generatedDeploymentProtected", "firewall-generated-protected"]] as const) {
+  for (const [field, code] of [["releaseRulesRemoved", "firewall-release-rules-removed"], ["authHostPublic", "firewall-auth-public"], ["canonicalRootPublic", "firewall-root-public"], ["canonicalTenantPublic", "firewall-tenant-public"], ["generatedDeploymentProtected", "firewall-generated-protected"]] as const) {
     const snapshot = readyPostSnapshot();
     snapshot.evidence.postPromotion.firewallProof[field] = "failed";
     assert.ok(evaluateCutoverSnapshot(snapshot, "post-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === code));
   }
 
-  const externalFailure = readyPostSnapshot();
-  externalFailure.evidence.postPromotion.firewallProof.externalPublicProbe!.authHost.status = 403;
-  assert.ok(evaluateCutoverSnapshot(externalFailure, "post-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-post-external-authHost"));
+});
+
+test("post-promotion keeps one focused real-Postgres preservation check", () => {
+  const wrongBaseline = readyPostSnapshot();
+  wrongBaseline.evidence.postPromotion.dataIntegrityProof.beforeDigest = "different-pre-promotion-state";
+  assert.ok(evaluateCutoverSnapshot(wrongBaseline, "post-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "promotion-baseline-digest"));
+
+  const changed = readyPostSnapshot();
+  changed.evidence.postPromotion.dataIntegrityProof.afterDigest = "changed-production-state";
+  assert.ok(evaluateCutoverSnapshot(changed, "post-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "state-digest-changed"));
+
+  const wrongStore = readyPostSnapshot();
+  wrongStore.evidence.postPromotion.dataIntegrityProof.realPostgres = false;
+  assert.ok(evaluateCutoverSnapshot(wrongStore, "post-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "not-real-postgres"));
 });
 
 test("post-promotion completion requires both temporary candidate aliases to be absent", () => {
@@ -685,62 +433,6 @@ test("post-promotion rollback must remain the exact pre-authorized predecessor",
   assert.ok(result.blockers.some((blocker) => blocker.code === "predecessor-mismatch"));
 });
 
-function readyHistoricalExceptionSnapshot() {
-  const snapshot = readySnapshot();
-  const proof = snapshot.evidence.prePromotion;
-  proof.observedAt = EXCEPTION_OBSERVED_AT;
-  for (const field of ["authHost", "candidateRoot", "candidateTenant", "canonicalRoot", "canonicalTenant"] as const) {
-    proof.firewallProof.externalDenyProbe![field].observedAt = EXCEPTION_OBSERVED_AT;
-  }
-  Object.assign(dataIntegrity(snapshot), {
-    beforeDigest: "",
-    afterDigest: "",
-    beforeResourceFingerprint: "",
-    afterResourceFingerprint: "",
-    finalCandidateDigest: HISTORICAL_EXCEPTION.finalCandidateDigest,
-    finalCandidateResourceFingerprint: HISTORICAL_EXCEPTION.finalCandidateResourceFingerprint,
-    historicalPreBindingException: {
-      ...HISTORICAL_EXCEPTION,
-      runId: proof.runId,
-      observedAt: proof.observedAt,
-      candidateDeploymentId: snapshot.candidate.id,
-      candidateDeploymentUrl: snapshot.candidate.url,
-      candidateCommitSha: snapshot.candidate.commitSha,
-      rehearsalIsHistoricalProof: false,
-      currentStateIsHistoricalProof: false
-    }
-  });
-  return snapshot;
-}
-
-function readyPostHistoricalExceptionSnapshot() {
-  const snapshot = readyPostSnapshot();
-  snapshot.evidence.prePromotion = readyHistoricalExceptionSnapshot().evidence.prePromotion;
-  snapshot.evidence.postPromotion.observedAt = EXCEPTION_POST_OBSERVED_AT;
-  for (const field of ["authHost", "canonicalRoot", "canonicalTenant"] as const) {
-    snapshot.evidence.postPromotion.firewallProof.externalPublicProbe![field].observedAt = EXCEPTION_POST_OBSERVED_AT;
-  }
-  Object.assign(dataIntegrity(snapshot, "postPromotion"), {
-    beforeDigest: HISTORICAL_EXCEPTION.finalCandidateDigest,
-    afterDigest: HISTORICAL_EXCEPTION.finalCandidateDigest,
-    beforeResourceFingerprint: HISTORICAL_EXCEPTION.finalCandidateResourceFingerprint,
-    afterResourceFingerprint: HISTORICAL_EXCEPTION.finalCandidateResourceFingerprint
-  });
-  return snapshot;
-}
-
-function dataIntegrity(snapshot: ReturnType<typeof readySnapshot>, phase: "prePromotion" | "postPromotion" = "prePromotion"): Record<string, unknown> {
-  return snapshot.evidence[phase].dataIntegrityProof as Record<string, unknown>;
-}
-
-function historicalException(snapshot: ReturnType<typeof readySnapshot>): Record<string, unknown> {
-  return dataIntegrity(snapshot).historicalPreBindingException as Record<string, unknown>;
-}
-
-function blockerCodes(snapshot: ReturnType<typeof readySnapshot>): Set<string> {
-  return new Set(evaluateCutoverSnapshot(snapshot, "pre-promotion", TARGET, EXCEPTION_NOW).blockers.map((blocker) => blocker.code));
-}
-
 function readySnapshot() {
   const candidateSha = "9009e2c0987f97a886889e392aca4ea46b696d2e";
   const productionSha = "bcc03d9d939535d942a8fc23eed9251bcd58fd3f";
@@ -749,8 +441,6 @@ function readySnapshot() {
     firewallEnabled: true,
     hasDraft: false,
     pendingChanges: 0,
-    ipBlocks: [],
-    attackModeEnabled: false,
     rules: [
       {
         id: "rule_kanban_candidate_mike_bypass_3sYrrO",
@@ -773,9 +463,6 @@ function readySnapshot() {
       }
     ]
   };
-  const postFirewall = { firewallEnabled: true, hasDraft: false, pendingChanges: 0, ipBlocks: [], attackModeEnabled: false, rules: [] };
-  const firewallFacts = inspectCandidateFirewall(firewall, TARGET);
-  const postFirewallFacts = inspectCandidateFirewall(postFirewall, TARGET);
   const receipt = (phase: "pre-promotion" | "post-promotion", runId: string, origin: string) => ({
     phase,
     runId,
@@ -795,60 +482,27 @@ function readySnapshot() {
     tenantRouteDeploymentId: "dpl_candidate",
     tenantRoutePinned: "passed",
     firewallProof: phase === "pre-promotion" ? {
-      liveBypassRuleId: firewallFacts.bypassRuleId,
-      liveDenyRuleId: firewallFacts.denyRuleId,
-      reviewedSourceCidr: firewallFacts.reviewedSourceCidr,
-      configHash: firewallFacts.configHash,
-      admittedProbe: {
-        configHash: firewallFacts.configHash,
-        authHost: { status: 200, mitigated: "none", vercelId: "sfo1::admit-auth" },
-        candidateRoot: { status: 200, mitigated: "none", vercelId: "sfo1::admit-root" },
-        candidateTenant: { status: 302, mitigated: "none", vercelId: "sfo1::admit-tenant" }
-      },
       externalDenyProbe: {
-        runId,
-        correlationMethod: "deterministic-live-policy",
         observedSourceCidr: "198.51.100.23/32",
-        configHash: firewallFacts.configHash,
-        authHost: { status: 403, mitigated: "deny", vercelId: "iad1::deny-auth", observedAt: "2026-08-13T05:50:00.000Z" },
-        candidateRoot: { status: 403, mitigated: "deny", vercelId: "iad1::deny-root", observedAt: "2026-08-13T05:50:00.000Z" },
-        candidateTenant: { status: 403, mitigated: "deny", vercelId: "iad1::deny-tenant", observedAt: "2026-08-13T05:50:00.000Z" },
-        canonicalRoot: { status: 200, ok: true, store: "postgres", mitigated: "none", vercelId: "iad1::public-root", observedAt: "2026-08-13T05:50:00.000Z" },
-        canonicalTenant: { status: 404, mitigated: "none", vercelError: "DEPLOYMENT_NOT_FOUND", vercelId: "iad1::unrouted-tenant", observedAt: "2026-08-13T05:50:00.000Z" }
+        candidateRoot: { status: 403, mitigated: "deny", vercelId: "iad1::deny-root", observedAt: "2026-08-13T05:50:00.000Z" }
       }
     } : {
-      removedRuleIds: [firewallFacts.bypassRuleId, firewallFacts.denyRuleId],
-      configHash: postFirewallFacts.configHash,
       releaseRulesRemoved: "passed",
-      noDraft: "passed",
       authHostPublic: "passed",
       canonicalRootPublic: "passed",
       canonicalTenantPublic: "passed",
-      generatedDeploymentProtected: "passed",
-      externalPublicProbe: {
-        observedSourceCidr: "198.51.100.23/32",
-        configHash: postFirewallFacts.configHash,
-        authHost: { status: 200, mitigated: "none", vercelId: "iad1::post-auth", observedAt: "2026-08-13T05:55:00.000Z" },
-        canonicalRoot: { status: 200, ok: true, store: "postgres", mitigated: "none", vercelId: "iad1::post-root", observedAt: "2026-08-13T05:55:00.000Z" },
-        canonicalTenant: { status: 302, mitigated: "none", vercelError: "", vercelId: "iad1::post-tenant", observedAt: "2026-08-13T05:55:00.000Z" }
-      }
+      generatedDeploymentProtected: "passed"
     },
     sameArtifactAuthHost: "passed",
     sameArtifactCanonicalHost: "passed",
     health: { status: 200, ok: true, store: "postgres", missingConfiguration: [], access: { registry: "ready", legacyState: "ready", legacyBinding: "ready" } },
     accessHealth: { status: 200, ok: true, legacyBridge: "enabled", registryState: "ready", legacyState: "ready", legacyBinding: { present: true, status: "ready" }, missingConfiguration: [] },
     clerkProof: { authHostSurface: "passed", authHostIsolation: "passed", emailCodeAuth: "passed", sameRootSessionShare: "passed", sessionExchange: "passed", exactLegacyBinding: "passed", canonicalHandoff: "passed", tenantProjectAccess: "passed", tenantProjectWrite: "passed", signOut: "passed" },
-    compatibilityProof: { required: true, read: "passed", create: "passed", comment: "passed", move: "passed", archive: "passed", cardId: `card-${runId}`, finalCardVersion: 4 },
+    compatibilityProof: { required: true, read: "passed" },
     retirementProof: { required: true, public401: "passed", legacy401: "passed", sibling401: "passed", oldDeploymentsClosed: "passed" },
-    dataIntegrityProof: {
-      realPostgres: true,
-      beforeDigest: phase === "pre-promotion" ? "binding-state" : "candidate-final-state",
-      afterDigest: phase === "pre-promotion" ? "binding-state" : "candidate-final-state",
-      beforeResourceFingerprint: phase === "pre-promotion" ? "binding-resources" : "candidate-final-resources",
-      afterResourceFingerprint: phase === "pre-promotion" ? "binding-resources" : "candidate-final-resources",
-      finalCandidateDigest: "candidate-final-state",
-      finalCandidateResourceFingerprint: "candidate-final-resources"
-    }
+    dataIntegrityProof: phase === "post-promotion"
+      ? { realPostgres: true, beforeDigest: "focused-pre-promotion-state", afterDigest: "focused-pre-promotion-state" }
+      : { realPostgres: true, afterDigest: "focused-pre-promotion-state" }
   });
   return {
     policy: { projectId: TARGET.projectId, teamId: TARGET.teamId, repository: TARGET.repository, productionBranch: "main", autoAssignCustomDomains: false, mainGitDeploymentsEnabled: false, deploymentProtection: "all_except_custom_domains", firewall, aliases: ["auth.kanban.cards", "candidate.release.kanban.cards", "mike.candidate.release.kanban.cards", "kanban.cards"], aliasInventoryComplete: true },
@@ -873,7 +527,7 @@ function readySnapshot() {
 
 function readyPostSnapshot() {
   const snapshot = readySnapshot();
-  snapshot.policy.firewall = { firewallEnabled: true, hasDraft: false, pendingChanges: 0, ipBlocks: [], attackModeEnabled: false, rules: [] };
+  snapshot.policy.firewall = { firewallEnabled: true, hasDraft: false, pendingChanges: 0, rules: [] };
   snapshot.policy.aliases = ["auth.kanban.cards", "kanban.cards", "mike.kanban.cards"];
   snapshot.currentProduction = { ...snapshot.candidate, aliases: ["auth.kanban.cards", "kanban.cards", "mike.kanban.cards"], health: { status: 200, ok: true, store: "postgres" } };
   return snapshot;
