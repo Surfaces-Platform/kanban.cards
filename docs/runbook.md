@@ -367,6 +367,20 @@ The data proof uses separate phase-bound pairs:
 
 Each fingerprint covers Project, Column, Card, Comment, and Activity ids, resource versions and revisions, archive state, and idempotency records.
 
+For `roadmap:v3-workspace-access-v1` only, Mike accepted the bounded fact that the historical production pre-binding receipt was not captured and cannot now be reconstructed. The pre-promotion receipt may therefore use exactly one `dataIntegrityProof.historicalPreBindingException` with `kind: historical-pre-binding-receipt-unavailable`. This is not a generic waiver. It replaces only the two unavailable historical before/after equality checks, and only when all four corresponding fields are present as empty strings. `realPostgres: true`, the final candidate digest and resource fingerprint, and every other release gate remain mandatory.
+
+The exception is anchored to Mike's exact `2026-08-22T02:19:24Z` acceptance and these retained values:
+
+- acceptance receipt SHA-256 `c158f2351dc33b7a7b2d4862f08f3d2901fdd7acda58dc65914a9b8a66a62bb5`;
+- read-only production logical dump SHA-256 `b79b370a4284872e255adf4f087fd85150f668fe89391ac17c06bdcf56db9097`;
+- isolated restored-PostgreSQL rehearsal receipt SHA-256 `1235ba3110d414f6a5755f05ae6c9954ca7322c5feadfbc1a1ce0b7e263588bd`;
+- final candidate baseline receipt SHA-256 `05db965e31144db3790729396e7feaf5af286d354286e522de293c6c80c791bc`;
+- final candidate digest `c7c7deeed5dbe9b1deeb604b9de3ebab9af2eaa18fc4849491eace8adc73b4ec` and resource fingerprint `e6807ae1266d568360a4ea0c6e6746ef079e38573e74d96a1bc08e3294f344a0`.
+
+Copy the exact object shape from the evidence example. Its run ID and observation time must exactly match the fresh enclosing pre-promotion receipt, its observation may not predate Mike's acceptance, and its candidate deployment ID, immutable URL, and commit SHA must match the live hydrated candidate. It must state verbatim that the restored rehearsal and current candidate state are not historical production pre-binding proof, with both historical-proof booleans `false`. Missing, additional, wildcard, malformed, pre-acceptance, stale, cross-run, cross-candidate, cross-baseline, or post-promotion use fails closed. Supplying the exception beside any non-empty historical value also fails; it cannot hide a partial pair or observed change.
+
+This exception does not alter candidate or rollback identity, clean-`main`/exact-`HEAD` enforcement, Clerk admission, the authenticated unadmitted-identity result within `clerkProof.authHostSurface`, tenant-session write, compatibility, readiness, routing, WAF, literal promotion authorization, or distinct post-promotion proof. The external five-host WAF receipt and authenticated-unadmitted identity remain hard pre-promotion gates. Post-promotion always uses the ordinary final-candidate-to-public pair and never an exception. Because live authorization requires a clean `main` whose `HEAD` equals the live candidate SHA, landing an operator-controller change requires a new exact-`main` candidate and a freshly candidate-bound exception object; never copy the prior candidate's object forward.
+
 Run the pre-promotion evaluator:
 
 ```bash

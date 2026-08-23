@@ -153,13 +153,33 @@
         "oldDeploymentsClosed": "not-run"
       },
       "dataIntegrityProof": {
-        "realPostgres": false,
+        "realPostgres": true,
         "beforeDigest": "",
         "afterDigest": "",
         "beforeResourceFingerprint": "",
         "afterResourceFingerprint": "",
-        "finalCandidateDigest": "",
-        "finalCandidateResourceFingerprint": ""
+        "finalCandidateDigest": "c7c7deeed5dbe9b1deeb604b9de3ebab9af2eaa18fc4849491eace8adc73b4ec",
+        "finalCandidateResourceFingerprint": "e6807ae1266d568360a4ea0c6e6746ef079e38573e74d96a1bc08e3294f344a0",
+        "historicalPreBindingException": {
+          "kind": "historical-pre-binding-receipt-unavailable",
+          "migration": "roadmap:v3-workspace-access-v1",
+          "runId": "replace-with-unique-pre-promotion-run-id",
+          "observedAt": "1970-01-01T00:00:00.000Z",
+          "candidateDeploymentId": "dpl_exact-candidate-id",
+          "candidateDeploymentUrl": "https://exact-immutable-candidate.vercel.app",
+          "candidateCommitSha": "0000000000000000000000000000000000000000",
+          "acceptedBy": "Mike",
+          "acceptedAt": "2026-08-22T02:19:24Z",
+          "acceptanceReceiptSha256": "c158f2351dc33b7a7b2d4862f08f3d2901fdd7acda58dc65914a9b8a66a62bb5",
+          "productionDumpSha256": "b79b370a4284872e255adf4f087fd85150f668fe89391ac17c06bdcf56db9097",
+          "rehearsalReceiptSha256": "1235ba3110d414f6a5755f05ae6c9954ca7322c5feadfbc1a1ce0b7e263588bd",
+          "finalCandidateReceiptSha256": "05db965e31144db3790729396e7feaf5af286d354286e522de293c6c80c791bc",
+          "finalCandidateDigest": "c7c7deeed5dbe9b1deeb604b9de3ebab9af2eaa18fc4849491eace8adc73b4ec",
+          "finalCandidateResourceFingerprint": "e6807ae1266d568360a4ea0c6e6746ef079e38573e74d96a1bc08e3294f344a0",
+          "limitation": "The restored PostgreSQL rehearsal and current candidate state are not historical production pre-binding proof.",
+          "rehearsalIsHistoricalProof": false,
+          "currentStateIsHistoricalProof": false
+        }
       }
     },
     "postPromotion": {

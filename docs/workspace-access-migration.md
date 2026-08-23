@@ -93,11 +93,11 @@ Do not copy new-tenant data into `default`, merge tenant rows, or add a catch-al
 - [ ] Database backup or recovery point is recorded before the access-registry migration.
 - [ ] The exact legacy Clerk user ID, Clerk-verified email and display name, Workspace slug, and Workspace name are reviewed without exposing credentials.
 - [ ] The existing `kanban_v2_workspaces:default` row exists and passes schema validation.
-- [ ] Pre-migration counts and a canonical digest of `default` are recorded.
+- [ ] Pre-migration counts and a canonical digest of `default` are recorded, unless the exact migration-specific `historical-pre-binding-receipt-unavailable` exception in the cutover runbook is fully valid.
 - [ ] The migration succeeds twice with identical inputs and leaves one exact mapping.
 - [ ] A concurrent identical migration rehearsal converges without duplicates.
 - [ ] A conflicting migration rehearsal fails atomically and leaves the accepted mapping unchanged.
-- [ ] Post-migration counts and canonical digest prove the `default` state JSON is unchanged.
+- [ ] Post-migration counts and canonical digest prove the `default` state JSON is unchanged. The one accepted exception may replace only the unavailable historical before/after pair; its restored-PostgreSQL rehearsal and current baseline are explicitly not historical proof, and every other checklist item remains mandatory.
 - [ ] The verified legacy owner reaches only the mapped legacy Workspace.
 - [ ] A server-verified Clerk user ID absent from the exact admission list receives no implicit legacy access.
 - [ ] Two-Workspace read, write, idempotency, and selector-isolation checks pass against real Postgres.

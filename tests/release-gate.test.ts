@@ -6,6 +6,9 @@ import { mainGitDeploymentsAreDisabled } from "../src/release-policy";
 import { parseReleaseControllerArguments } from "../src/release-controller";
 
 const NOW = new Date("2026-08-13T06:00:00.000Z");
+const EXCEPTION_NOW = new Date("2026-08-22T02:30:00.000Z");
+const EXCEPTION_OBSERVED_AT = "2026-08-22T02:25:00.000Z";
+const EXCEPTION_POST_OBSERVED_AT = "2026-08-22T02:28:00.000Z";
 const TARGET: TrustedReleaseTarget = {
   projectId: "prj_expected",
   teamId: "team_expected",
@@ -14,11 +17,208 @@ const TARGET: TrustedReleaseTarget = {
   publicDomain: "kanban.cards",
   authDomain: "auth.kanban.cards"
 };
+const HISTORICAL_EXCEPTION = {
+  kind: "historical-pre-binding-receipt-unavailable",
+  migration: "roadmap:v3-workspace-access-v1",
+  acceptedBy: "Mike",
+  acceptedAt: "2026-08-22T02:19:24Z",
+  acceptanceReceiptSha256: "c158f2351dc33b7a7b2d4862f08f3d2901fdd7acda58dc65914a9b8a66a62bb5",
+  productionDumpSha256: "b79b370a4284872e255adf4f087fd85150f668fe89391ac17c06bdcf56db9097",
+  rehearsalReceiptSha256: "1235ba3110d414f6a5755f05ae6c9954ca7322c5feadfbc1a1ce0b7e263588bd",
+  finalCandidateReceiptSha256: "05db965e31144db3790729396e7feaf5af286d354286e522de293c6c80c791bc",
+  finalCandidateDigest: "c7c7deeed5dbe9b1deeb604b9de3ebab9af2eaa18fc4849491eace8adc73b4ec",
+  finalCandidateResourceFingerprint: "e6807ae1266d568360a4ea0c6e6746ef079e38573e74d96a1bc08e3294f344a0",
+  limitation: "The restored PostgreSQL rehearsal and current candidate state are not historical production pre-binding proof."
+} as const;
 
 test("a fully proven staged candidate passes the pre-promotion gate", () => {
   const evaluation = evaluateCutoverSnapshot(readySnapshot(), "pre-promotion", TARGET, NOW);
   assert.equal(evaluation.ok, true, JSON.stringify(evaluation.blockers));
   assert.equal(evaluation.candidate.deploymentId, "dpl_candidate");
+});
+
+test("the exact historical pre-binding exception satisfies only the unavailable pre-promotion pair", () => {
+  const snapshot = readyHistoricalExceptionSnapshot();
+  const evaluation = evaluateCutoverSnapshot(snapshot, "pre-promotion", TARGET, EXCEPTION_NOW);
+  assert.equal(evaluation.ok, true, JSON.stringify(evaluation.blockers));
+  assert.deepEqual(
+    [
+      snapshot.evidence.prePromotion.dataIntegrityProof.beforeDigest,
+      snapshot.evidence.prePromotion.dataIntegrityProof.afterDigest,
+      snapshot.evidence.prePromotion.dataIntegrityProof.beforeResourceFingerprint,
+      snapshot.evidence.prePromotion.dataIntegrityProof.afterResourceFingerprint
+    ],
+    ["", "", "", ""]
+  );
+  assert.equal(authorizePromotion(snapshot, "accept the limitation", TARGET, EXCEPTION_NOW).authorized, false);
+  assert.equal(authorizePromotion(snapshot, PROMOTION_CONFIRMATION, TARGET, EXCEPTION_NOW).authorized, true);
+});
+
+test("missing, malformed, generic, and expanded exceptions fail closed", () => {
+  const absent = readyHistoricalExceptionSnapshot();
+  delete dataIntegrity(absent).historicalPreBindingException;
+  const absentCodes = blockerCodes(absent);
+  assert.ok(absentCodes.has("state-digest-changed"));
+  assert.ok(absentCodes.has("resource-fingerprint-changed"));
+
+  for (const malformed of [null, [], "historical-pre-binding-receipt-unavailable"]) {
+    const snapshot = readyHistoricalExceptionSnapshot();
+    dataIntegrity(snapshot).historicalPreBindingException = malformed;
+    assert.ok(blockerCodes(snapshot).has("historical-exception-shape"));
+  }
+
+  const missingField = readyHistoricalExceptionSnapshot();
+  delete historicalException(missingField).rehearsalReceiptSha256;
+  assert.ok(blockerCodes(missingField).has("historical-exception-shape"));
+
+  const expanded = readyHistoricalExceptionSnapshot();
+  historicalException(expanded).waiveAll = true;
+  assert.ok(blockerCodes(expanded).has("historical-exception-shape"));
+
+  const generic = readySnapshot();
+  Object.assign(dataIntegrity(generic), {
+    beforeDigest: "",
+    afterDigest: "",
+    beforeResourceFingerprint: "",
+    afterResourceFingerprint: "",
+    waiver: true
+  });
+  const genericCodes = blockerCodes(generic);
+  assert.ok(genericCodes.has("state-digest-changed"));
+  assert.ok(genericCodes.has("resource-fingerprint-changed"));
+});
+
+test("every static acceptance and evidence anchor is exact", () => {
+  const cases: Array<[string, string, unknown]> = [
+    ["kind", "historical-exception-kind", "*"],
+    ["migration", "historical-exception-migration", "workspace-access-*"],
+    ["acceptedBy", "historical-exception-acceptance", "operator"],
+    ["acceptedAt", "historical-exception-acceptance", "2026-08-22T02:19:25Z"],
+    ["acceptanceReceiptSha256", "historical-exception-acceptance-receipt", "0".repeat(64)],
+    ["productionDumpSha256", "historical-exception-production-dump", "0".repeat(64)],
+    ["rehearsalReceiptSha256", "historical-exception-rehearsal-receipt", "0".repeat(64)],
+    ["finalCandidateReceiptSha256", "historical-exception-final-receipt", "0".repeat(64)],
+    ["limitation", "historical-exception-limitation", "Rehearsal is historical proof."],
+    ["rehearsalIsHistoricalProof", "historical-exception-limitation", true],
+    ["currentStateIsHistoricalProof", "historical-exception-limitation", true]
+  ];
+  for (const [field, expectedCode, value] of cases) {
+    const snapshot = readyHistoricalExceptionSnapshot();
+    historicalException(snapshot)[field] = value;
+    assert.ok(blockerCodes(snapshot).has(expectedCode), `${field} must produce ${expectedCode}`);
+  }
+});
+
+test("candidate, run, freshness, and final baseline bindings cannot be reused", () => {
+  for (const [field, expectedCode, value] of [
+    ["candidateDeploymentId", "historical-exception-candidate-binding", "dpl_other"],
+    ["candidateDeploymentUrl", "historical-exception-candidate-binding", "https://other-abc.vercel.app"],
+    ["candidateCommitSha", "historical-exception-candidate-binding", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+    ["runId", "historical-exception-run-binding", "run-other"],
+    ["observedAt", "historical-exception-time-binding", "2026-08-13T05:49:59.000Z"]
+  ] as const) {
+    const snapshot = readyHistoricalExceptionSnapshot();
+    historicalException(snapshot)[field] = value;
+    assert.ok(blockerCodes(snapshot).has(expectedCode), `${field} must produce ${expectedCode}`);
+  }
+
+  const crossCandidate = readyHistoricalExceptionSnapshot();
+  crossCandidate.candidate.id = "dpl_other";
+  crossCandidate.evidence.prePromotion.deploymentId = "dpl_other";
+  crossCandidate.evidence.prePromotion.routeDeploymentId = "dpl_other";
+  crossCandidate.evidence.prePromotion.authRouteDeploymentId = "dpl_other";
+  crossCandidate.evidence.prePromotion.tenantRouteDeploymentId = "dpl_other";
+  assert.ok(blockerCodes(crossCandidate).has("historical-exception-candidate-binding"));
+
+  const reusedRun = readyHistoricalExceptionSnapshot();
+  reusedRun.evidence.prePromotion.runId = "run-other";
+  reusedRun.evidence.prePromotion.firewallProof.externalDenyProbe!.runId = "run-other";
+  assert.ok(blockerCodes(reusedRun).has("historical-exception-run-binding"));
+
+  const stale = readyHistoricalExceptionSnapshot();
+  stale.evidence.prePromotion.observedAt = "2026-08-13T04:00:00.000Z";
+  historicalException(stale).observedAt = stale.evidence.prePromotion.observedAt;
+  assert.ok(blockerCodes(stale).has("proof-stale"));
+
+  const beforeAcceptance = readyHistoricalExceptionSnapshot();
+  beforeAcceptance.evidence.prePromotion.observedAt = "2026-08-22T02:19:23.000Z";
+  historicalException(beforeAcceptance).observedAt = beforeAcceptance.evidence.prePromotion.observedAt;
+  assert.ok(blockerCodes(beforeAcceptance).has("historical-exception-before-acceptance"));
+
+  const changedBaseline = readyHistoricalExceptionSnapshot();
+  dataIntegrity(changedBaseline).finalCandidateDigest = "0".repeat(64);
+  historicalException(changedBaseline).finalCandidateDigest = "0".repeat(64);
+  dataIntegrity(changedBaseline).finalCandidateResourceFingerprint = "1".repeat(64);
+  historicalException(changedBaseline).finalCandidateResourceFingerprint = "1".repeat(64);
+  assert.ok(blockerCodes(changedBaseline).has("historical-exception-final-baseline"));
+});
+
+test("the exception cannot hide partial, missing, changed, or ordinary historical pairs", () => {
+  const cases: Array<(proof: Record<string, unknown>) => void> = [
+    (proof) => { delete proof.beforeDigest; },
+    (proof) => { proof.beforeDigest = "before"; },
+    (proof) => { proof.beforeDigest = "before"; proof.afterDigest = "after"; },
+    (proof) => {
+      proof.beforeDigest = "same";
+      proof.afterDigest = "same";
+      proof.beforeResourceFingerprint = "same-resources";
+      proof.afterResourceFingerprint = "same-resources";
+    }
+  ];
+  for (const mutate of cases) {
+    const snapshot = readyHistoricalExceptionSnapshot();
+    mutate(dataIntegrity(snapshot));
+    assert.ok(blockerCodes(snapshot).has("historical-exception-conflicting-proof"));
+  }
+});
+
+test("real Postgres and every unrelated pre-promotion gate remain mandatory", () => {
+  const cases: Array<[string, (snapshot: ReturnType<typeof readyHistoricalExceptionSnapshot>) => void]> = [
+    ["not-real-postgres", (snapshot) => { snapshot.evidence.prePromotion.dataIntegrityProof.realPostgres = false; }],
+    ["clerk-auth-host-surface", (snapshot) => { snapshot.evidence.prePromotion.clerkProof.authHostSurface = "not-run"; }],
+    ["tenant-project-write", (snapshot) => { snapshot.evidence.prePromotion.clerkProof.tenantProjectWrite = "not-run"; }],
+    ["firewall-external-candidateRoot-status", (snapshot) => { snapshot.evidence.prePromotion.firewallProof.externalDenyProbe!.candidateRoot.status = 200; }],
+    ["health-not-ready", (snapshot) => { snapshot.evidence.prePromotion.health.status = 503; }],
+    ["read-failed", (snapshot) => { snapshot.evidence.prePromotion.compatibilityProof.read = "not-run"; }],
+    ["not-verified", (snapshot) => { snapshot.rollbackTarget.verified = false; }],
+    ["proof-route-not-pinned", (snapshot) => { snapshot.evidence.prePromotion.routePinned = "failed"; }],
+    ["commit-sha", (snapshot) => {
+      snapshot.candidate.commitSha = "short";
+      snapshot.evidence.prePromotion.commitSha = "short";
+      historicalException(snapshot).candidateCommitSha = "short";
+    }]
+  ];
+  for (const [expectedCode, mutate] of cases) {
+    const snapshot = readyHistoricalExceptionSnapshot();
+    mutate(snapshot);
+    assert.ok(blockerCodes(snapshot).has(expectedCode), `exception must not suppress ${expectedCode}`);
+  }
+});
+
+test("a blocked exception snapshot makes zero promotion calls", async () => {
+  const snapshot = readyHistoricalExceptionSnapshot();
+  snapshot.evidence.prePromotion.clerkProof.authHostSurface = "not-run";
+  let calls = 0;
+  const result = await promoteVerifiedCandidate(snapshot, PROMOTION_CONFIRMATION, {
+    async promote() { calls += 1; },
+    async readPostPromotionSnapshot() { throw new Error("not reached"); },
+    now: () => EXCEPTION_NOW
+  }, TARGET);
+  assert.equal(result.status, "blocked");
+  assert.equal(calls, 0);
+  assert.ok(result.evaluation.blockers.some((blocker) => blocker.code === "clerk-auth-host-surface"));
+});
+
+test("post-promotion still requires a distinct ordinary pair and rejects exception reuse", () => {
+  const post = readyPostHistoricalExceptionSnapshot();
+  const evaluation = evaluateCutoverSnapshot(post, "post-promotion", TARGET, EXCEPTION_NOW);
+  assert.equal(evaluation.ok, true, JSON.stringify(evaluation.blockers));
+
+  const reused = readyPostHistoricalExceptionSnapshot();
+  dataIntegrity(reused, "postPromotion").historicalPreBindingException = structuredClone(historicalException(reused));
+  const codes = new Set(evaluateCutoverSnapshot(reused, "post-promotion", TARGET, EXCEPTION_NOW).blockers.map((blocker) => blocker.code));
+  assert.ok(codes.has("historical-exception-phase"));
+  assert.ok(codes.has("historical-exception-conflicting-proof"));
 });
 
 test("overlapping true Git rules cannot bypass the main deployment block", () => {
@@ -484,6 +684,62 @@ test("post-promotion rollback must remain the exact pre-authorized predecessor",
   const result = evaluateCutoverSnapshot(post, "post-promotion", TARGET, NOW);
   assert.ok(result.blockers.some((blocker) => blocker.code === "predecessor-mismatch"));
 });
+
+function readyHistoricalExceptionSnapshot() {
+  const snapshot = readySnapshot();
+  const proof = snapshot.evidence.prePromotion;
+  proof.observedAt = EXCEPTION_OBSERVED_AT;
+  for (const field of ["authHost", "candidateRoot", "candidateTenant", "canonicalRoot", "canonicalTenant"] as const) {
+    proof.firewallProof.externalDenyProbe![field].observedAt = EXCEPTION_OBSERVED_AT;
+  }
+  Object.assign(dataIntegrity(snapshot), {
+    beforeDigest: "",
+    afterDigest: "",
+    beforeResourceFingerprint: "",
+    afterResourceFingerprint: "",
+    finalCandidateDigest: HISTORICAL_EXCEPTION.finalCandidateDigest,
+    finalCandidateResourceFingerprint: HISTORICAL_EXCEPTION.finalCandidateResourceFingerprint,
+    historicalPreBindingException: {
+      ...HISTORICAL_EXCEPTION,
+      runId: proof.runId,
+      observedAt: proof.observedAt,
+      candidateDeploymentId: snapshot.candidate.id,
+      candidateDeploymentUrl: snapshot.candidate.url,
+      candidateCommitSha: snapshot.candidate.commitSha,
+      rehearsalIsHistoricalProof: false,
+      currentStateIsHistoricalProof: false
+    }
+  });
+  return snapshot;
+}
+
+function readyPostHistoricalExceptionSnapshot() {
+  const snapshot = readyPostSnapshot();
+  snapshot.evidence.prePromotion = readyHistoricalExceptionSnapshot().evidence.prePromotion;
+  snapshot.evidence.postPromotion.observedAt = EXCEPTION_POST_OBSERVED_AT;
+  for (const field of ["authHost", "canonicalRoot", "canonicalTenant"] as const) {
+    snapshot.evidence.postPromotion.firewallProof.externalPublicProbe![field].observedAt = EXCEPTION_POST_OBSERVED_AT;
+  }
+  Object.assign(dataIntegrity(snapshot, "postPromotion"), {
+    beforeDigest: HISTORICAL_EXCEPTION.finalCandidateDigest,
+    afterDigest: HISTORICAL_EXCEPTION.finalCandidateDigest,
+    beforeResourceFingerprint: HISTORICAL_EXCEPTION.finalCandidateResourceFingerprint,
+    afterResourceFingerprint: HISTORICAL_EXCEPTION.finalCandidateResourceFingerprint
+  });
+  return snapshot;
+}
+
+function dataIntegrity(snapshot: ReturnType<typeof readySnapshot>, phase: "prePromotion" | "postPromotion" = "prePromotion"): Record<string, unknown> {
+  return snapshot.evidence[phase].dataIntegrityProof as Record<string, unknown>;
+}
+
+function historicalException(snapshot: ReturnType<typeof readySnapshot>): Record<string, unknown> {
+  return dataIntegrity(snapshot).historicalPreBindingException as Record<string, unknown>;
+}
+
+function blockerCodes(snapshot: ReturnType<typeof readySnapshot>): Set<string> {
+  return new Set(evaluateCutoverSnapshot(snapshot, "pre-promotion", TARGET, EXCEPTION_NOW).blockers.map((blocker) => blocker.code));
+}
 
 function readySnapshot() {
   const candidateSha = "9009e2c0987f97a886889e392aca4ea46b696d2e";
