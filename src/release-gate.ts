@@ -78,6 +78,39 @@ export interface CandidateFirewallFacts {
 }
 
 const MAX_RECEIPT_AGE_MS = 30 * 60 * 1000;
+const HISTORICAL_PRE_BINDING_EXCEPTION_KIND = "historical-pre-binding-receipt-unavailable";
+const HISTORICAL_PRE_BINDING_EXCEPTION_MIGRATION = "roadmap:v3-workspace-access-v1";
+const HISTORICAL_PRE_BINDING_EXCEPTION_KEYS = [
+  "acceptanceReceiptSha256",
+  "acceptedAt",
+  "acceptedBy",
+  "candidateCommitSha",
+  "candidateDeploymentId",
+  "candidateDeploymentUrl",
+  "currentStateIsHistoricalProof",
+  "finalCandidateDigest",
+  "finalCandidateReceiptSha256",
+  "finalCandidateResourceFingerprint",
+  "kind",
+  "limitation",
+  "migration",
+  "observedAt",
+  "productionDumpSha256",
+  "rehearsalIsHistoricalProof",
+  "rehearsalReceiptSha256",
+  "runId"
+] as const;
+const HISTORICAL_PRE_BINDING_EXCEPTION_TRUST = {
+  limitation: "The restored PostgreSQL rehearsal and current candidate state are not historical production pre-binding proof.",
+  acceptedBy: "Mike",
+  acceptedAt: "2026-08-22T02:19:24Z",
+  acceptanceReceiptSha256: "c158f2351dc33b7a7b2d4862f08f3d2901fdd7acda58dc65914a9b8a66a62bb5",
+  productionDumpSha256: "b79b370a4284872e255adf4f087fd85150f668fe89391ac17c06bdcf56db9097",
+  rehearsalReceiptSha256: "1235ba3110d414f6a5755f05ae6c9954ca7322c5feadfbc1a1ce0b7e263588bd",
+  finalCandidateReceiptSha256: "05db965e31144db3790729396e7feaf5af286d354286e522de293c6c80c791bc",
+  finalCandidateDigest: "c7c7deeed5dbe9b1deeb604b9de3ebab9af2eaa18fc4849491eace8adc73b4ec",
+  finalCandidateResourceFingerprint: "e6807ae1266d568360a4ea0c6e6746ef079e38573e74d96a1bc08e3294f344a0"
+} as const;
 
 export function evaluateCutoverSnapshot(
   snapshot: unknown,
@@ -202,8 +235,19 @@ export function evaluateCutoverSnapshot(
   }
 
   if (data.realPostgres !== true) add(blockers, "data-integrity", "not-real-postgres", "Data preservation proof must run against the real candidate Postgres store.");
-  requireSameNonEmpty(blockers, "data-integrity", "state-digest-changed", data.beforeDigest, data.afterDigest, "Default Workspace canonical digest");
-  requireSameNonEmpty(blockers, "data-integrity", "resource-fingerprint-changed", data.beforeResourceFingerprint, data.afterResourceFingerprint, "Default Workspace resource fingerprint");
+  const historicalPreBindingExceptionAccepted = requireHistoricalPreBindingException(
+    blockers,
+    data,
+    evidence,
+    phase,
+    candidateId,
+    candidateUrl,
+    candidateSha
+  );
+  if (!historicalPreBindingExceptionAccepted) {
+    requireSameNonEmpty(blockers, "data-integrity", "state-digest-changed", data.beforeDigest, data.afterDigest, "Default Workspace canonical digest");
+    requireSameNonEmpty(blockers, "data-integrity", "resource-fingerprint-changed", data.beforeResourceFingerprint, data.afterResourceFingerprint, "Default Workspace resource fingerprint");
+  }
   if (phase === "post-promotion") requireDistinctPostEvidence(blockers, preEvidence, postEvidence);
 
   requireMatch(blockers, "rollback-target", "project-id", text(rollback.projectId), trustedTarget.projectId, "rollback Project id");
@@ -513,6 +557,91 @@ function requireFirewallReceipt(blockers: CutoverBlocker[], proof: UnknownRecord
 function requireFreshObservation(blockers: CutoverBlocker[], observedAt: string, now: Date, code: string, label: string): void {
   const observed = Date.parse(observedAt);
   if (!Number.isFinite(observed) || observed > now.getTime() + 60_000 || now.getTime() - observed > MAX_RECEIPT_AGE_MS) add(blockers, "evidence-binding", code, `${label} must be no more than 30 minutes old.`);
+}
+
+function requireHistoricalPreBindingException(
+  blockers: CutoverBlocker[],
+  data: UnknownRecord,
+  proof: UnknownRecord,
+  phase: CutoverPhase,
+  candidateId: string,
+  candidateUrl: string,
+  candidateSha: string
+): boolean {
+  if (!Object.hasOwn(data, "historicalPreBindingException")) return false;
+
+  const rawException = data.historicalPreBindingException;
+  if (!rawException || typeof rawException !== "object" || Array.isArray(rawException)) {
+    add(blockers, "data-integrity", "historical-exception-shape", "The historical pre-binding exception must be one exact object with no missing or additional fields.");
+    return false;
+  }
+
+  const exception = rawException as UnknownRecord;
+  let accepted = true;
+  const reject = (code: string, message: string): void => {
+    accepted = false;
+    add(blockers, "data-integrity", code, message);
+  };
+  const actualKeys = Object.keys(exception).sort();
+  const expectedKeys = [...HISTORICAL_PRE_BINDING_EXCEPTION_KEYS].sort();
+  if (actualKeys.length !== expectedKeys.length || actualKeys.some((key, index) => key !== expectedKeys[index])) {
+    reject("historical-exception-shape", "The historical pre-binding exception must contain only its exact migration-specific fields; generic, missing, wildcard, and additional fields are forbidden.");
+  }
+  if (phase !== "pre-promotion") {
+    reject("historical-exception-phase", "The historical pre-binding exception is valid only for pre-promotion evidence and cannot be reused after promotion.");
+  }
+  if (![data.beforeDigest, data.afterDigest, data.beforeResourceFingerprint, data.afterResourceFingerprint].every((value) => value === "")) {
+    reject("historical-exception-conflicting-proof", "The historical pre-binding exception applies only when all four unavailable historical before/after fields are present as empty strings; it cannot hide a missing, partial, or changed pair.");
+  }
+  if (exception.kind !== HISTORICAL_PRE_BINDING_EXCEPTION_KIND) {
+    reject("historical-exception-kind", `The only accepted exception kind is ${HISTORICAL_PRE_BINDING_EXCEPTION_KIND}.`);
+  }
+  if (exception.migration !== HISTORICAL_PRE_BINDING_EXCEPTION_MIGRATION) {
+    reject("historical-exception-migration", "The exception is bound only to the Workspace access migration.");
+  }
+  if (exception.acceptedBy !== HISTORICAL_PRE_BINDING_EXCEPTION_TRUST.acceptedBy || exception.acceptedAt !== HISTORICAL_PRE_BINDING_EXCEPTION_TRUST.acceptedAt) {
+    reject("historical-exception-acceptance", "The exception must match Mike's exact recorded acceptance and durable acceptance timestamp.");
+  }
+  if (exception.acceptanceReceiptSha256 !== HISTORICAL_PRE_BINDING_EXCEPTION_TRUST.acceptanceReceiptSha256) {
+    reject("historical-exception-acceptance-receipt", "The exception must cite the exact retained acceptance receipt hash.");
+  }
+  if (exception.productionDumpSha256 !== HISTORICAL_PRE_BINDING_EXCEPTION_TRUST.productionDumpSha256) {
+    reject("historical-exception-production-dump", "The exception must cite the exact read-only production logical dump hash.");
+  }
+  if (exception.rehearsalReceiptSha256 !== HISTORICAL_PRE_BINDING_EXCEPTION_TRUST.rehearsalReceiptSha256) {
+    reject("historical-exception-rehearsal-receipt", "The exception must cite the exact isolated restored-PostgreSQL rehearsal receipt hash.");
+  }
+  if (exception.finalCandidateReceiptSha256 !== HISTORICAL_PRE_BINDING_EXCEPTION_TRUST.finalCandidateReceiptSha256) {
+    reject("historical-exception-final-receipt", "The exception must cite the exact final-candidate baseline receipt hash.");
+  }
+  if (exception.limitation !== HISTORICAL_PRE_BINDING_EXCEPTION_TRUST.limitation
+    || exception.rehearsalIsHistoricalProof !== false
+    || exception.currentStateIsHistoricalProof !== false) {
+    reject("historical-exception-limitation", "The exception must explicitly state that neither the rehearsal nor current state is historical production pre-binding proof.");
+  }
+  if (exception.runId !== proof.runId || typeof exception.runId !== "string" || !exception.runId) {
+    reject("historical-exception-run-binding", "The exception run id must exactly match the enclosing fresh pre-promotion receipt.");
+  }
+  if (exception.observedAt !== proof.observedAt || typeof exception.observedAt !== "string" || !exception.observedAt) {
+    reject("historical-exception-time-binding", "The exception observation time must exactly match the enclosing fresh pre-promotion receipt.");
+  }
+  const acceptedAt = Date.parse(HISTORICAL_PRE_BINDING_EXCEPTION_TRUST.acceptedAt);
+  const observedAt = Date.parse(typeof exception.observedAt === "string" ? exception.observedAt : "");
+  if (!Number.isFinite(observedAt) || observedAt < acceptedAt) {
+    reject("historical-exception-before-acceptance", "The candidate-bound exception receipt must be observed at or after Mike's recorded acceptance.");
+  }
+  if (exception.candidateDeploymentId !== candidateId
+    || canonicalDeploymentUrl(exception.candidateDeploymentUrl) !== candidateUrl
+    || exception.candidateCommitSha !== candidateSha) {
+    reject("historical-exception-candidate-binding", "The exception must bind the exact live candidate deployment id, immutable URL, and commit SHA.");
+  }
+  if (exception.finalCandidateDigest !== HISTORICAL_PRE_BINDING_EXCEPTION_TRUST.finalCandidateDigest
+    || exception.finalCandidateResourceFingerprint !== HISTORICAL_PRE_BINDING_EXCEPTION_TRUST.finalCandidateResourceFingerprint
+    || data.finalCandidateDigest !== HISTORICAL_PRE_BINDING_EXCEPTION_TRUST.finalCandidateDigest
+    || data.finalCandidateResourceFingerprint !== HISTORICAL_PRE_BINDING_EXCEPTION_TRUST.finalCandidateResourceFingerprint) {
+    reject("historical-exception-final-baseline", "The exception and data-integrity receipt must match the exact accepted final candidate digest and resource fingerprint.");
+  }
+  return accepted;
 }
 
 function requireDistinctPostEvidence(blockers: CutoverBlocker[], pre: UnknownRecord, post: UnknownRecord): void {
