@@ -178,7 +178,7 @@ async function setup(opts: CliOptions): Promise<Record<string, unknown>> {
     throw new Error("Do not pass tokens on the command line. Pipe the token to setup with --token-stdin.");
   }
   if (opts["token-stdin"] !== true) {
-    throw new Error("Missing --token-stdin. Pipe the owner token to standard input.");
+    throw new Error("Missing --token-stdin. Pipe the AgentConnection credential to standard input.");
   }
 
   const token = (await readStdin()).trim();
@@ -186,6 +186,10 @@ async function setup(opts: CliOptions): Promise<Record<string, unknown>> {
 
   const apiBaseUrl = normalizeBaseUrl(optionalStringOption(opts, "url") || DEFAULT_BASE_URL);
   const actor = optionalStringOption(opts, "actor") || "codex";
+  const session = await request("/session", {}, { baseUrl: apiBaseUrl, token, actor });
+  if (!isRecord(session) || session.authenticated !== true || (session.context !== "workspace" && session.context !== "local")) {
+    throw new Error("The credential must authenticate an exact Workspace tenant API.");
+  }
   const nextConfig: UserConfig = { apiBaseUrl, token, actor };
   await writeJsonAtomic(USER_CONFIG_PATH, nextConfig, 0o600);
 
@@ -425,7 +429,7 @@ function normalizeBaseUrl(value: string): string {
     throw new Error("The API URL must not contain credentials, a query, or a fragment.");
   }
   if (parsed.protocol === "http:" && !isLoopbackHostname(parsed.hostname)) {
-    throw new Error("A non-loopback kanban.cards API requires https:// so the owner token is encrypted in transit.");
+    throw new Error("A non-loopback kanban.cards API requires https:// so the AgentConnection credential is encrypted in transit.");
   }
   return normalized;
 }

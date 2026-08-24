@@ -5,7 +5,7 @@
     "repository": "Surfaces-Platform/kanban.cards",
     "productionBranch": "main",
     "autoAssignCustomDomains": false,
-    "mainGitDeploymentsEnabled": false,
+    "mainGitDeploymentsEnabled": true,
     "deploymentProtection": "all_except_custom_domains",
     "firewall": {
       "firewallEnabled": true,
@@ -44,6 +44,9 @@
     "id": "dpl_exact-candidate-id",
     "url": "https://exact-immutable-candidate.vercel.app",
     "projectId": "prj_exact-project-id",
+    "source": "git",
+    "repository": "Surfaces-Platform/kanban.cards",
+    "gitDirty": false,
     "commitSha": "0000000000000000000000000000000000000000",
     "commitRef": "main",
     "target": "production",
@@ -112,7 +115,7 @@
       "clerkProof": {
         "authHostSurface": "not-run",
         "authHostIsolation": "not-run",
-        "emailCodeAuth": "not-run",
+        "emailLinkAuth": "not-run",
         "sameRootSessionShare": "not-run",
         "sessionExchange": "not-run",
         "exactLegacyBinding": "not-run",
@@ -120,6 +123,13 @@
         "tenantProjectAccess": "not-run",
         "tenantProjectWrite": "not-run",
         "signOut": "not-run"
+      },
+      "agentConnectionProof": {
+        "credentialIssuedOnce": "not-run",
+        "scopeEnforcement": "not-run",
+        "workspaceHostIsolation": "not-run",
+        "activityAttribution": "not-run",
+        "revocation": "not-run"
       },
       "compatibilityProof": { "required": true, "read": "not-run" },
       "retirementProof": {},
@@ -157,7 +167,7 @@
       "clerkProof": {
         "authHostSurface": "not-run",
         "authHostIsolation": "not-run",
-        "emailCodeAuth": "not-run",
+        "emailLinkAuth": "not-run",
         "sameRootSessionShare": "not-run",
         "sessionExchange": "not-run",
         "exactLegacyBinding": "not-run",
@@ -165,6 +175,13 @@
         "tenantProjectAccess": "not-run",
         "tenantProjectWrite": "not-run",
         "signOut": "not-run"
+      },
+      "agentConnectionProof": {
+        "credentialIssuedOnce": "not-run",
+        "scopeEnforcement": "not-run",
+        "workspaceHostIsolation": "not-run",
+        "activityAttribution": "not-run",
+        "revocation": "not-run"
       },
       "compatibilityProof": { "required": true, "read": "not-run" },
       "retirementProof": {},

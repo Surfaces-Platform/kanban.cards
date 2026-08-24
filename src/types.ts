@@ -5,6 +5,7 @@ export type ActivityChannel = "web" | "api";
 export interface ActivityActor {
   channel: ActivityChannel;
   label: string;
+  agentConnectionId?: string;
 }
 
 export interface Column {

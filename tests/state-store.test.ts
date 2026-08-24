@@ -20,6 +20,19 @@ test("V2 starts empty and rejects legacy workspace shapes", () => {
   );
 });
 
+test("Activity normalization preserves an optional stable AgentConnection ID without requiring it from legacy rows", () => {
+  const now = new Date().toISOString();
+  const workspace = workspaceWithProject(now) as any;
+  workspace.projects[0].activity = [
+    { id: "activity-agent", action: "card.created", actor: { channel: "api", label: "Automation", agentConnectionId: "agent-123" }, summary: "Created Card", projectId: "project-one", createdAt: now },
+    { id: "activity-legacy", action: "project.updated", actor: { channel: "api", label: "Legacy bridge" }, summary: "Updated Project", projectId: "project-one", createdAt: now }
+  ];
+
+  const normalized = normalizeWorkspace(workspace);
+  assert.deepEqual(normalized.projects[0].activity[0].actor, { channel: "api", label: "Automation", agentConnectionId: "agent-123" });
+  assert.deepEqual(normalized.projects[0].activity[1].actor, { channel: "api", label: "Legacy bridge" });
+});
+
 test("file storage persists only normalized V2 state", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-cards-v2-store-"));
   const dataPath = path.join(directory, "workspace.json");

@@ -346,10 +346,15 @@ function normalizeActivity(value: unknown): Activity {
   const channel = actor.channel;
   if (channel !== "web" && channel !== "api") throw new Error("Activity actor channel must be web or api.");
   const cardId = optionalString(activity.cardId);
+  const agentConnectionId = optionalString(actor.agentConnectionId);
   return {
     id: requiredString(activity.id, "Activity id"),
     action: requiredString(activity.action, "Activity action"),
-    actor: { channel, label: requiredString(actor.label, "Activity actor label") },
+    actor: {
+      channel,
+      label: requiredString(actor.label, "Activity actor label"),
+      ...(agentConnectionId ? { agentConnectionId } : {})
+    },
     summary: requiredString(activity.summary, "Activity summary"),
     projectId: requiredString(activity.projectId, "Activity projectId"),
     ...(cardId ? { cardId } : {}),

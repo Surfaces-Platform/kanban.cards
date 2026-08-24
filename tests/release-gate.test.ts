@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { CANDIDATE_FIREWALL_BYPASS_RULE, CANDIDATE_FIREWALL_DENY_RULE, PROMOTION_CONFIRMATION, authorizePromotion, evaluateCutoverSnapshot, isVercelSsoProtectionRedirect, promoteVerifiedCandidate, unexpectedDeployableApplicationChanges, type TrustedReleaseTarget } from "../src/release-gate";
-import { mainGitDeploymentsAreDisabled } from "../src/release-policy";
+import { mainGitDeploymentsAreDisabled, mainGitDeploymentsAreEnabled } from "../src/release-policy";
 import { parseReleaseControllerArguments } from "../src/release-controller";
+import { evaluateSteadyRelease, parseSteadyReleaseArguments } from "../scripts/release-steady";
 
 const NOW = new Date("2026-08-13T06:00:00.000Z");
 const TARGET: TrustedReleaseTarget = {
@@ -47,10 +48,55 @@ test("unavailable historical pre-binding evidence is not a release input", () =>
   assert.equal(evaluateCutoverSnapshot(snapshot, "pre-promotion", TARGET, NOW).ok, true);
 });
 
-test("overlapping true Git rules cannot bypass the main deployment block", () => {
+test("main deployment policy follows the default and matching true override", () => {
   assert.equal(mainGitDeploymentsAreDisabled({ main: false }), true);
   assert.equal(mainGitDeploymentsAreDisabled({ main: false, "*": true }), false);
-  assert.equal(mainGitDeploymentsAreDisabled({ "*": false }), false);
+  assert.equal(mainGitDeploymentsAreDisabled({ "*": false }), true);
+  assert.equal(mainGitDeploymentsAreEnabled(false), false);
+  assert.equal(mainGitDeploymentsAreEnabled({ main: "false" }), false);
+});
+
+test("steady releases enable staged main builds without auto-promoting traffic", () => {
+  assert.equal(mainGitDeploymentsAreEnabled(undefined), true);
+  assert.equal(mainGitDeploymentsAreEnabled({ main: false }), false);
+  assert.throws(() => parseSteadyReleaseArguments(["--promote", "--confirmation", "yes"]), /literal confirmation/);
+  assert.throws(() => parseSteadyReleaseArguments(["--promote", "--confirmation", PROMOTION_CONFIRMATION]), /exact --deployment id/);
+  assert.deepEqual(parseSteadyReleaseArguments(["--deployment", "dpl_candidate"]), { deploymentId: "dpl_candidate", promote: false, confirmation: "" });
+
+  const pre = steadyReleaseFacts();
+  const evaluation = evaluateSteadyRelease(pre, "pre-promotion", TARGET);
+  assert.equal(evaluation.ok, true);
+  assert.equal(evaluation.candidate.id, "dpl_candidate");
+  assert.equal(evaluation.rollbackTarget.id, "dpl_previous");
+  pre.policy.autoAssignCustomDomains = true;
+  assert.ok(evaluateSteadyRelease(pre, "pre-promotion", TARGET).blockers.some((blocker) => blocker.code === "auto-domain-assignment"));
+
+  const unhealthyRollback = steadyReleaseFacts();
+  unhealthyRollback.currentProduction.health.ok = false;
+  assert.ok(evaluateSteadyRelease(unhealthyRollback, "pre-promotion", TARGET).blockers.some((blocker) => blocker.code === "rollback-health"));
+
+  const manualCandidate = steadyReleaseFacts();
+  manualCandidate.candidate.source = "cli";
+  assert.ok(evaluateSteadyRelease(manualCandidate, "pre-promotion", TARGET).blockers.some((blocker) => blocker.code === "candidate-source"));
+});
+
+test("steady post-promotion proof requires permanent domains and exact public routes", () => {
+  const post = steadyReleaseFacts();
+  post.currentProduction = { ...post.candidate };
+  post.routes = {
+    root: { deploymentId: post.candidate.id, status: 200, ssoProtected: false, mitigated: "" },
+    auth: { deploymentId: post.candidate.id, status: 200, ssoProtected: false, mitigated: "" },
+    tenant: { deploymentId: post.candidate.id, status: 200, ssoProtected: false, mitigated: "" }
+  };
+  post.publicHealth = post.candidateHealth;
+  post.publicAccessHealth = post.candidateAccessHealth;
+  assert.equal(evaluateSteadyRelease(post, "post-promotion", TARGET).ok, true);
+
+  post.policy.domains = post.policy.domains.filter((domain: { name: string }) => domain.name !== "mike.kanban.cards");
+  assert.ok(evaluateSteadyRelease(post, "post-promotion", TARGET).blockers.some((blocker) => blocker.code === "domain-mike.kanban.cards"));
+
+  post.routes.auth.ssoProtected = true;
+  assert.ok(evaluateSteadyRelease(post, "post-promotion", TARGET).blockers.some((blocker) => blocker.code === "auth-public-sso"));
 });
 
 test("the operational CLI requires live state for promotion and post completion", () => {
@@ -76,7 +122,7 @@ test("pending binding blocks with zero promotion calls", async () => {
 });
 
 test("Clerk isolation and one bounded compatibility read remain mandatory", () => {
-  for (const field of ["authHostSurface", "authHostIsolation", "emailCodeAuth", "sameRootSessionShare", "sessionExchange", "exactLegacyBinding", "canonicalHandoff", "tenantProjectAccess", "tenantProjectWrite", "signOut"] as const) {
+  for (const field of ["authHostSurface", "authHostIsolation", "emailLinkAuth", "sameRootSessionShare", "sessionExchange", "exactLegacyBinding", "canonicalHandoff", "tenantProjectAccess", "tenantProjectWrite", "signOut"] as const) {
     const snapshot = readySnapshot();
     snapshot.evidence.prePromotion.clerkProof[field] = "failed";
     const result = evaluateCutoverSnapshot(snapshot, "pre-promotion", TARGET, NOW);
@@ -103,6 +149,27 @@ test("Clerk isolation and one bounded compatibility read remain mandatory", () =
   assert.equal(evaluateCutoverSnapshot(retiredLifecycle, "pre-promotion", TARGET, NOW).ok, true);
 });
 
+test("AgentConnection lifecycle and isolation proof is mandatory before and after promotion", () => {
+  const fields = [
+    ["credentialIssuedOnce", "agent-credential-issued-once"],
+    ["scopeEnforcement", "agent-scope-enforcement"],
+    ["workspaceHostIsolation", "agent-workspace-host-isolation"],
+    ["activityAttribution", "agent-activity-attribution"],
+    ["revocation", "agent-revocation"]
+  ] as const;
+  for (const phase of ["pre-promotion", "post-promotion"] as const) {
+    for (const [field, code] of fields) {
+      const missing = phase === "pre-promotion" ? readySnapshot() : readyPostSnapshot();
+      delete (missing.evidence[phase === "pre-promotion" ? "prePromotion" : "postPromotion"].agentConnectionProof as Record<string, unknown>)[field];
+      assert.ok(evaluateCutoverSnapshot(missing, phase, TARGET, NOW).blockers.some((blocker) => blocker.code === code));
+
+      const notRun = phase === "pre-promotion" ? readySnapshot() : readyPostSnapshot();
+      notRun.evidence[phase === "pre-promotion" ? "prePromotion" : "postPromotion"].agentConnectionProof[field] = "not-run";
+      assert.ok(evaluateCutoverSnapshot(notRun, phase, TARGET, NOW).blockers.some((blocker) => blocker.code === code));
+    }
+  }
+});
+
 test("legacy provider and callback evidence cannot satisfy Clerk gates", () => {
   const snapshot = readySnapshot();
   const legacyReceipt = snapshot.evidence.prePromotion as unknown as Record<string, unknown>;
@@ -123,7 +190,7 @@ test("legacy provider and callback evidence cannot satisfy Clerk gates", () => {
   assert.ok(codes.has("clerk-domain-configuration"));
   assert.ok(codes.has("clerk-auth-host-surface"));
   assert.ok(codes.has("clerk-auth-host-isolation"));
-  assert.ok(codes.has("clerk-email-code-auth"));
+  assert.ok(codes.has("clerk-email-link-auth"));
   assert.ok(codes.has("clerk-same-root-session-share"));
   assert.ok(codes.has("clerk-session-exchange"));
   assert.ok(codes.has("clerk-sign-out"));
@@ -255,6 +322,15 @@ test("post-promotion cleanup and public reachability expectations are explicit",
     assert.ok(evaluateCutoverSnapshot(snapshot, "post-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === code));
   }
 
+});
+
+test("project domain registry and exact route proof outrank deployment alias metadata", () => {
+  const snapshot = readyPostSnapshot();
+  snapshot.currentProduction.aliases = ["kanbancards-surfaces-platform.vercel.app"];
+  assert.equal(evaluateCutoverSnapshot(snapshot, "post-promotion", TARGET, NOW).ok, true);
+
+  snapshot.policy.domains = snapshot.policy.domains.filter((domain: { name: string }) => domain.name !== "kanban.cards");
+  assert.ok(evaluateCutoverSnapshot(snapshot, "post-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "public-domain-unregistered"));
 });
 
 test("post-promotion keeps one focused real-Postgres preservation check", () => {
@@ -497,7 +573,8 @@ function readySnapshot() {
     sameArtifactCanonicalHost: "passed",
     health: { status: 200, ok: true, store: "postgres", missingConfiguration: [], access: { registry: "ready", legacyState: "ready", legacyBinding: "ready" } },
     accessHealth: { status: 200, ok: true, legacyBridge: "enabled", registryState: "ready", legacyState: "ready", legacyBinding: { present: true, status: "ready" }, missingConfiguration: [] },
-    clerkProof: { authHostSurface: "passed", authHostIsolation: "passed", emailCodeAuth: "passed", sameRootSessionShare: "passed", sessionExchange: "passed", exactLegacyBinding: "passed", canonicalHandoff: "passed", tenantProjectAccess: "passed", tenantProjectWrite: "passed", signOut: "passed" },
+    clerkProof: { authHostSurface: "passed", authHostIsolation: "passed", emailLinkAuth: "passed", sameRootSessionShare: "passed", sessionExchange: "passed", exactLegacyBinding: "passed", canonicalHandoff: "passed", tenantProjectAccess: "passed", tenantProjectWrite: "passed", signOut: "passed" },
+    agentConnectionProof: { credentialIssuedOnce: "passed", scopeEnforcement: "passed", workspaceHostIsolation: "passed", activityAttribution: "passed", revocation: "passed" },
     compatibilityProof: { required: true, read: "passed" },
     retirementProof: { required: true, public401: "passed", legacy401: "passed", sibling401: "passed", oldDeploymentsClosed: "passed" },
     dataIntegrityProof: phase === "post-promotion"
@@ -505,8 +582,8 @@ function readySnapshot() {
       : { realPostgres: true, afterDigest: "focused-pre-promotion-state" }
   });
   return {
-    policy: { projectId: TARGET.projectId, teamId: TARGET.teamId, repository: TARGET.repository, productionBranch: "main", autoAssignCustomDomains: false, mainGitDeploymentsEnabled: false, deploymentProtection: "all_except_custom_domains", firewall, aliases: ["auth.kanban.cards", "candidate.release.kanban.cards", "mike.candidate.release.kanban.cards", "kanban.cards"], aliasInventoryComplete: true },
-    candidate: { id: "dpl_candidate", url: "https://candidate-abc.vercel.app", projectId: TARGET.projectId, commitSha: candidateSha, commitRef: "main", target: "production", readyState: "READY", aliases: [] },
+    policy: { projectId: TARGET.projectId, teamId: TARGET.teamId, repository: TARGET.repository, productionBranch: "main", autoAssignCustomDomains: false, mainGitDeploymentsEnabled: true, deploymentProtection: "all_except_custom_domains", domains: [{ name: "kanban.cards", verified: true }, { name: "auth.kanban.cards", verified: true }, { name: "mike.kanban.cards", verified: true }], firewall, aliases: ["auth.kanban.cards", "candidate.release.kanban.cards", "mike.candidate.release.kanban.cards", "kanban.cards"], aliasInventoryComplete: true },
+    candidate: { id: "dpl_candidate", url: "https://candidate-abc.vercel.app", projectId: TARGET.projectId, source: "git", repository: TARGET.repository, gitDirty: false, commitSha: candidateSha, commitRef: "main", target: "production", readyState: "READY", aliases: [] },
     currentProduction: { id: "dpl_known_good", url: "https://known-good-abc.vercel.app", projectId: TARGET.projectId, commitSha: productionSha, commitRef: "main", target: "production", readyState: "READY", aliases: ["kanban.cards"], health: { status: 200, ok: true, store: "postgres" } },
     evidence: {
       prePromotion: receipt("pre-promotion", "run-pre", "https://candidate.release.kanban.cards"),
@@ -531,4 +608,51 @@ function readyPostSnapshot() {
   snapshot.policy.aliases = ["auth.kanban.cards", "kanban.cards", "mike.kanban.cards"];
   snapshot.currentProduction = { ...snapshot.candidate, aliases: ["auth.kanban.cards", "kanban.cards", "mike.kanban.cards"], health: { status: 200, ok: true, store: "postgres" } };
   return snapshot;
+}
+
+function steadyReleaseFacts(): any {
+  const candidate = {
+    id: "dpl_candidate",
+    url: "https://candidate-abc.vercel.app",
+    projectId: TARGET.projectId,
+    source: "git",
+    repository: TARGET.repository,
+    gitDirty: false,
+    commitSha: "a".repeat(40),
+    commitRef: "main",
+    target: "production",
+    readyState: "READY"
+  };
+  return {
+    checkout: { clean: true, branch: "main", sha: candidate.commitSha },
+    policy: {
+      projectId: TARGET.projectId,
+      teamId: TARGET.teamId,
+      repository: TARGET.repository,
+      productionBranch: TARGET.productionBranch,
+      autoAssignCustomDomains: false,
+      mainGitDeploymentsEnabled: true,
+      deploymentProtection: "all_except_custom_domains",
+      domains: [
+        { name: "kanban.cards", verified: true },
+        { name: "auth.kanban.cards", verified: true },
+        { name: "mike.kanban.cards", verified: true }
+      ]
+    },
+    candidate,
+    currentProduction: {
+      id: "dpl_previous",
+      url: "https://previous-abc.vercel.app",
+      projectId: TARGET.projectId,
+      commitSha: "b".repeat(40),
+      commitRef: "main",
+      target: "production",
+      readyState: "READY",
+      health: { status: 200, ok: true, store: "postgres", missingConfiguration: [] },
+      accessHealth: { status: 200, ok: true, registryState: "ready", legacyState: "ready", legacyBinding: { status: "ready" } }
+    },
+    candidateHealth: { status: 200, ok: true, store: "postgres", missingConfiguration: [] },
+    candidateAccessHealth: { status: 200, ok: true, registryState: "ready", legacyState: "ready", legacyBinding: { status: "ready" } },
+    generatedDeploymentProtected: true
+  };
 }

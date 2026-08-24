@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { mainGitDeploymentsAreDisabled } from "../src/release-policy";
+import { mainGitDeploymentsAreEnabled } from "../src/release-policy";
 import { inspectCandidateFirewall } from "../src/release-gate";
 
 const run = promisify(execFile);
@@ -42,14 +42,14 @@ async function main(): Promise<void> {
   const remoteLink = record(project.link);
   const protection = record(project.ssoProtection);
   const localGit = record(vercel.git);
-  const localDeployments = record(localGit.deploymentEnabled);
+  const localDeployments = localGit.deploymentEnabled;
   const policy = {
     projectId: stringValue(project.id),
     teamId: stringValue(project.accountId),
     repository: `${stringValue(remoteLink.org)}/${stringValue(remoteLink.repo)}`,
     productionBranch: stringValue(remoteLink.productionBranch),
     autoAssignCustomDomains: project.autoAssignCustomDomains,
-    mainGitDeploymentsEnabled: !mainGitDeploymentsAreDisabled(localDeployments),
+    mainGitDeploymentsEnabled: mainGitDeploymentsAreEnabled(localDeployments),
     deploymentProtection: stringValue(protection.deploymentType),
     firewall: firewallFacts
   };
@@ -59,7 +59,7 @@ async function main(): Promise<void> {
     [policy.repository === "Surfaces-Platform/kanban.cards", "linked GitHub repository mismatch"],
     [policy.productionBranch === "main", "production branch is not main"],
     [policy.autoAssignCustomDomains === false, "Auto-assign Custom Production Domains is enabled"],
-    [policy.mainGitDeploymentsEnabled === false, "automatic deployments from main are enabled"],
+    [policy.mainGitDeploymentsEnabled === true, "Git deployments from main are disabled"],
     [policy.deploymentProtection === "all_except_custom_domains", "Standard Protection is not enabled"],
     [firewallFacts.firewallEnabled, "Vercel Firewall is disabled"],
     [!firewallFacts.hasDraft && firewallFacts.pendingChanges === 0, "Vercel Firewall has unpublished changes"],

@@ -94,7 +94,7 @@ export function getClerkAuthConfig(env: Record<string, string | undefined> = pro
     encryptionKey: requiredEnv(env, "CLERK_ENCRYPTION_KEY"),
     sessionSecret: requiredEnv(env, "SESSION_SECRET"),
     authHost: requiredEnv(env, "KANBAN_CARDS_AUTH_HOST"),
-    allowedUserIds: parseAllowedUserIds(requiredEnv(env, "KANBAN_CARDS_ALLOWED_CLERK_USER_IDS")),
+    allowedUserIds: parseAllowedUserIds(env.KANBAN_CARDS_ALLOWED_CLERK_USER_IDS || ""),
     rootSessionTtlSeconds,
     tenantSessionTtlSeconds
   });
@@ -145,7 +145,6 @@ export function validateClerkAuthConfig(config: ClerkAuthConfig): ClerkAuthConfi
     throw new ClerkAuthConfigError("KANBAN_CARDS_ALLOWED_CLERK_USER_IDS must contain exact Clerk user IDs");
   }
   const allowedUserIds = [...new Set(config.allowedUserIds.map((value) => configClerkUserId(value, "KANBAN_CARDS_ALLOWED_CLERK_USER_IDS")))];
-  if (!allowedUserIds.length) throw new ClerkAuthConfigError("KANBAN_CARDS_ALLOWED_CLERK_USER_IDS must contain at least one exact Clerk user ID");
   return {
     publishableKey,
     secretKey,
@@ -218,8 +217,7 @@ export function createClerkAuthGateway(config: ClerkAuthConfig, dependencies: Cl
       if (!primaryEmail || primaryEmail.verification?.status !== "verified") {
         throw new ClerkIdentityError("A verified primary email address is required.");
       }
-      const displayName = [user.firstName, user.lastName].filter(Boolean).join(" ").trim() || user.username?.trim() || "";
-      if (!displayName) throw new ClerkIdentityError("A Clerk profile name is required.");
+      const displayName = [user.firstName, user.lastName].filter(Boolean).join(" ").trim() || user.username?.trim() || "Owner";
       return {
         clerkUserId: userId,
         clerkSessionId: sessionId,
@@ -382,9 +380,7 @@ function exactClerkAuthHost(value: unknown): string {
 }
 
 function parseAllowedUserIds(value: string): string[] {
-  const values = value.split(",").map((item) => item.trim()).filter(Boolean);
-  if (!values.length) throw new ClerkAuthConfigError("KANBAN_CARDS_ALLOWED_CLERK_USER_IDS must contain at least one exact Clerk user ID");
-  return values;
+  return value.split(",").map((item) => item.trim()).filter(Boolean);
 }
 
 function configClerkUserId(value: unknown, label: string): string {

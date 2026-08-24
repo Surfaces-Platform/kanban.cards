@@ -54,13 +54,14 @@ import type {
 } from "./types";
 import type { WorkspaceStoreResolver } from "./types";
 
-type AuthMethod = "bearer" | "cookie";
+type AuthMethod = "bearer" | "cookie" | "agent";
 
 interface OwnerAuth {
   method: AuthMethod;
   actor: ActivityActor;
   workspace: AccessWorkspace | null;
   store: StateStore;
+  scopes?: readonly ("read" | "write")[];
 }
 
 declare global {
@@ -253,12 +254,9 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
   const legacyMigrationValues = [legacyClerkUserId, legacyWorkspaceSlug, legacyWorkspaceName];
   const missingConfiguration = [
     ...(!clerkAuthConfigured && !apiToken ? ["KANBAN_CARDS_API_TOKEN"] : []),
-    ...(production && !clerkAuthConfigured ? ["NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY, CLERK_SECRET_KEY, CLERK_ENCRYPTION_KEY, SESSION_SECRET, KANBAN_CARDS_AUTH_HOST, and KANBAN_CARDS_ALLOWED_CLERK_USER_IDS"] : []),
+    ...(production && !clerkAuthConfigured ? ["NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY, CLERK_SECRET_KEY, CLERK_ENCRYPTION_KEY, SESSION_SECRET, and KANBAN_CARDS_AUTH_HOST"] : []),
     ...(legacyMigrationValues.some(Boolean) && !legacyMigrationValues.every(Boolean)
       ? ["KANBAN_CARDS_LEGACY_CLERK_USER_ID, KANBAN_CARDS_LEGACY_WORKSPACE_SLUG, and KANBAN_CARDS_LEGACY_WORKSPACE_NAME must be set together"]
-      : []),
-    ...(legacyClerkUserId && clerkAuthConfig && !clerkAuthConfig.allowedUserIds.includes(legacyClerkUserId)
-      ? ["KANBAN_CARDS_ALLOWED_CLERK_USER_IDS must include KANBAN_CARDS_LEGACY_CLERK_USER_ID"]
       : []),
     ...(databaseRequired && !connectionString ? ["KANBAN_CARDS_DATABASE_URL or POSTGRES_URL or DATABASE_URL"] : [])
   ];
@@ -460,9 +458,6 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     const requestAuth = clerkAuthGateway.requestAuth(req);
     if (!requestAuth.authenticated || !requestAuth.clerkUserId || !requestAuth.clerkSessionId) {
       throw httpError(401, "Clerk sign-in required.");
-    }
-    if (!clerkAuthConfig.allowedUserIds.includes(requestAuth.clerkUserId)) {
-      throw httpError(403, "This Clerk account does not have access to the private release.");
     }
     let identity;
     try {
@@ -813,6 +808,46 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     }
   }));
 
+  app.use("/api/agent-connections", (req, _res, next) => {
+    void (async () => {
+      if (!clerkAuthConfig) throw httpError(404, "API route not found.");
+      rejectWorkspaceSelectors(req, req.method !== "GET" && req.method !== "HEAD");
+      const context = await resolveAccessContext(req, { accessStore, apiToken, legacyApiWorkspaceId, legacyStore, ownerLabel, clerkAuthConfig, hostFamilies, primaryHostFamily, trustForwardedHost, workspaceStoreResolver });
+      if (!context.auth || context.auth.method !== "cookie" || !context.identity || !context.workspace) throw httpError(401, "Owner sign-in required.");
+      if (req.method !== "GET" && req.method !== "HEAD") assertRequestOrigin(req, true, trustForwardedHost);
+      req.ownerAuth = context.auth;
+      next();
+    })().catch(next);
+  });
+
+  app.get("/api/agent-connections", asyncHandler(async (req, res) => {
+    noStore(res);
+    const identity = (await resolveTenantOwner(req, clerkAuthConfig!, trustForwardedHost, accessStore, req.ownerAuth!.workspace!));
+    const connections = await accessStore.listAgentConnections(identity.providerSubject, req.ownerAuth!.workspace!.id);
+    res.json({ connections: connections.map(publicAgentConnection) });
+  }));
+
+  app.post("/api/agent-connections", asyncHandler(async (req, res) => {
+    noStore(res);
+    const identity = await resolveTenantOwner(req, clerkAuthConfig!, trustForwardedHost, accessStore, req.ownerAuth!.workspace!);
+    const body = asRecord(req.body);
+    let issued;
+    try {
+      issued = await accessStore.createAgentConnection({ providerSubject: identity.providerSubject, workspaceId: req.ownerAuth!.workspace!.id, label: requiredString(body.label, "Agent label"), scopes: body.scopes as ("read" | "write")[], expiresAt: body.expiresAt == null ? null : requiredString(body.expiresAt, "Agent expiry") });
+    } catch (error) {
+      if (error instanceof AccessStoreError && error.code === "ACCESS_FORBIDDEN") throw httpError(403, error.message);
+      if (error instanceof Error) throw httpError(400, error.message);
+      throw error;
+    }
+    res.status(201).json({ connection: publicAgentConnection(issued.connection), credential: issued.credential });
+  }));
+
+  app.delete("/api/agent-connections/:connectionId", asyncHandler(async (req, res) => {
+    const identity = await resolveTenantOwner(req, clerkAuthConfig!, trustForwardedHost, accessStore, req.ownerAuth!.workspace!);
+    const connection = await accessStore.revokeAgentConnection(identity.providerSubject, req.ownerAuth!.workspace!.id, routeParam(req, "connectionId"));
+    res.json({ connection: publicAgentConnection(connection) });
+  }));
+
   app.get("/", serveIndex(staticDir));
   app.get("/index.html", serveIndex(staticDir));
   app.get("/sign-in", serveIndex(staticDir));
@@ -1124,6 +1159,36 @@ async function resolveAccessContext(req: Request, config: AccessContextConfig): 
   if (authorization) {
     const bearer = /^Bearer\s+(\S+)$/.exec(authorization)?.[1] || "";
     if (!config.apiToken || !safeEqual(bearer, config.apiToken)) {
+      try {
+        if (hostContext.kind !== "workspace" || !tenantWorkspace || !supportsWorkspace(hostFamily, tenantWorkspace.slug)) {
+          return { kind: hostContext.kind, auth: null, identity: null, workspace: tenantWorkspace, hostFamily };
+        }
+        const verified = await config.accessStore.authorizeAgentCredential({
+          credential: bearer,
+          workspaceId: tenantWorkspace.id,
+          requiredScope: req.method === "GET" || req.method === "HEAD" ? "read" : "write"
+        });
+        return {
+          kind: "workspace",
+          auth: {
+            method: "agent",
+            actor: {
+              channel: "api",
+              label: verified.connection.label,
+              agentConnectionId: verified.connection.id
+            },
+            workspace: verified.workspace,
+            store: config.workspaceStoreResolver.resolve(verified.workspace.storageId),
+            scopes: verified.connection.scopes
+          },
+          identity: null,
+          workspace: verified.workspace,
+          hostFamily
+        };
+      } catch (error) {
+        if (error instanceof AccessStoreError && error.code === "ACCESS_AGENT_SCOPE_MISSING") throw httpError(403, error.message);
+        if (!(error instanceof AccessStoreError)) throw error;
+      }
       return {
         kind: hostContext.kind,
         auth: null,
@@ -1181,9 +1246,6 @@ async function resolveAccessContext(req: Request, config: AccessContextConfig): 
   if (!tenantSession || tenantSession.workspaceId !== tenantWorkspace.id) {
     return { kind: "workspace", auth: null, identity: null, workspace: tenantWorkspace, hostFamily };
   }
-  if (!config.clerkAuthConfig.allowedUserIds.includes(tenantSession.providerSubject)) {
-    return { kind: "workspace", auth: null, identity: null, workspace: tenantWorkspace, hostFamily };
-  }
   if (await config.accessStore.isSessionRevoked(tenantSession.providerSubject, tenantSession.sessionId)) {
     return { kind: "workspace", auth: null, identity: null, workspace: tenantWorkspace, hostFamily };
   }
@@ -1235,9 +1297,37 @@ async function verifiedRootIdentity(
   const platformRequest = webRequest(req, trustForwardedHost);
   const identity = await verifyRootSession(platformRequest, config.sessionSecret, isProductionRequest(platformRequest));
   if (!identity) return null;
-  if (!config.allowedUserIds.includes(identity.providerSubject)) return null;
   if (accessStore && await accessStore.isSessionRevoked(identity.providerSubject, identity.sessionId)) return null;
   return identity;
+}
+
+async function resolveTenantOwner(
+  req: Request,
+  config: ClerkAuthConfig,
+  trustForwardedHost: boolean,
+  accessStore: AccessStore,
+  workspace: AccessWorkspace
+): Promise<RootSession> {
+  const platformRequest = webRequest(req, trustForwardedHost);
+  const session = await verifyTenantSession(platformRequest, config.sessionSecret, isProductionRequest(platformRequest));
+  if (!session || session.workspaceId !== workspace.id || await accessStore.isSessionRevoked(session.providerSubject, session.sessionId)) {
+    throw httpError(401, "Owner sign-in required.");
+  }
+  const owner = await accessStore.resolveOwner(session.providerSubject);
+  if (!owner || !owner.workspaces.some((candidate) => candidate.id === workspace.id)) throw httpError(401, "Owner sign-in required.");
+  return { providerSubject: owner.owner.providerSubject, email: owner.owner.email, displayName: owner.owner.displayName, sessionId: session.sessionId, rootOrigin: session.rootOrigin };
+}
+
+function publicAgentConnection(connection: import("./access-store").AgentConnection): UnknownRecord {
+  return {
+    id: connection.id,
+    label: connection.label,
+    scopes: [...connection.scopes],
+    createdAt: connection.createdAt,
+    lastUsedAt: connection.lastUsedAt,
+    expiresAt: connection.expiresAt,
+    revokedAt: connection.revokedAt
+  };
 }
 
 function webRequest(req: Request, trustForwardedHost: boolean): globalThis.Request {

@@ -1,17 +1,16 @@
 # kanban.cards API
 
-The base URL defaults to `http://127.0.0.1:4317/api`. The compatibility token authorizes the skill to use one server-bound Workspace. It never accepts a client-supplied Workspace selector. The browser uses provider-verified root and tenant sessions in production.
+The base URL defaults to `http://127.0.0.1:4317/api`. In production, configure the exact tenant URL such as `https://my-workspace.kanban.cards/api` and use a one-time AgentConnection credential bound to that Workspace. A client-supplied Workspace selector is never accepted. The legacy compatibility bearer remains a migration bridge only.
 
 ## Headers
 
 Every helper request sends:
 
 ```http
-Authorization: Bearer <owner-token>
-X-Kanban-Actor: <actor-label>
+Authorization: Bearer <agent-connection-credential>
 ```
 
-Resource POSTs also send `Idempotency-Key`. `create-card` derives a stable key from `projectId` plus `externalKey` unless the caller supplies `--idempotency-key`. Other resource POSTs generate a unique key unless one is supplied.
+The helper may retain `X-Kanban-Actor` for compatibility-bearer context, but AgentConnection Activity attribution always uses the verified connection's stable ID and stored label. The legacy bearer never receives an AgentConnection ID. Resource POSTs also send `Idempotency-Key`. `create-card` derives a stable key from `projectId` plus `externalKey` unless the caller supplies `--idempotency-key`. Other resource POSTs generate a unique key unless one is supplied.
 
 Project and card patches accept:
 
@@ -29,8 +28,8 @@ The API rejects `If-Match` on writes. Standard HTTP precondition handling can re
 
 ```json
 {
-  "apiBaseUrl": "https://kanban.cards/api",
-  "token": "secret-owner-token",
+  "apiBaseUrl": "https://my-workspace.kanban.cards/api",
+  "token": "one-time-agent-connection-credential",
   "actor": "codex"
 }
 ```
@@ -123,7 +122,7 @@ Return `201 { "comment": Comment, "card": { "id": string, "version": number }, "
 
 ### `GET /projects/:projectId/activity?limit=25`
 
-Return `{ "activity": Activity[], "projectRevision": number }`. Activity actors come from the server-validated `X-Kanban-Actor` label and channel metadata.
+Return `{ "activity": Activity[], "projectRevision": number }`. For AgentConnection calls, Activity actors contain `{ channel: "api", label, agentConnectionId }` from the verified durable connection; request labels cannot override either stored field. Older and compatibility-bearer Activity rows omit `agentConnectionId`.
 
 ## Helper command mapping
 

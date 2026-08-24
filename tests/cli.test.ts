@@ -7,7 +7,10 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { createFileAccessStore } from "../src/access-store";
+import type { ClerkAuthConfig, ClerkAuthGateway } from "../src/clerk-auth";
 import { createApp } from "../src/server";
+import { createWorkspaceStoreResolver } from "../src/state-store";
 
 const CLIENT_PATH = path.join(process.cwd(), ".agents", "skills", "kanban-cards", "scripts", "kanban-cards-client.mjs");
 
@@ -104,6 +107,97 @@ test("the skill helper keeps credentials user-scoped and reconciles a bound proj
 
     const activity = JSON.parse((await runCli(["activity", "--limit", "20"], { cwd: repository, env })).stdout);
     assert.ok(activity.activity.some((entry: any) => entry.actor.label === "cli-test" && entry.actor.channel === "api"));
+  } finally {
+    if (server.listening) await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("the skill helper verifies a tenant-bound AgentConnection, preserves stable Activity attribution, and fails after revocation", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-cards-agent-cli-"));
+  const home = path.join(directory, "home");
+  const repository = path.join(directory, "repo");
+  await fs.mkdir(path.join(repository, ".git"), { recursive: true });
+  await fs.mkdir(home, { recursive: true });
+
+  const accessStore = createFileAccessStore(path.join(directory, "access.json"));
+  const owner = { providerSubject: "user_cliAgent123", email: "cli-agent@example.com", displayName: "CLI Agent Owner" };
+  const workspace = await accessStore.createWorkspace({ ...owner, slug: "cli-agent", name: "CLI Agent Workspace" });
+  const issued = await accessStore.createAgentConnection({
+    providerSubject: owner.providerSubject,
+    workspaceId: workspace.id,
+    label: "Tenant automation",
+    scopes: ["read", "write"]
+  });
+  const workspaceStoreResolver = createWorkspaceStoreResolver({
+    dataPath: path.join(directory, "legacy.json"),
+    workspaceDirectory: path.join(directory, "workspaces")
+  });
+  let application: ReturnType<typeof createApp> | null = null;
+  const server = createServer((req, res) => {
+    if (!application) {
+      res.statusCode = 503;
+      res.end("Test application is starting.");
+      return;
+    }
+    application(req, res);
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const port = (server.address() as AddressInfo).port;
+  const rootHost = `localhost:${port}`;
+  const clerkAuthConfig: ClerkAuthConfig = {
+    publishableKey: `pk_test_${Buffer.from("clerk.localhost$", "utf8").toString("base64").replace(/=+$/, "")}`,
+    secretKey: "sk_test_cli_agent",
+    encryptionKey: "cli-agent-encryption-key-01234567890123456789",
+    sessionSecret: "cli-agent-session-secret-01234567890123456789",
+    authHost: `auth.localhost:${port}`,
+    allowedUserIds: [],
+    rootSessionTtlSeconds: 3_600,
+    tenantSessionTtlSeconds: 3_600
+  };
+  const clerkAuthGateway: ClerkAuthGateway = {
+    middleware() { return (_req, _res, next) => next(); },
+    requestAuth() { return { authenticated: false, clerkUserId: null, clerkSessionId: null }; },
+    async verifiedIdentity() { throw new Error("Not used by AgentConnection CLI proof."); },
+    async revokeSession() {}
+  };
+  application = createApp({
+    accessStore,
+    clerkAuthConfig,
+    clerkAuthGateway,
+    requireDatabase: false,
+    rootHost,
+    store: workspaceStoreResolver.resolve("default"),
+    workspaceStoreResolver
+  });
+  const rootApi = `http://localhost:${port}/api`;
+  const tenantApi = `http://${workspace.slug}.localhost:${port}/api`;
+  const env = cleanEnv({ HOME: home });
+
+  try {
+    await assert.rejects(
+      runCli(["setup", "--url", rootApi, "--actor", "Forged caller label", "--token-stdin"], { cwd: repository, env, input: `${issued.credential}\n` }),
+      /exact Workspace tenant API|Workspace unavailable/
+    );
+    const setup = await runCli(["setup", "--url", tenantApi, "--actor", "Forged caller label", "--token-stdin"], {
+      cwd: repository,
+      env,
+      input: `${issued.credential}\n`
+    });
+    assert.equal(JSON.parse(setup.stdout).tokenConfigured, true);
+
+    const project = unwrap(JSON.parse((await runCli(["create-project", "--name", "Agent CLI project", "--idempotency-key", "agent-cli-project"], { cwd: repository, env })).stdout), "project");
+    await runCli(["bind", "--project", project.id], { cwd: repository, env });
+    await runCli(["create-card", "--title", "Agent-created Card", "--external-key", "agent-cli-card"], { cwd: repository, env });
+    const activity = JSON.parse((await runCli(["activity", "--limit", "20"], { cwd: repository, env })).stdout);
+    const created = activity.activity.find((entry: any) => entry.action === "card.created");
+    assert.deepEqual(created.actor, { channel: "api", label: "Tenant automation", agentConnectionId: issued.connection.id });
+
+    await accessStore.revokeAgentConnection(owner.providerSubject, workspace.id, issued.connection.id);
+    await assert.rejects(runCli(["cards"], { cwd: repository, env }), /Authentication required|401/);
   } finally {
     if (server.listening) await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     await fs.rm(directory, { recursive: true, force: true });

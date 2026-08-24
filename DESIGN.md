@@ -28,7 +28,7 @@ The browser and skill are two clients of the same system:
 - A Project is the board. Columns express state. Cards carry the work. Comments and Activity preserve useful context.
 - Neither client maintains a second workflow model.
 
-Owners enter through one email-code sign-in path, then continue through server-authorized Workspace routing. Zero Workspaces leads to creation, one opens directly, and many require an explicit choice. An identity without pre-provisioned admission receives the generic denied state. The skill credential remains a temporary owner-authority compatibility path bound server-side to the migrated Workspace; the next roadmap slice replaces that bridge with a verified agent principal.
+Owners choose Start free, enter an email address, open Clerk's emailed verification link, and return to the exact initiating application root for server-authorized Workspace routing. Zero Workspaces leads to creation, one opens directly, and many require an explicit choice. A server-verified Clerk identity with a verified primary email is admitted by durable Clerk user ID. Automated clients use neutral Workspace-bound AgentConnections with explicit scopes; the legacy compatibility bearer remains a migration bridge only.
 
 The interface should feel like a focused work surface. It should not feel like an administration console for agents, permissions, or workflows.
 
@@ -57,9 +57,9 @@ The active Project and selected Card must be obvious. Changing Projects should n
 
 ### Authority stays simple and honest
 
-A verified owner session grants access only to Workspaces explicitly bound to an admitted Clerk user ID. Email is profile data, never the binding or admission key. Within a Workspace, authority remains Workspace-wide. The interface must not imply per-Project permissions, authenticated agent identities, or verified agent authorship that the system does not provide.
+A verified owner session grants access only to Workspaces owned by its durable Clerk user ID. Email is profile data, never the authorization or binding key. Within a Workspace, authority remains Workspace-wide. AgentConnection credentials are neutral scoped principals, not vendors, users, roles, or per-Project grants.
 
-Activity may show the client channel and a caller-supplied actor label. The presentation should treat that information as attribution, not identity proof.
+Activity attribution comes from the authenticated principal. Owner writes use the verified owner session; AgentConnection writes use the connection's durable ID and stored owner-chosen label. Request headers may describe a client channel but can never select or relabel the actor. The compatibility bearer retains its documented migration attribution and is not presented as an AgentConnection.
 
 ### Actions happen near their object
 
@@ -100,15 +100,15 @@ When a signed-out person opens an application root, the client continues directl
 
 After verified global sign-out, the application root instead keeps one bounded receipt until the person continues: the product name, the heading `Signed out`, and one `Continue` action. It does not label that receipt `Sign in`, render an email field, or explain private-data and session cleanup.
 
-The first step asks for `Email address` and offers `Continue`. The second asks for the verification code and offers `Continue`. Resend or change-email controls appear only when they are useful for that step. There is no separate `Create account`, `Sign up`, registration choice, or required profile field.
+The signed-out root offers `Start free`. The auth surface asks for `Email address`, offers `Continue with email`, and then tells the owner to open the emailed link. The link returns to the exact initiating application root. No profile field is required.
 
 Visible app-owned sign-in language uses the product name and the words people need to complete the task. It must not expose a provider name, generated provider-resource name, environment name, host role, routing detail, session-exchange detail, or internal access model. The product must never show generated labels such as a provider resource or school name.
 
 The supported Clerk Hobby prebuilt form may retain its required small `Secured by Clerk` badge. The badge is the only provider reference allowed on the customer-facing surface, remains visually subordinate to the form, and receives no additional app-owned explanation. Removing it would require a different Clerk plan and is not part of this release.
 
-Access is private, and exact identity admission is provisioned before use. Verifying an email does not grant access or bind identity by email. An admitted identity with zero Workspaces may create its first Workspace after sign-in. An unadmitted identity sees the generic title `This account doesn’t have access`, the message `Try another email address.`, and one `Use another account` action. The state reveals no Workspace name, account-match result, or reason for denial.
+Access is private to each owner, but signup is self-service. A server-verified Clerk identity with a verified primary email receives a root session keyed only by its Clerk user ID. An owner with zero Workspaces may create the first Workspace after sign-in. Email and display name remain profile data, never authorization keys.
 
-Operator configuration, provider integration, exact identity admission, host isolation, session exchange, and tenant handoff remain implementation and release concerns in [`UI_CONTRACT.md`](UI_CONTRACT.md) and [`docs/runbook.md`](docs/runbook.md). They do not become sign-in copy. Local development may retain the owner-key form only when the production identity provider is deliberately absent.
+Operator configuration, provider integration, exact identity verification, host isolation, session exchange, and tenant handoff remain implementation and release concerns in [`UI_CONTRACT.md`](UI_CONTRACT.md) and [`docs/runbook.md`](docs/runbook.md). They do not become sign-in copy. Local development may retain the owner-key form only when the production identity provider is deliberately absent.
 
 This design follows the NN/g guidance to [remove unnecessary steps](https://www.nngroup.com/articles/affordable_care_act_usability_issues/) (Jen Cardello and Susan Farrell, “9. Remove unnecessary steps”), [limit the first screen to essential information](https://www.nngroup.com/articles/defer-secondary-content-for-mobile/) (Jakob Nielsen, “Summary”), [avoid unnecessary choices and their instructional overhead](https://www.nngroup.com/articles/simplicity-vs-choice/) (Hoa Loranger, “Simplicity Usually Wins”), [show only what is relevant at each form step](https://www.nngroup.com/articles/4-principles-reduce-cognitive-load/) (Huei-Hsin Wang, “Utilize Progressive Disclosure”), and [keep labels and instructions in plain language](https://www.nngroup.com/articles/4-principles-reduce-cognitive-load/) (Huei-Hsin Wang, “Use Plain Language”). NN/g's [visual-hierarchy guidance](https://www.nngroup.com/articles/4-principles-reduce-cognitive-load/) (Huei-Hsin Wang, “Create Visual Hierarchy”) supports keeping required secondary text subordinate to the primary form; the Clerk plan, not the corpus, determines that the badge must remain. The denied state follows NN/g's [plain, concise, actionable error-message guidance](https://www.nngroup.com/articles/error-messages-scoring-rubric/) (Evan Sunwall and Tim Neusesser, “Communication Guidelines”); the product's privacy boundary limits the explanation to a generic result.
 
@@ -145,8 +145,7 @@ The design must account for the full workflow, including states that are easy to
 | State | What the experience must communicate |
 | --- | --- |
 | Opening | The application is loading without exposing stale private data. |
-| Signed out | The application continues directly to email, then verification code. No landing-page action, registration choice, or technical explanation competes with the form. |
-| Access not available | An unadmitted identity sees `This account doesn’t have access`, `Try another email address.`, and `Use another account`. The state reveals no private data or denial reason. |
+| Signed out | The application offers one `Start free` action, continues to email-link authentication, and returns to the exact initiating root. |
 | Invalid key | Access was refused; no Project names or content are revealed. |
 | Empty workspace | The owner can create a Project or ask the skill to create one. |
 | Empty Project | Columns are present and the next Card can be created. |
@@ -174,7 +173,7 @@ The design must account for the full workflow, including states that are easy to
 
 ## Access and context presentation
 
-The product has Clerk-verified, explicitly admitted owners, isolated Workspaces, and one Workspace-wide authority boundary inside each Workspace.
+The product has self-service Clerk-verified owners, isolated Workspaces, and one Workspace-wide authority boundary inside each Workspace.
 
 - The account indicator may show the Clerk-verified display name, but it must not suggest a role system.
 - The canonical Workspace host and server-validated session select tenant context. A Project ID, request body, query, or header never selects it.

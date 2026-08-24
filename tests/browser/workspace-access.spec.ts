@@ -66,7 +66,7 @@ test.beforeEach(async ({ page }) => {
 async function expectSignedOutReceipt(page: Page): Promise<void> {
   await expect(page.locator("body")).toHaveAttribute("data-state", "sign-out-success");
   await expect(page.getByRole("heading", { name: "Signed out", exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Continue", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Start free", exact: true })).toBeVisible();
   await expect(page.locator("main button")).toHaveCount(1);
   await expect(page.locator("main a")).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Sign in", exact: true })).toHaveCount(0);
@@ -154,7 +154,7 @@ test("the single exact candidate route automatically opens its Workspace on the 
   }
 });
 
-test("the nested candidate root navigates directly to the exact auth form", async ({ page }) => {
+test("Start free on the nested candidate root navigates to the exact auth form", async ({ page }) => {
   const harness = await startWorkspaceAccessHarness({ candidateAliases: true });
   const clerkRequests: string[] = [];
   const retiredProxyRequests: string[] = [];
@@ -175,6 +175,7 @@ test("the nested candidate root navigates directly to the exact auth form", asyn
     }));
     const authRequest = page.waitForRequest(harness.authSignInUrl);
     await page.goto(`${harness.rootOrigin}/`);
+    await page.getByRole("button", { name: "Start free" }).click();
     expect((await authRequest).url()).toBe(harness.authSignInUrl);
     await expect(page).toHaveURL(expectedAuthUrl);
     expect(clerkRequests).toEqual([
@@ -234,6 +235,7 @@ test("the app root rejects malformed Clerk auth-host redirect links", async ({ c
         }, unsafeCase.signInUrl);
         try {
           await casePage.goto(`${harness.rootOrigin}/`);
+          await casePage.getByRole("button", { name: "Start free" }).click();
           await expect(casePage.getByText("Sign-in is unavailable")).toBeVisible();
           await expect(casePage.getByText("Try again later.")).toBeVisible();
           await expect(casePage.getByRole("link", { name: "Continue" })).toHaveCount(0);
@@ -248,7 +250,7 @@ test("the app root rejects malformed Clerk auth-host redirect links", async ({ c
   }
 });
 
-test("the dedicated auth host renders only the email-code sign-in form", async ({ page, request }) => {
+test("the dedicated auth host renders the email-link sign-in or signup flow", async ({ page, request }) => {
   const harness = await startWorkspaceAccessHarness();
 
   try {
@@ -260,7 +262,7 @@ test("the dedicated auth host renders only the email-code sign-in form", async (
     await page.goto(`${harness.authOrigin}/sign-in`);
     await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
     await expect(page.getByLabel("Email address")).toBeVisible();
-    await expect(page.getByRole("button", { name: "Continue" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Continue with email" })).toBeVisible();
     await expect(page.locator(".clerk-test-panel")).toHaveCount(1);
     await expect(page.locator(".access-card")).toHaveCount(0);
     await expect(page.getByText("Create account", { exact: true })).toHaveCount(0);
@@ -271,8 +273,8 @@ test("the dedicated auth host renders only the email-code sign-in form", async (
       expect(visibleText).not.toContain(forbidden);
     }
     await page.getByLabel("Email address").fill("mike@example.test");
-    await page.getByRole("button", { name: "Continue" }).click();
-    await expect(page.getByLabel("Verification code")).toBeVisible();
+    await page.getByRole("button", { name: "Continue with email" }).click();
+    await expect(page.getByText("Check your email", { exact: true })).toBeVisible();
     await expect(page.getByLabel("Email address")).toHaveCount(0);
     await expect(page.locator(`script[src="${CLERK_UI_SCRIPT_URL}"]`)).toHaveCount(1);
     const clerkScript = page.locator(`script[src="${CLERK_JS_SCRIPT_URL}"]`);
@@ -287,11 +289,10 @@ test("the dedicated auth host renders only the email-code sign-in form", async (
       signUpUrl: harness.authSignInUrl.replace(/\/sign-in$/, "/sign-up"),
       allowedRedirectOrigins: [harness.rootOrigin],
       localization: {
-        formButtonPrimary: "Continue",
+        formButtonPrimary: "Continue with email",
         formFieldLabel__emailAddress: "Email address",
         signIn: {
-          start: { title: "Sign in", titleCombined: "Sign in", subtitle: "", subtitleCombined: "" },
-          emailCode: { title: "Verification code", subtitle: "", formTitle: "Verification code", resendButton: "Resend code" }
+          start: { title: "Sign in", titleCombined: "Sign in", subtitle: "", subtitleCombined: "" }
         }
       }
     });
@@ -331,7 +332,7 @@ test("the dedicated auth host renders only the email-code sign-in form", async (
     expect(primaryRuntime.loadOptions.satelliteAutoSync).toBeUndefined();
     expect(primaryRuntime.loadOptions.proxyUrl).toBeUndefined();
     expect(primaryRuntime.mountSignInCalls).toBe(1);
-    expect(primaryRuntime.mountSignInOptions).toMatchObject({ routing: "hash", withSignUp: false, transferable: false });
+    expect(primaryRuntime.mountSignInOptions).toMatchObject({ routing: "hash", withSignUp: true, transferable: true });
     expect(primaryRuntime.mountSignUpCalls).toBe(0);
     expect(primaryRuntime.buildSignInCalls).toBe(0);
     expect(primaryRuntime.buildSignUpCalls).toBe(0);
@@ -356,6 +357,43 @@ test("the dedicated auth host renders only the email-code sign-in form", async (
     const session = await request.get(`${harness.authOrigin}/api/session`);
     expect(session.status()).toBe(200);
     expect(await session.json()).toMatchObject({ authenticated: false, context: "auth" });
+  } finally {
+    await harness.stop();
+  }
+});
+
+test("magic-link return exchanges the exact initiating root session and creates the first Workspace", async ({ page }) => {
+  const harness = await startWorkspaceAccessHarness({ clerkUserId: "user_magicLinkOwner789" });
+  const errors = monitorBrowserErrors(page);
+  try {
+    await page.goto(`${harness.rootOrigin}/`);
+    await expect(page.getByRole("button", { name: "Start free" })).toBeVisible();
+    await page.getByRole("button", { name: "Start free" }).click();
+    await expect(page).toHaveURL(`${harness.authSignInUrl}#/?redirect_url=${encodeURIComponent(new URL(harness.rootOrigin).href)}`);
+    await page.getByLabel("Email address").fill("new-owner@example.com");
+    await page.getByRole("button", { name: "Continue with email" }).click();
+    await expect(page.getByText("Check your email", { exact: true })).toBeVisible();
+
+    const exchange = page.waitForResponse((response) => response.request().method() === "POST" && new URL(response.url()).pathname === "/api/clerk-session");
+    const emailedLink = page.getByRole("link", { name: "Open simulated emailed link" });
+    const emailedHref = await emailedLink.getAttribute("href");
+    expect(emailedHref).not.toBeNull();
+    const emailedUrl = new URL(emailedHref!);
+    expect(emailedUrl.origin).toBe(harness.rootOrigin);
+    expect(emailedUrl.pathname).toBe("/");
+    expect(emailedUrl.searchParams.get("kanban_test_clerk_email_link")).toBe("1");
+    expect(emailedUrl.searchParams.get("return_url")).toBe(harness.rootOrigin);
+    await emailedLink.click();
+    expect((await exchange).status()).toBe(201);
+    await expect(page).toHaveURL(`${harness.rootOrigin}/`);
+    await expect(page.getByRole("heading", { name: "Create a Workspace" })).toBeVisible();
+
+    await page.getByLabel("Workspace name").fill("First Workspace");
+    await page.getByLabel("Workspace address").fill("first-workspace");
+    await page.getByRole("button", { name: "Create Workspace" }).click();
+    await expect(page).toHaveURL(`http://first-workspace.${harness.rootHost}/`);
+    await expect(page.getByRole("heading", { name: "Create the first Project" })).toBeVisible();
+    expectNoUnexpectedBrowserErrors(errors);
   } finally {
     await harness.stop();
   }
@@ -387,9 +425,9 @@ test("a verified Clerk browser session exchanges into the app without an OIDC re
   }
 });
 
-test("an unadmitted Clerk account receives one generic recovery path", async ({ page, context }) => {
-  const unadmittedUserId = "user_unadmittedBrowserOwner456";
-  const harness = await startWorkspaceAccessHarness({ clerkUserId: unadmittedUserId });
+test("a new server-verified Clerk account is admitted and may create its first Workspace", async ({ page, context }) => {
+  const newUserId = "user_newBrowserOwner456";
+  const harness = await startWorkspaceAccessHarness({ clerkUserId: newUserId });
   await page.addInitScript((rootOrigin) => {
     if (window.location.origin !== rootOrigin) return;
     if (window.localStorage.getItem("kanban.tests:clerk-seed-applied") === "1") return;
@@ -403,33 +441,10 @@ test("an unadmitted Clerk account receives one generic recovery path", async ({ 
       return response.request().method() === "POST" && url.pathname === "/api/clerk-session";
     });
     await page.goto(`${harness.rootOrigin}/`);
-    expect((await exchangeResponsePromise).status()).toBe(403);
+    expect((await exchangeResponsePromise).status()).toBe(201);
+    await expect(page.getByRole("heading", { name: "Create a Workspace" })).toBeVisible();
+    expect((await context.cookies(harness.rootOrigin)).some((cookie) => cookie.name === ROOT_SESSION_COOKIE_DEV)).toBe(true);
 
-    await expect(page.getByText("This account doesn’t have access", { exact: true })).toBeVisible();
-    await expect(page.getByText("Try another email address.", { exact: true })).toBeVisible();
-    const recovery = page.getByRole("button", { name: "Use another account", exact: true });
-    await expect(recovery).toHaveCount(1);
-    await expect(page.locator("main button")).toHaveCount(1);
-    await expect(page.locator("main a")).toHaveCount(0);
-    const deniedText = await page.locator("body").innerText();
-    for (const forbidden of [unadmittedUserId, "not admitted", "Workspace", "Project", "Clerk"]) {
-      expect(deniedText).not.toContain(forbidden);
-    }
-
-    await recovery.click();
-    const expectedAuthUrl = `${harness.authSignInUrl}#/?redirect_url=${encodeURIComponent(new URL(harness.rootOrigin).href)}`;
-    await expect(page).toHaveURL(expectedAuthUrl);
-    await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
-    await expect(page.getByText("Secured by Clerk", { exact: true })).toHaveCount(1);
-
-    const browserState = await context.storageState();
-    const rootStorage = Object.fromEntries(
-      (browserState.origins.find((origin) => origin.origin === harness.rootOrigin)?.localStorage || [])
-        .map((entry) => [entry.name, entry.value])
-    );
-    expect(rootStorage["kanban.tests:clerk-signed-in"]).toBeUndefined();
-    expect(rootStorage["kanban.tests:clerk-sign-out-calls"]).toBe("1");
-    expect(JSON.parse(rootStorage["kanban.tests:clerk-sign-out-session-ids"] || "[]")).toEqual([ROOT_SESSION.sessionId]);
   } finally {
     await harness.stop();
   }
@@ -644,6 +659,58 @@ test("multiple Workspaces render an explicit chooser at a narrow viewport", asyn
   }
 });
 
+test("owner UI locks AgentConnection creation, configures expiry, clears the one-time secret, and revokes", async ({ page, context }) => {
+  const harness = await startWorkspaceAccessHarness();
+  const errors = monitorBrowserErrors(page);
+  try {
+    await harness.accessStore.createWorkspace({ ...ROOT_SESSION, slug: "agents", name: "Agent Workspace" });
+    await seedRootSession(context, harness);
+    await page.goto(`${harness.rootOrigin}/`);
+    await expect(page).toHaveURL(`http://agents.${harness.rootHost}/`);
+
+    await page.getByRole("button", { name: "Open account panel" }).click();
+    await page.getByRole("button", { name: "Agent connections" }).click();
+    await expect(page.getByRole("heading", { name: "Agent connections" })).toBeVisible();
+    await page.getByLabel("Label").fill("Browser automation");
+    await page.getByLabel("Scopes").selectOption("read-write");
+    await page.getByLabel("Expires (optional)").fill("2099-01-02T03:04");
+
+    let releaseCreate!: () => void;
+    const createHeld = new Promise<void>((resolve) => { releaseCreate = resolve; });
+    let createPosts = 0;
+    await page.route("**/api/agent-connections", async (route) => {
+      if (route.request().method() === "POST") {
+        createPosts += 1;
+        await createHeld;
+      }
+      await route.continue();
+    });
+    await page.getByRole("button", { name: "Create connection" }).click();
+    await expect(page.getByRole("button", { name: "Creating…" })).toBeDisabled();
+    await page.locator("form[data-form='agent-connection']").evaluate((form) => form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    await expect.poll(() => createPosts).toBe(1);
+    releaseCreate();
+
+    const secret = page.locator("#agent-credential");
+    await expect(secret).toHaveText(/^kac_agent-/);
+    const stored = await harness.accessStore.read();
+    expect(stored.agentConnections).toHaveLength(1);
+    expect(stored.agentConnections[0].expiresAt).toBe(new Date("2099-01-02T03:04").toISOString());
+    expect(JSON.stringify(stored)).not.toContain(await secret.textContent());
+    await page.getByRole("button", { name: "Clear secret" }).click();
+    await expect(secret).toHaveCount(0);
+    await expect(page.getByText("Browser automation", { exact: true })).toBeVisible();
+    await expect(page.getByText(/read, write · Expires/)).toBeVisible();
+
+    await page.getByRole("button", { name: "Revoke" }).click();
+    await expect(page.getByText(/Revoked/)).toBeVisible();
+    expect((await harness.accessStore.read()).agentConnections[0].revokedAt).not.toBeNull();
+    expectNoUnexpectedBrowserErrors(errors);
+  } finally {
+    await harness.stop();
+  }
+});
+
 test("successful sign-out clears root state before revocation and completion navigation commit", async ({ page }) => {
   const harness = await startWorkspaceAccessHarness();
   const authRequests: string[] = [];
@@ -728,7 +795,7 @@ test("successful sign-out clears root state before revocation and completion nav
     await expect(page).toHaveURL(`${harness.rootOrigin}/`);
     await expectSignedOutReceipt(page);
     expect(authRequests).toEqual([]);
-    await page.getByRole("button", { name: "Continue", exact: true }).click();
+    await page.getByRole("button", { name: "Start free", exact: true }).click();
     const expectedAuthUrl = `${harness.authSignInUrl}#/?redirect_url=${encodeURIComponent(new URL(harness.rootOrigin).href)}`;
     await expect(page).toHaveURL(expectedAuthUrl);
     await expect(page.getByRole("heading", { name: "Sign in", exact: true })).toBeVisible();
@@ -1134,8 +1201,12 @@ async function installClerkFrontendApiRoutes(page: Page): Promise<void> {
         }
       };
       var otherSession = otherSessionId ? { id: otherSessionId, end: async function () { throw new Error("The unrelated Clerk session must not end."); } } : null;
+      var emailLinkParams = new URLSearchParams(window.location.search);
+      var emailLinkSession = emailLinkParams.get("kanban_test_clerk_email_link") === "1"
+        && emailLinkParams.get("return_url") === window.location.origin;
+      if (emailLinkSession) window.history.replaceState(null, "", "/");
       var targetPresent = window.localStorage.getItem("kanban.tests:clerk-target-absent") !== "1"
-        && window.localStorage.getItem("kanban.tests:clerk-signed-in") === "1";
+        && (window.localStorage.getItem("kanban.tests:clerk-signed-in") === "1" || emailLinkSession);
       var browserSessions = [];
       if (targetPresent) browserSessions.push(targetSession);
       if (otherSession) browserSessions.push(otherSession);
@@ -1187,16 +1258,18 @@ async function installClerkFrontendApiRoutes(page: Page): Promise<void> {
           input.type = "email";
           var button = document.createElement("button");
           button.type = "submit";
-          button.textContent = "Continue";
+          button.textContent = "Continue with email";
           form.append(label, input, button);
           form.addEventListener("submit", function (event) {
             event.preventDefault();
-            label.htmlFor = "clerk-test-code";
-            label.textContent = "Verification code";
-            input.id = "clerk-test-code";
-            input.name = "code";
-            input.type = "text";
-            input.value = "";
+            form.replaceChildren();
+            var sent = document.createElement("p");
+            sent.textContent = "Check your email";
+            var emailedLink = document.createElement("a");
+            emailedLink.textContent = "Open simulated emailed link";
+            var exactReturn = new URL(options.fallbackRedirectUrl).origin;
+            emailedLink.href = exactReturn + "/?kanban_test_clerk_email_link=1&return_url=" + encodeURIComponent(exactReturn);
+            form.append(sent, emailedLink);
           });
           var providerBadge = document.createElement("small");
           providerBadge.className = "clerk-test-provider-badge";

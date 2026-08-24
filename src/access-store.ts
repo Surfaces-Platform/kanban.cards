@@ -52,12 +52,28 @@ export interface RevokedAccessSession {
   revokedAt: string;
 }
 
+export type AgentConnectionScope = "read" | "write";
+
+export interface AgentConnection {
+  id: string;
+  credentialHash: string;
+  ownerId: string;
+  workspaceId: string;
+  label: string;
+  scopes: AgentConnectionScope[];
+  createdAt: string;
+  lastUsedAt: string | null;
+  expiresAt: string | null;
+  revokedAt: string | null;
+}
+
 export interface AccessRegistryState {
   schemaVersion: 1;
   owners: AccessOwner[];
   workspaces: AccessWorkspace[];
   handoffs: AccessHandoff[];
   revokedSessions: RevokedAccessSession[];
+  agentConnections: AgentConnection[];
 }
 
 export interface AccessStoreOptions extends PostgresOptions {
@@ -101,6 +117,31 @@ export interface ConsumeHandoffInput {
   destinationHost: string;
 }
 
+export interface CreateAgentConnectionInput {
+  providerSubject: string;
+  workspaceId: string;
+  label: string;
+  scopes: AgentConnectionScope[];
+  expiresAt?: string | null;
+}
+
+export interface IssuedAgentConnection {
+  connection: AgentConnection;
+  credential: string;
+}
+
+export interface VerifiedAgentConnection {
+  connection: AgentConnection;
+  owner: AccessOwner;
+  workspace: AccessWorkspace;
+}
+
+export interface AuthorizeAgentConnectionInput {
+  credential: string;
+  workspaceId: string;
+  requiredScope: AgentConnectionScope;
+}
+
 export interface ConsumedAccessHandoff {
   handoffId: string;
   owner: AccessOwner;
@@ -122,6 +163,11 @@ export type AccessStoreErrorCode =
   | "ACCESS_HANDOFF_EXPIRED"
   | "ACCESS_HANDOFF_INVALID"
   | "ACCESS_OWNER_NOT_FOUND"
+  | "ACCESS_AGENT_CREDENTIAL_INVALID"
+  | "ACCESS_AGENT_EXPIRED"
+  | "ACCESS_AGENT_REVOKED"
+  | "ACCESS_AGENT_SCOPE_MISSING"
+  | "ACCESS_AGENT_WORKSPACE_MISMATCH"
   | "ACCESS_SESSION_REVOKED"
   | "ACCESS_WORKSPACE_NOT_FOUND";
 
@@ -147,6 +193,11 @@ export interface AccessStore {
   revokeSession(providerSubject: string, sessionId: string): Promise<RevokedAccessSession>;
   createHandoff(input: CreateHandoffInput): Promise<IssuedAccessHandoff>;
   consumeHandoff(input: ConsumeHandoffInput): Promise<ConsumedAccessHandoff>;
+  listAgentConnections(providerSubject: string, workspaceId: string): Promise<AgentConnection[]>;
+  createAgentConnection(input: CreateAgentConnectionInput): Promise<IssuedAgentConnection>;
+  revokeAgentConnection(providerSubject: string, workspaceId: string, connectionId: string): Promise<AgentConnection>;
+  verifyAgentCredential(credential: string): Promise<VerifiedAgentConnection>;
+  authorizeAgentCredential(input: AuthorizeAgentConnectionInput): Promise<VerifiedAgentConnection>;
 }
 
 interface AccessRegistryAdapter {
@@ -293,7 +344,8 @@ export function freshAccessRegistryState(): AccessRegistryState {
     owners: [],
     workspaces: [],
     handoffs: [],
-    revokedSessions: []
+    revokedSessions: [],
+    agentConnections: []
   };
 }
 
@@ -308,6 +360,9 @@ export function normalizeAccessRegistry(rawState: unknown): AccessRegistryState 
   const revokedSessions = state.revokedSessions === undefined
     ? []
     : requireArray(state.revokedSessions, "Access registry revokedSessions").map(normalizeRevokedSession);
+  const agentConnections = state.agentConnections === undefined
+    ? []
+    : requireArray(state.agentConnections, "Access registry agentConnections").map(normalizeAgentConnection);
 
   assertUnique(owners.map((owner) => owner.id), "owner id");
   assertUnique(owners.map((owner) => owner.providerSubject), "provider subject");
@@ -316,6 +371,8 @@ export function normalizeAccessRegistry(rawState: unknown): AccessRegistryState 
   assertUnique(workspaces.map((workspace) => workspace.storageId), "workspace storage id");
   assertUnique(handoffs.map((handoff) => handoff.id), "handoff id");
   assertUnique(handoffs.map((handoff) => handoff.tokenHash), "handoff token hash");
+  assertUnique(agentConnections.map((connection) => connection.id), "agent connection id");
+  assertUnique(agentConnections.map((connection) => connection.credentialHash), "agent credential hash");
   assertUnique(
     revokedSessions.map((session) => revokedSessionKey(session.providerSubject, session.sessionId)),
     "revoked session"
@@ -351,7 +408,12 @@ export function normalizeAccessRegistry(rawState: unknown): AccessRegistryState 
       throw new Error(`Handoff ${handoff.id} cannot be consumed before it is created.`);
     }
   }
-  return { schemaVersion: ACCESS_REGISTRY_SCHEMA_VERSION, owners, workspaces, handoffs, revokedSessions };
+  for (const connection of agentConnections) {
+    const workspace = workspacesById.get(connection.workspaceId);
+    if (!ownerIds.has(connection.ownerId)) throw new Error(`Agent connection ${connection.id} refers to a missing owner.`);
+    if (!workspace || !workspace.ownerIds.includes(connection.ownerId)) throw new Error(`Agent connection ${connection.id} is not bound to its owner's Workspace.`);
+  }
+  return { schemaVersion: ACCESS_REGISTRY_SCHEMA_VERSION, owners, workspaces, handoffs, revokedSessions, agentConnections };
 }
 
 function accessStoreFromAdapter(adapter: AccessRegistryAdapter, nowOption?: () => Date): AccessStore {
@@ -553,6 +615,71 @@ function accessStoreFromAdapter(adapter: AccessRegistryAdapter, nowOption?: () =
     })).result;
   }
 
+  async function listAgentConnections(providerSubject: string, workspaceId: string): Promise<AgentConnection[]> {
+    const subject = normalizeProviderSubject(providerSubject);
+    const id = requiredIdentifier(workspaceId, "Workspace id");
+    const state = await adapter.read();
+    const owner = state.owners.find((candidate) => candidate.providerSubject === subject);
+    const workspace = state.workspaces.find((candidate) => candidate.id === id);
+    if (!owner || !workspace?.ownerIds.includes(owner.id)) throw new AccessStoreError("ACCESS_FORBIDDEN", "Workspace access is unavailable.");
+    return state.agentConnections.filter((connection) => connection.ownerId === owner.id && connection.workspaceId === id);
+  }
+
+  async function createAgentConnection(input: CreateAgentConnectionInput): Promise<IssuedAgentConnection> {
+    const subject = normalizeProviderSubject(input.providerSubject);
+    const workspaceId = requiredIdentifier(input.workspaceId, "Workspace id");
+    const label = normalizeAgentLabel(input.label);
+    const scopes = normalizeAgentScopes(input.scopes);
+    const expiresAt = input.expiresAt == null ? null : timestamp(input.expiresAt, "Agent connection expiresAt");
+    const issuedAt = validNow(now);
+    if (expiresAt && Date.parse(expiresAt) <= Date.parse(issuedAt)) throw new Error("Agent connection expiry must be in the future.");
+    const secret = crypto.randomBytes(32).toString("base64url");
+    return (await adapter.update((state) => {
+      const owner = state.owners.find((candidate) => candidate.providerSubject === subject);
+      const workspace = state.workspaces.find((candidate) => candidate.id === workspaceId);
+      if (!owner || !workspace?.ownerIds.includes(owner.id)) throw new AccessStoreError("ACCESS_FORBIDDEN", "Workspace access is unavailable.");
+      const id = uniqueId("agent", new Set(state.agentConnections.map((candidate) => candidate.id)));
+      const credential = `kac_${id}_${secret}`;
+      const connection: AgentConnection = { id, credentialHash: hashAgentCredential(credential), ownerId: owner.id, workspaceId, label, scopes, createdAt: issuedAt, lastUsedAt: null, expiresAt, revokedAt: null };
+      state.agentConnections.push(connection);
+      return { connection, credential };
+    })).result;
+  }
+
+  async function revokeAgentConnection(providerSubject: string, workspaceId: string, connectionId: string): Promise<AgentConnection> {
+    const subject = normalizeProviderSubject(providerSubject);
+    const workspace = requiredIdentifier(workspaceId, "Workspace id");
+    const id = requiredIdentifier(connectionId, "Agent connection id");
+    return (await adapter.update((state) => {
+      const owner = state.owners.find((candidate) => candidate.providerSubject === subject);
+      const connection = state.agentConnections.find((candidate) => candidate.id === id && candidate.workspaceId === workspace);
+      if (!owner || !connection || connection.ownerId !== owner.id) throw new AccessStoreError("ACCESS_FORBIDDEN", "Agent connection is unavailable.");
+      if (!connection.revokedAt) connection.revokedAt = validNow(now);
+      return connection;
+    })).result;
+  }
+
+  async function verifyAgentCredential(credentialValue: string): Promise<VerifiedAgentConnection> {
+    const credential = normalizeAgentCredential(credentialValue);
+    const hash = hashAgentCredential(credential);
+    return resolveAgentCredential(await adapter.read(), hash, validNow(now));
+  }
+
+  async function authorizeAgentCredential(input: AuthorizeAgentConnectionInput): Promise<VerifiedAgentConnection> {
+    const credential = normalizeAgentCredential(input.credential);
+    const workspaceId = requiredIdentifier(input.workspaceId, "Workspace id");
+    const requiredScope = normalizeAgentScope(input.requiredScope);
+    const hash = hashAgentCredential(credential);
+    return (await adapter.update((state) => {
+      const usedAt = validNow(now);
+      const verified = resolveAgentCredential(state, hash, usedAt);
+      if (verified.workspace.id !== workspaceId) throw new AccessStoreError("ACCESS_AGENT_WORKSPACE_MISMATCH", "Agent connection does not authorize this Workspace.");
+      if (!verified.connection.scopes.includes(requiredScope)) throw new AccessStoreError("ACCESS_AGENT_SCOPE_MISSING", `Agent connection requires ${requiredScope} scope.`);
+      verified.connection.lastUsedAt = usedAt;
+      return verified;
+    })).result;
+  }
+
   return {
     kind: adapter.kind,
     path: adapter.path,
@@ -567,7 +694,12 @@ function accessStoreFromAdapter(adapter: AccessRegistryAdapter, nowOption?: () =
     isSessionRevoked,
     revokeSession,
     createHandoff,
-    consumeHandoff
+    consumeHandoff,
+    listAgentConnections,
+    createAgentConnection,
+    revokeAgentConnection,
+    verifyAgentCredential,
+    authorizeAgentCredential
   };
 }
 
@@ -646,6 +778,59 @@ function normalizeRevokedSession(value: unknown): RevokedAccessSession {
     sessionId: normalizeSessionId(session.sessionId),
     revokedAt: timestamp(session.revokedAt, "Revoked session revokedAt")
   };
+}
+
+function normalizeAgentConnection(value: unknown): AgentConnection {
+  const connection = requireRecord(value, "Agent connection");
+  const credentialHash = requiredString(connection.credentialHash, "Agent credentialHash");
+  if (!/^sha256:[a-f0-9]{64}$/.test(credentialHash)) throw new Error("Agent credentialHash is invalid.");
+  return {
+    id: requiredIdentifier(connection.id, "Agent connection id"), credentialHash,
+    ownerId: requiredIdentifier(connection.ownerId, "Agent owner id"), workspaceId: requiredIdentifier(connection.workspaceId, "Agent Workspace id"),
+    label: normalizeAgentLabel(connection.label), scopes: normalizeAgentScopes(connection.scopes),
+    createdAt: timestamp(connection.createdAt, "Agent createdAt"),
+    lastUsedAt: connection.lastUsedAt == null ? null : timestamp(connection.lastUsedAt, "Agent lastUsedAt"),
+    expiresAt: connection.expiresAt == null ? null : timestamp(connection.expiresAt, "Agent expiresAt"),
+    revokedAt: connection.revokedAt == null ? null : timestamp(connection.revokedAt, "Agent revokedAt")
+  };
+}
+
+function normalizeAgentLabel(value: unknown): string {
+  const label = requiredString(value, "Agent label");
+  if (label.length > 120 || /[\r\n\0]/.test(label)) throw new Error("Agent label is invalid.");
+  return label;
+}
+
+function normalizeAgentScopes(value: unknown): AgentConnectionScope[] {
+  const scopes = [...new Set(requireArray(value, "Agent scopes").map((scope) => requiredString(scope, "Agent scope")))];
+  if (!scopes.length || scopes.some((scope) => scope !== "read" && scope !== "write")) throw new Error("Agent scopes must contain read and/or write.");
+  return scopes as AgentConnectionScope[];
+}
+
+function normalizeAgentScope(value: unknown): AgentConnectionScope {
+  if (value !== "read" && value !== "write") throw new Error("Agent scope is invalid.");
+  return value;
+}
+
+function resolveAgentCredential(state: AccessRegistryState, hash: string, usedAt: string): VerifiedAgentConnection {
+  const connection = state.agentConnections.find((candidate) => safeHashEqual(candidate.credentialHash, hash));
+  if (!connection) throw new AccessStoreError("ACCESS_AGENT_CREDENTIAL_INVALID", "Agent credential is invalid.");
+  if (connection.revokedAt) throw new AccessStoreError("ACCESS_AGENT_REVOKED", "Agent connection has been revoked.");
+  if (connection.expiresAt && Date.parse(connection.expiresAt) <= Date.parse(usedAt)) throw new AccessStoreError("ACCESS_AGENT_EXPIRED", "Agent connection has expired.");
+  const owner = state.owners.find((candidate) => candidate.id === connection.ownerId);
+  const workspace = state.workspaces.find((candidate) => candidate.id === connection.workspaceId);
+  if (!owner || !workspace?.ownerIds.includes(owner.id)) throw new AccessStoreError("ACCESS_AGENT_CREDENTIAL_INVALID", "Agent connection is unavailable.");
+  return { connection, owner, workspace };
+}
+
+function normalizeAgentCredential(value: unknown): string {
+  const credential = requiredString(value, "Agent credential");
+  if (!/^kac_agent-[0-9a-f-]{36}_[A-Za-z0-9_-]{43}$/.test(credential)) throw new AccessStoreError("ACCESS_AGENT_CREDENTIAL_INVALID", "Agent credential is invalid.");
+  return credential;
+}
+
+function hashAgentCredential(credential: string): string {
+  return `sha256:${crypto.createHash("sha256").update(credential).digest("hex")}`;
 }
 
 function normalizeProviderSubject(value: unknown): string {
