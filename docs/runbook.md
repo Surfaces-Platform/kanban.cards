@@ -149,7 +149,7 @@ vercel firewall overview --json
 npm run release:cutover:preflight
 ```
 
-The live pre-promotion gate reads the published policy and complete alias inventory once. From a different exact `/32` or `/128`, make one fresh request to `https://candidate.release.kanban.cards`; it must return HTTP `403`, `x-vercel-mitigated: deny`, and an `x-vercel-id`. Record only that source and observation in `externalDenyProbe`. The exact WAF rule already covers the other two private hosts, so no five-host package, Traffic correlation, configuration hash, or coordinated source-switch script is required. Stop on an unpublished draft, a policy mismatch, a routed canonical tenant, or a failed independent denial.
+The live pre-promotion gate reads the published policy and complete alias inventory once. From a different exact `/32` or `/128`, make one fresh request to `https://candidate.release.kanban.cards`; it must return HTTP `403`, `x-vercel-mitigated: deny`, and an `x-vercel-id`. Record only that source and observation in `externalDenyProbe`. The exact WAF rule already covers the other two private hosts, so no five-host package, Traffic correlation, configuration hash, or coordinated source-switch script is required. Stop on an unpublished draft, a policy mismatch, a canonical tenant routed during the first cutover, a later-release canonical tenant not pinned to the healthy current production rollback target, candidate ownership of that tenant, or a failed independent denial.
 
 The Clerk Marketplace connection automatically syncs `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` and `CLERK_SECRET_KEY` to the connected Vercel environments. Verify those two names are present; do not manually add duplicate copies. The production values must belong to the Marketplace production instance (`pk_live_` and `sk_live_`), but do not print them to prove that condition—the deployed readiness check fails closed on development keys.
 
@@ -255,7 +255,7 @@ vercel inspect "$KANBAN_CARDS_CANDIDATE_ROOT_URL" --format=json
 vercel inspect "$KANBAN_CARDS_CANDIDATE_TENANT_URL" --format=json
 ```
 
-All three must resolve to the candidate deployment. The complete Project alias inventory must leave `mike.kanban.cards` unrouted before promotion.
+All three must resolve to the candidate deployment. For the first Workspace cutover, the complete Project alias inventory leaves `mike.kanban.cards` unrouted before promotion. For a later sensitive release, an already-established `mike.kanban.cards` route remains pinned to the healthy current production rollback target throughout pre-promotion proof; it must never point to the candidate early.
 
 Complete the self-service candidate journey once: Start free, dedicated auth host, emailed-link completion, exact initiating-root return, server-side session exchange, first Workspace creation, tenant handoff, AgentConnection creation, attributed Card write, revocation denial, auth-host isolation, and exact-session sign-out.
 

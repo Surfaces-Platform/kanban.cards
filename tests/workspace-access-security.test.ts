@@ -658,7 +658,7 @@ test("logout completion rejects GET and untrusted Origins while accepting exact 
     assert.equal((await client.post("/auth/logout", {
       host: ROOT_HOST,
       origin: `https://${BETA_HOST}`,
-      form: { continuation: `${tenantContinuation.slice(0, -1)}x` }
+      form: { continuation: `${tenantContinuation[0] === "a" ? "b" : "a"}${tenantContinuation.slice(1)}` }
     })).status, 403);
     assert.equal((await client.delete("/api/logout-completion", {
       host: ROOT_HOST,
