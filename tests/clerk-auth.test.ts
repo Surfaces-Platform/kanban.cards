@@ -31,7 +31,7 @@ const CONFIG: ClerkAuthConfig = {
   tenantSessionTtlSeconds: 3600
 };
 
-test("Clerk configuration requires exact keys, user IDs, and a separate app-session secret", () => {
+test("Clerk configuration requires exact keys and secrets while the legacy user-ID allowlist is optional", () => {
   const marketplaceEnv = {
     NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: CONFIG.publishableKey,
     CLERK_SECRET_KEY: CONFIG.secretKey,
@@ -101,7 +101,6 @@ test("Clerk configuration requires exact keys, user IDs, and a separate app-sess
     { authHost: "https://auth.kanban.cards" },
     { authHost: "AUTH.kanban.cards" },
     { authHost: "127.0.0.1" },
-    { allowedUserIds: [] },
     { allowedUserIds: ["mike@example.com"] },
     { rootSessionTtlSeconds: 0 }
   ]) {
@@ -110,6 +109,7 @@ test("Clerk configuration requires exact keys, user IDs, and a separate app-sess
       ClerkAuthConfigError
     );
   }
+  assert.deepEqual(validateClerkAuthConfig({ ...CONFIG, allowedUserIds: [] }).allowedUserIds, []);
 });
 
 test("Clerk middleware is limited to exact root origins and reads only verified session tokens", () => {
@@ -280,13 +280,12 @@ test("verified Clerk identity uses the stable user and session IDs, verified pri
   await assert.rejects(() => gateway.verifiedIdentity("mike@example.com", "sess_mike123"), ClerkIdentityError);
 });
 
-test("Clerk identities fail closed when the account, verified email, or display name is unavailable", async () => {
+test("Clerk identities fail closed when the account or verified email is unavailable and email-only signup gets a neutral label", async () => {
   for (const user of [
     { ...verifiedUser(), banned: true },
     { ...verifiedUser(), locked: true },
     { ...verifiedUser(), primaryEmailAddress: null },
-    { ...verifiedUser(), primaryEmailAddress: { emailAddress: "mike@example.com", verification: { status: "unverified" } } },
-    { ...verifiedUser(), firstName: null, lastName: null, username: null }
+    { ...verifiedUser(), primaryEmailAddress: { emailAddress: "mike@example.com", verification: { status: "unverified" } } }
   ]) {
     const gateway = createClerkAuthGateway(CONFIG, {
       middleware: () => ((_req, _res, next) => next()),
@@ -301,6 +300,12 @@ test("Clerk identities fail closed when the account, verified email, or display 
       ClerkIdentityError
     );
   }
+  const emailOnly = createClerkAuthGateway(CONFIG, {
+    middleware: () => ((_req, _res, next) => next()),
+    getAuth: () => ({ isAuthenticated: true, userId: "user_mike123", sessionId: "sess_mike123" }),
+    client: { users: { async getUser() { return { ...verifiedUser(), firstName: null, lastName: null, username: null }; } }, sessions: { async revokeSession() {} } }
+  });
+  assert.equal((await emailOnly.verifiedIdentity("user_mike123", "sess_mike123")).displayName, "Owner");
 });
 
 function verifiedClient(revoked: string[] = []) {

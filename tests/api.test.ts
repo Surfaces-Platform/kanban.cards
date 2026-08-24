@@ -34,7 +34,7 @@ test("missing owner and external-bind configuration fail closed", async () => {
     server = await listenApp(createApp({
       host: "0.0.0.0",
       dataPath: path.join(directory, "external.json"),
-      apiToken: "configured-owner-token"
+      apiToken: "configured-api-credential"
     }));
     baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
     const externalHealth = await fetchJsonAllowError(`${baseUrl}/api/health`);
@@ -230,17 +230,17 @@ test("one resource API supports idempotent plans, concurrency, comments, activit
     const commentResponse = await fetch(`${baseUrl}/api/projects/${project.id}/cards/${card.id}/comments`, {
       method: "POST",
       headers: { ...headers, "Content-Type": "application/json", "Idempotency-Key": "comment:implemented" },
-      body: JSON.stringify({ body: "Implemented and verified the owner-token path." })
+      body: JSON.stringify({ body: "Implemented and verified the bounded credential path." })
     });
     assert.equal(commentResponse.status, 201);
     const commentPayload = await commentResponse.json() as any;
-    assert.equal(commentPayload.comment.body, "Implemented and verified the owner-token path.");
+    assert.equal(commentPayload.comment.body, "Implemented and verified the bounded credential path.");
     assert.deepEqual(commentPayload.card, { id: card.id, version: 4 });
 
     const commentReplayResponse = await fetch(`${baseUrl}/api/projects/${project.id}/cards/${card.id}/comments`, {
       method: "POST",
       headers: { ...headers, "Content-Type": "application/json", "Idempotency-Key": "comment:implemented" },
-      body: JSON.stringify({ body: "Implemented and verified the owner-token path." })
+      body: JSON.stringify({ body: "Implemented and verified the bounded credential path." })
     });
     assert.equal(commentReplayResponse.status, 201);
     assert.equal(commentReplayResponse.headers.get("idempotency-replayed"), "true");

@@ -1,4 +1,4 @@
-name: Release policy
+name: CI
 
 on:
   pull_request:
@@ -27,8 +27,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Check release policy
-        run: npm run check:release-policy
+      - name: Check types, build, UI contract, and release policy
+        run: npm run check
 
-      - name: Test release gate
-        run: node --import tsx --test tests/release-gate.test.ts
+      - name: Run tests
+        run: npm test

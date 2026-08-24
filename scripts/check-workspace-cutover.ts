@@ -5,7 +5,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 import { authorizePromotion, evaluateCutoverSnapshot, inspectCandidateFirewall, isVercelSsoProtectionRedirect, trustedReleaseTarget, unexpectedDeployableApplicationChanges, type CutoverPhase } from "../src/release-gate";
-import { mainGitDeploymentsAreDisabled } from "../src/release-policy";
+import { mainGitDeploymentsAreEnabled } from "../src/release-policy";
 import { parseReleaseControllerArguments } from "../src/release-controller";
 
 const run = promisify(execFile);
@@ -66,8 +66,9 @@ async function hydrateWithLiveFacts(snapshot: unknown, phase: CutoverPhase): Pro
   if (branchResult.stdout.trim() !== target.productionBranch) throw new Error(`Live authorization requires the ${target.productionBranch} branch.`);
 
   const vercelConfig = JSON.parse(await fs.readFile(path.resolve(process.cwd(), "vercel.json"), "utf8")) as Record<string, unknown>;
-  const [project, firewallOverview, aliases, candidate, currentSummary] = await Promise.all([
+  const [project, projectDomains, firewallOverview, aliases, candidate, currentSummary] = await Promise.all([
     vercelJson(["api", `/v9/projects/${target.projectId}`]),
+    vercelJson(["api", `/v9/projects/${target.projectId}/domains`]),
     vercelJson(["firewall", "overview", "--json"]),
     listAllAliases(),
     vercelJson(["api", `/v13/deployments/${candidateId}`]),
@@ -87,15 +88,21 @@ async function hydrateWithLiveFacts(snapshot: unknown, phase: CutoverPhase): Pro
   }
   const projectLink = record(project.link);
   const protection = record(project.ssoProtection);
-  const localRules = record(record(vercelConfig.git).deploymentEnabled);
+  const localRules = record(vercelConfig.git).deploymentEnabled;
   root.policy = {
     projectId: stringValue(project.id),
     teamId: stringValue(project.accountId),
     repository: `${stringValue(projectLink.org)}/${stringValue(projectLink.repo)}`,
     productionBranch: stringValue(projectLink.productionBranch),
     autoAssignCustomDomains: project.autoAssignCustomDomains,
-    mainGitDeploymentsEnabled: !mainGitDeploymentsAreDisabled(localRules),
+    mainGitDeploymentsEnabled: mainGitDeploymentsAreEnabled(localRules),
     deploymentProtection: stringValue(protection.deploymentType),
+    domains: records(projectDomains.domains).map((domain) => ({
+      name: stringValue(domain.name),
+      verified: domain.verified === true,
+      gitBranch: stringValue(domain.gitBranch),
+      customEnvironmentId: stringValue(domain.customEnvironmentId)
+    })),
     firewall,
     aliases,
     aliasInventoryComplete: true
@@ -166,10 +173,16 @@ function deploymentRecord(value: Record<string, unknown>): Record<string, unknow
   const gitSource = record(value.gitSource);
   const meta = record(value.meta);
   const project = record(value.project);
+  const repositoryOwner = stringValue(gitSource.org) || stringValue(meta.githubCommitOrg) || stringValue(meta.githubOrg);
+  const repositoryName = stringValue(gitSource.repo) || stringValue(meta.githubCommitRepo) || stringValue(meta.githubRepo);
+  const dirtyValue = value.gitDirty ?? gitSource.dirty ?? meta.gitDirty ?? meta.githubCommitDirty;
   return {
     id: stringValue(value.id),
     url: canonicalUrl(value.url),
     projectId: stringValue(value.projectId) || stringValue(project.id),
+    source: stringValue(value.source),
+    repository: repositoryOwner && repositoryName ? `${repositoryOwner}/${repositoryName}` : "",
+    gitDirty: dirtyValue === true || ["1", "true"].includes(stringValue(dirtyValue).toLowerCase()),
     commitSha: stringValue(gitSource.sha) || stringValue(meta.githubCommitSha),
     commitRef: stringValue(gitSource.ref) || stringValue(meta.githubCommitRef),
     target: stringValue(value.target),
@@ -285,6 +298,7 @@ function record(value: unknown): Record<string, unknown> {
 
 function stringValue(value: unknown): string { return typeof value === "string" ? value.trim() : ""; }
 function stringArray(value: unknown): string[] { return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : []; }
+function records(value: unknown): Record<string, unknown>[] { return Array.isArray(value) ? value.map(record) : []; }
 function canonicalUrl(value: unknown): string { const raw = stringValue(value); return raw ? (raw.startsWith("https://") ? raw : `https://${raw}`) : ""; }
 
 main().catch((error: unknown) => {

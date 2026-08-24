@@ -49,7 +49,6 @@ interface ClerkBrowser {
       formFieldLabel__emailAddress?: string;
       signIn?: {
         start?: { title?: string; titleCombined?: string; subtitle?: string; subtitleCombined?: string };
-        emailCode?: { title?: string; subtitle?: string; formTitle?: string; resendButton?: string };
       };
     };
     appearance?: ClerkAppearance;
@@ -87,7 +86,7 @@ type ClerkSurfaceRole = "auth" | "app" | "";
 type ProjectEditorMode = "create" | "edit" | null;
 type InspectorTab = "card" | "activity";
 type DescriptionView = "write" | "preview";
-type MutationKind = "sign-in" | "workspace" | "refresh" | "project" | "column" | "card" | "move" | "comment" | "archive" | "undo" | null;
+type MutationKind = "sign-in" | "workspace" | "agent" | "refresh" | "project" | "column" | "card" | "move" | "comment" | "archive" | "undo" | null;
 type StatusTone = "neutral" | "success" | "warning" | "error" | "receipt";
 
 interface Session {
@@ -171,6 +170,16 @@ interface ActivityItem {
   actorLabel: string;
   channel: string;
   createdAt: string;
+}
+
+interface AgentConnection {
+  id: string;
+  label: string;
+  scopes: string[];
+  createdAt: string;
+  lastUsedAt: string | null;
+  expiresAt: string | null;
+  revokedAt: string | null;
 }
 
 interface Project extends ProjectSummary {
@@ -324,6 +333,9 @@ let clerkSignInBlocked = false;
 let workspaceHandoffPending = false;
 let workspaceChoices: WorkspaceAccess[] = [];
 let accessFailure: AccessFailure | null = null;
+let agentConnections: AgentConnection[] = [];
+let agentPanelOpen = false;
+let issuedAgentCredential = "";
 let projects: ProjectSummary[] = [];
 let activeProject: Project | null = null;
 let initialLoading = true;
@@ -767,11 +779,10 @@ async function loadClerkRuntime(): Promise<ClerkBrowser> {
       signInUrl: clerkAuthSignInUrl,
       signUpUrl: clerkAuthSignUpUrl,
       localization: {
-        formButtonPrimary: "Continue",
+        formButtonPrimary: "Continue with email",
         formFieldLabel__emailAddress: "Email address",
         signIn: {
-          start: { title: "Sign in", titleCombined: "Sign in", subtitle: "", subtitleCombined: "" },
-          emailCode: { title: "Verification code", subtitle: "", formTitle: "Verification code", resendButton: "Resend code" }
+          start: { title: "Sign in", titleCombined: "Sign in", subtitle: "", subtitleCombined: "" }
         }
       },
       appearance: {
@@ -843,8 +854,8 @@ async function mountClerkSignIn(node: HTMLDivElement): Promise<void> {
     node.replaceChildren();
     clerk.mountSignIn(node, {
       routing: "hash",
-      withSignUp: false,
-      transferable: false,
+      withSignUp: true,
+      transferable: true,
       fallbackRedirectUrl: clerkFallbackRedirectUrl
     });
     clerkSignInMount = node;
@@ -858,6 +869,13 @@ async function mountClerkSignIn(node: HTMLDivElement): Promise<void> {
     };
     render();
   }
+}
+
+async function navigateToClerkSignIn(): Promise<void> {
+  const clerk = await loadClerkRuntime();
+  const signInUrl = safeBuiltClerkFlowUrl(clerk.buildSignInUrl?.({ redirectUrl: rootUrl }), clerkAuthSignInUrl, rootUrl);
+  if (!signInUrl) throw new Error("Sign-in could not start. Try again.");
+  window.location.assign(signInUrl);
 }
 
 function safeBuiltClerkFlowUrl(value: unknown, configuredUrl: string, requiredRedirectUrl: string): string | null {
@@ -1092,7 +1110,7 @@ function disabledAttribute(disabled = false): string {
 }
 
 function renderTextInput(options: TextControlOptions & {
-  type?: "text" | "password";
+  type?: "text" | "password" | "datetime-local";
   autocomplete?: string;
   className?: string;
 }): string {
@@ -1206,16 +1224,13 @@ function renderSignIn(): string {
     }
     if (accessContext === "root") {
       if (authNotice?.kind === "signed-out") {
-        return `<main class="access-view"><section class="access-card jk-panel" aria-labelledby="access-title"><p class="product-name">kanban.cards</p><h1 id="access-title">Signed out</h1><div class="jk-actions"><button id="provider-sign-in" class="jk-button" data-priority="primary" type="button" data-action="provider-sign-in">Continue</button></div></section></main>`;
-      }
-      if (clerkConfigured() && !clerkSignInBlocked && !retry && !authNotice) {
-        return `<main class="centered-view"><strong>kanban.cards</strong><p class="quiet" role="status">Opening sign in…</p><div id="clerk-sign-in" hidden></div></main>`;
+        return `<main class="access-view"><section class="access-card jk-panel" aria-labelledby="access-title"><p class="product-name">kanban.cards</p><h1 id="access-title">Signed out</h1><div class="jk-actions"><button id="provider-sign-in" class="jk-button" data-priority="primary" type="button" data-action="provider-sign-in">Start free</button></div></section></main>`;
       }
       const clerkSignIn = retry
         ? ""
         : authNotice?.kind === "access-denied" && clerkConfigured()
           ? `<div class="jk-actions"><button id="provider-sign-in" class="jk-button" data-priority="primary" type="button" data-action="clerk-change-account">Use another account</button></div>`
-          : `<div class="jk-actions"><button id="provider-sign-in" class="jk-button" data-priority="primary" type="button" data-action="provider-sign-in">Continue</button></div>`;
+          : `<div class="jk-actions"><button id="provider-sign-in" class="jk-button" data-priority="primary" type="button" data-action="provider-sign-in">Start free</button></div>`;
       const configurationNotice = !clerkConfigured() && !authNotice
         ? renderStatus({ tone: "error", title: "Sign-in is unavailable", message: "Try again later." }, "clerk-configuration-status")
         : "";
@@ -1264,7 +1279,17 @@ function renderWorkspaceRoute(): string {
 function renderHeader(): string {
   const name = ownerName();
   const editingProject = projectEditorMode !== null || addColumnPreparing || addColumnCommitted || addColumnDraft !== null;
-  return `<header class="app-header"><div class="header-primary"><span class="product-name">kanban.cards</span>${renderProjectContext()}</div><div class="profile-menu"><button class="avatar-button" type="button" data-action="toggle-account-panel" aria-label="${accountPanelOpen ? "Close" : "Open"} account panel" aria-expanded="${accountPanelOpen ? "true" : "false"}" aria-controls="account-panel"${disabledAttribute(editingProject)}><span aria-hidden="true">${escapeHtml(ownerInitial())}</span></button>${accountPanelOpen ? `<section id="account-panel" class="menu-panel account-panel" aria-labelledby="account-name"><strong id="account-name">${escapeHtml(name)}</strong>${renderButton("Sign out", "sign-out", { disabled: editingProject })}</section>` : ""}</div></header>`;
+  return `<header class="app-header"><div class="header-primary"><span class="product-name">kanban.cards</span>${renderProjectContext()}</div><div class="profile-menu"><button class="avatar-button" type="button" data-action="toggle-account-panel" aria-label="${accountPanelOpen ? "Close" : "Open"} account panel" aria-expanded="${accountPanelOpen ? "true" : "false"}" aria-controls="account-panel"${disabledAttribute(editingProject)}><span aria-hidden="true">${escapeHtml(ownerInitial())}</span></button>${accountPanelOpen ? `<section id="account-panel" class="menu-panel account-panel" aria-labelledby="account-name"><strong id="account-name">${escapeHtml(name)}</strong>${accessContext === "workspace" ? renderButton("Agent connections", "manage-agents", { disabled: editingProject }) : ""}${renderButton("Sign out", "sign-out", { disabled: editingProject })}</section>` : ""}</div></header>`;
+}
+
+function renderAgentConnections(): string {
+  if (!agentPanelOpen) return "";
+  const credential = issuedAgentCredential ? `<div class="jk-status" data-kind="warning" role="status"><div><strong>Copy this credential now</strong><p>This secret is shown once and cannot be recovered.</p><code id="agent-credential">${escapeHtml(issuedAgentCredential)}</code><div class="jk-actions">${renderButton("Copy credential", "copy-agent-credential", { priority: "primary" })}${renderButton("Clear secret", "clear-agent-credential")}</div></div></div>` : "";
+  const rows = agentConnections.map((connection) => `<li><strong>${escapeHtml(connection.label)}</strong><p class="quiet">${escapeHtml(connection.scopes.join(", "))} · ${connection.revokedAt ? "Revoked" : connection.expiresAt ? `Expires ${escapeHtml(formatDate(connection.expiresAt))}` : "No expiry"}</p>${connection.revokedAt ? "" : renderButton("Revoke", "revoke-agent", { data: `data-connection-id="${escapeHtml(connection.id)}"` })}</li>`).join("");
+  const labelField = renderField({ id: "agent-label", label: "Label", control: renderTextInput({ id: "agent-label", name: "label", required: true }) });
+  const scopeField = renderField({ id: "agent-scopes", label: "Scopes", control: renderSelect({ id: "agent-scopes", name: "scopes", value: "read-write", choices: [{ value: "read", label: "Read only" }, { value: "write", label: "Write only" }, { value: "read-write", label: "Read and write" }] }) });
+  const expiryField = renderField({ id: "agent-expires-at", label: "Expires (optional)", control: renderTextInput({ id: "agent-expires-at", name: "expiresAt", type: "datetime-local" }), hint: "Leave blank for no expiry." });
+  return `<section class="access-card jk-panel" aria-labelledby="agent-connections-title"><div><p class="eyebrow">${escapeHtml(session?.workspace?.name || "Workspace")}</p><h1 id="agent-connections-title">Agent connections</h1><p>Credentials are bound to this Workspace. Read allows reads; write allows bounded mutations.</p></div>${credential}<form data-form="agent-connection" class="access-form">${labelField}${scopeField}${expiryField}<button class="jk-button" data-priority="primary" type="submit"${disabledAttribute()}>${mutationKind === "agent" ? "Creating…" : "Create connection"}</button></form><ul class="workspace-choices">${rows || "<li>No agent connections yet.</li>"}</ul>${renderButton("Back to board", "close-agents")}</section>`;
 }
 
 function renderProjectContext(): string {
@@ -1652,7 +1677,7 @@ function renderWorkspace(): string {
         : project
           ? `${renderBoardPane(project)}${cardOpen ? renderCardInspector(project) : ""}`
           : renderEmptyWorkspace();
-  return `<a class="skip-link" href="#main-content">Skip to workspace</a><div class="workspace" data-card-open="${cardOpen ? "true" : "false"}" data-workspace-locked="${workspaceLocked() ? "true" : "false"}">${renderHeader()}${renderProjectReceipt()}<main id="main-content" class="workbench" tabindex="-1">${content}</main></div>`;
+  return `<a class="skip-link" href="#main-content">Skip to workspace</a><div class="workspace" data-card-open="${cardOpen ? "true" : "false"}" data-workspace-locked="${workspaceLocked() ? "true" : "false"}">${renderHeader()}${renderProjectReceipt()}<main id="main-content" class="workbench" tabindex="-1">${agentPanelOpen ? renderAgentConnections() : content}</main></div>`;
 }
 
 function currentUiState(): string {
@@ -1827,6 +1852,9 @@ function clearPrivateState(notice: AuthNotice | null): void {
   session = null;
   workspaceHandoffPending = false;
   workspaceChoices = [];
+  agentConnections = [];
+  agentPanelOpen = false;
+  issuedAgentCredential = "";
   projects = [];
   activeProject = null;
   selectedCardId = null;
@@ -2022,6 +2050,49 @@ async function createWorkspace(form: HTMLFormElement): Promise<void> {
   } catch (error) {
     accessFailure = { title: "Workspace was not created", message: error instanceof Error ? error.message : "Try again." };
     throw error;
+  } finally {
+    setWorkspaceMutationsDisabled(false);
+    render();
+  }
+}
+
+function normalizeAgentConnection(value: unknown): AgentConnection {
+  const item = objectValue(value);
+  return { id: String(item.id || ""), label: String(item.label || ""), scopes: arrayValue(item.scopes).map(String), createdAt: String(item.createdAt || ""), lastUsedAt: item.lastUsedAt ? String(item.lastUsedAt) : null, expiresAt: item.expiresAt ? String(item.expiresAt) : null, revokedAt: item.revokedAt ? String(item.revokedAt) : null };
+}
+
+async function loadAgentConnections(): Promise<void> {
+  const payload = objectValue(await api("/agent-connections"));
+  agentConnections = arrayValue(payload.connections).map(normalizeAgentConnection);
+}
+
+async function createAgentConnection(form: HTMLFormElement): Promise<void> {
+  if (mutationInFlight) return;
+  const data = new FormData(form);
+  const selectedScopes = String(data.get("scopes") || "");
+  const scopes = selectedScopes === "read-write" ? ["read", "write"] : [selectedScopes].filter(Boolean);
+  const expiryValue = cleanValue(String(data.get("expiresAt") || ""));
+  const expiresAt = expiryValue ? new Date(expiryValue).toISOString() : null;
+  setWorkspaceMutationsDisabled(true, "agent");
+  render();
+  try {
+    const payload = objectValue(await api("/agent-connections", { method: "POST", body: { label: cleanValue(String(data.get("label") || "")), scopes, expiresAt } }));
+    issuedAgentCredential = String(payload.credential || "");
+    await loadAgentConnections();
+  } finally {
+    setWorkspaceMutationsDisabled(false);
+    render();
+  }
+}
+
+async function revokeAgentConnection(connectionId: string): Promise<void> {
+  if (mutationInFlight) return;
+  setWorkspaceMutationsDisabled(true, "agent");
+  render();
+  try {
+    await api(`/agent-connections/${safeId(connectionId)}`, { method: "DELETE" });
+    issuedAgentCredential = "";
+    await loadAgentConnections();
   } finally {
     setWorkspaceMutationsDisabled(false);
     render();
@@ -3304,7 +3375,15 @@ async function handleAction(button: HTMLElement): Promise<void> {
     if (accessContext === "auth" || accessContext === "root") {
       clerkSignInBlocked = false;
       authNotice = null;
-      window.location.reload();
+      if (accessContext === "root") {
+        try {
+          await navigateToClerkSignIn();
+        } catch {
+          clerkSignInBlocked = true;
+          authNotice = { kind: "service-unavailable", title: "Sign-in is unavailable", message: "Try again later." };
+          render();
+        }
+      } else window.location.reload();
     }
     return;
   }
@@ -3351,6 +3430,33 @@ async function handleAction(button: HTMLElement): Promise<void> {
     pendingFocusRestore = accountPanelOpen
       ? { action: "sign-out", occurrence: 0 }
       : { action: "toggle-account-panel", occurrence: 0 };
+    render();
+    return;
+  }
+  if (action === "manage-agents") {
+    accountPanelOpen = false;
+    agentPanelOpen = true;
+    issuedAgentCredential = "";
+    await loadAgentConnections();
+    render();
+    return;
+  }
+  if (action === "close-agents") {
+    agentPanelOpen = false;
+    issuedAgentCredential = "";
+    render();
+    return;
+  }
+  if (action === "revoke-agent") return revokeAgentConnection(button.dataset.connectionId || "");
+  if (action === "copy-agent-credential") {
+    if (!issuedAgentCredential) return;
+    await navigator.clipboard.writeText(issuedAgentCredential);
+    issuedAgentCredential = "";
+    render();
+    return;
+  }
+  if (action === "clear-agent-credential") {
+    issuedAgentCredential = "";
     render();
     return;
   }
@@ -3476,6 +3582,8 @@ root.addEventListener("submit", (event) => {
     ? signIn(form)
     : form.dataset.form === "workspace"
       ? createWorkspace(form)
+    : form.dataset.form === "agent-connection"
+      ? createAgentConnection(form)
     : form.dataset.form === "project"
       ? saveProject(form)
       : form.dataset.form === "add-column"

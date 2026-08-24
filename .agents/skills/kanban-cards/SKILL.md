@@ -5,7 +5,7 @@ description: Keep project work visible and up to date in kanban.cards so you can
 
 # kanban.cards
 
-Use the API as the source of truth. This slice's credential is a compatibility path acting for the owner and bound server-side to exactly one Workspace. It cannot select a Workspace from a Project binding, payload, query, or header. Do not create agent identities, roles, sessions, reviewers, or approval workflows; verified agent identity is the next roadmap slice.
+Use the API as the source of truth. The normal credential is a neutral AgentConnection bound server-side to exactly one owner and one Workspace with explicit `read` and/or `write` scopes. It cannot select a Workspace from a Project binding, payload, query, header, or caller label. The legacy compatibility bearer may still work for its documented migration bridge, but it is not an AgentConnection and must not be described as an agent identity.
 
 Resolve the absolute directory containing this `SKILL.md` from the active skill catalog. Run its bundled helper from the target repository root, replacing `{skill_dir}` with that directory:
 
@@ -21,12 +21,11 @@ Read [references/api.md](references/api.md) when exact payloads, headers, or res
 
 ## Connect
 
-Store the Workspace-bound compatibility token only in `~/.kanban-cards/config.json`. Pipe it through standard input so it does not appear in the command line:
+Create the AgentConnection from the owner UI on the intended Workspace tenant host. Copy its one-time credential and store it only in `~/.kanban-cards/config.json`. Pipe it through standard input so it does not appear in the command line, shell history, or repository. Use that Workspace's tenant API URL, not the application root:
 
 ```bash
 node "{skill_dir}/scripts/kanban-cards-client.mjs" setup \
-  --url https://kanban.cards/api \
-  --actor codex \
+  --url https://my-workspace.kanban.cards/api \
   --token-stdin
 ```
 
@@ -38,7 +37,7 @@ node "{skill_dir}/scripts/kanban-cards-client.mjs" bind --project <project-id>
 node "{skill_dir}/scripts/kanban-cards-client.mjs" project
 ```
 
-`bind` verifies that the Project exists through the configured API before writing the repository file.
+`setup` verifies that the credential resolves to a Workspace context before saving it. `bind` verifies that the Project exists in that same Workspace before writing the repository file. AgentConnection Activity attribution contains the verified connection's stable ID and stored label; `X-Kanban-Actor` is ignored for AgentConnection authority and attribution. The legacy compatibility bearer does not receive an AgentConnection ID.
 
 Pass `--project <project-id>` to override the repository binding for one command.
 
@@ -60,7 +59,7 @@ node "{skill_dir}/scripts/kanban-cards-client.mjs" create-project \
 
 node "{skill_dir}/scripts/kanban-cards-client.mjs" create-card \
   --title "Simplify authentication" \
-  --body "Replace delegated sessions with one owner credential." \
+  --body "Connect the bounded Workspace agent." \
   --external-key "recommendation:simplify-auth"
 ```
 
@@ -79,7 +78,7 @@ Before work, read `project` or `cards` and note the card version. After substant
 ```bash
 node "{skill_dir}/scripts/kanban-cards-client.mjs" comment \
   --card <card-id> \
-  --text "Implemented and verified the owner-token setup path."
+  --text "Implemented and verified the tenant-bound AgentConnection setup path."
 
 node "{skill_dir}/scripts/kanban-cards-client.mjs" move-card \
   --card <card-id> \

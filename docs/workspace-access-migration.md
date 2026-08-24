@@ -1,5 +1,7 @@
 # Workspace access migration
 
+This is a one-time protected migration and audit record, not the steady-state deployment process. Ordinary product changes use the fast lane in [`runbook.md`](runbook.md); return here only when authentication, authorization, tenant routing, compatibility retirement, or durable data boundaries change.
+
 ## Purpose
 
 This migration adds tenant-aware owner access without changing the stored Project, Card, Comment, Activity, version, or idempotency-record shapes. The access registry is additive: it maps verified owner identities and canonical Workspace slugs to the existing `kanban_v2_workspaces` rows. It does not copy a Workspace merely to make it tenant-aware.
@@ -10,7 +12,7 @@ The first production migration requires three explicit operator-provided values:
 - `legacyWorkspaceSlug`: the canonical hostname slug for the current Workspace
 - `legacyWorkspaceName`: the owner-facing Workspace name
 
-Those values bind the current Workspace to `kanban_v2_workspaces:default` only when a server-verified Clerk session presents the exact configured user ID. That ID must also appear in the exact `KANBAN_CARDS_ALLOWED_CLERK_USER_IDS` admission list. Email and display name come from Clerk after session verification, never from migration environment values, and email is never an admission or binding key. The three values are migration inputs, not runtime fallbacks, and may be removed after the exact mapping is verified. A Clerk user ID absent from the admission list receives no Workspace access.
+Those values bind the current Workspace to `kanban_v2_workspaces:default` only when a server-verified Clerk session presents the exact configured legacy user ID. Email and display name come from Clerk after session verification and are never binding or authorization keys. `KANBAN_CARDS_ALLOWED_CLERK_USER_IDS` remains optional migration input and does not gate self-service owners.
 
 ## Additive storage contract
 
@@ -43,7 +45,7 @@ The migration must not alter the JSON stored in `kanban_v2_workspaces:default`. 
 
 Migration is safe to run repeatedly and concurrently:
 
-1. Validate all three legacy inputs, require the legacy Clerk user ID to appear in the exact admission list, then require that user ID from the server-verified Clerk session.
+1. Validate all three legacy inputs, then require that exact legacy user ID from the server-verified Clerk session.
 2. Read `kanban_v2_workspaces:default` through the non-creating preflight path. A missing table, missing row, unsupported schema, malformed file, or storage error stops the Clerk session exchange before any access-registry mutation.
 3. Begin the access-registry transaction and lock its singleton row before inspecting or writing owner, Workspace, or membership records.
 4. Insert the legacy owner, Workspace, and membership with uniqueness constraints and conflict handling that accepts only the same canonical mapping.
@@ -59,20 +61,20 @@ A second invocation with identical inputs is a successful no-op. Concurrent iden
 
 The tenant-aware candidate must be verified before the public domain moves:
 
-- Automatic Vercel deployments from `main` are disabled in repository configuration, and the Vercel Project keeps Auto-assign Custom Production Domains disabled. A merge cannot create or promote the production artifact.
-- Candidate creation uses an explicit production-target `--skip-domain` deployment. The deployment ID, immutable URL, linked Project, production target, commit metadata, and alias state must agree. The live controller accepts a differing clean-`main` SHA only when the exact Git delta is operator-only, while relevant runtime configuration remains bound by direct live checks.
+- Git deployments from `main` create a staged Production artifact, while the Vercel Project keeps Auto-assign Custom Production Domains disabled. A merge builds but cannot promote production traffic.
+- Candidate selection reuses the staged Production deployment created from validated `main`; it is never rebuilt as a second manual deploy. The deployment ID, immutable URL, linked Project, production target, commit metadata, and alias state must agree. The live controller accepts a differing clean-`main` SHA only when the exact Git delta is operator-only, while relevant runtime configuration remains bound by direct live checks.
 - Standard Protection remains enabled; the Firewall is enabled with no draft, and the exact top-two bypass/deny rules retain their order, exact host set, exact admitted source, and actions.
 - The complete pre-promotion alias inventory excludes the canonical tenant. One fresh candidate-root request from an exact source outside the admitted address returns HTTP `403`, `x-vercel-mitigated: deny`, and an `x-vercel-id`.
-- The unified Clerk email-code flow and server-side session exchange resolve the explicit legacy Clerk user ID to the legacy Workspace.
+- The Clerk email-link flow returns to the exact initiating root, whose server-side session exchange resolves the legacy Clerk user ID to the legacy Workspace.
 - The dedicated auth-only UI host is pinned to the exact candidate artifact, exposes only Clerk UI routes, and is protected during the pre-promotion proof; the single Clerk production FAPI DNS/custom domain is separately verified.
-- The canonical and exact candidate application roots are same-root Clerk application origins, not satellites; ClerkJS uses the normal production FAPI, and the candidate returns from auth-host email-code completion to its exact origin and recognizes its Clerk session there.
-- The root route offers only Workspaces explicitly owned by that admitted Clerk user ID.
+- The canonical and exact candidate application roots are same-root Clerk application origins, not satellites; the candidate returns from auth-host email-link completion to its exact origin and recognizes its Clerk session there.
+- The root route offers only Workspaces owned by that Clerk user ID.
 - The exact candidate tenant reads the unchanged `default` state; the canonical tenant does so only after the explicit promotion and exact route assignment.
-- Clerk user IDs absent from the exact admission list receive no Workspace and cannot discover the legacy Workspace.
+- A different Clerk user ID may create its own Workspace but cannot discover or enter the legacy Workspace.
 - A tenant session, handoff, or interim skill credential for one Workspace cannot read or write another.
 - A client-supplied Workspace selector is rejected or ignored in favor of authenticated server context, as specified by the endpoint contract.
 
-The legacy bearer may exist only as a bounded cutover bridge. It is authorized exclusively for the mapped legacy Workspace and `default` state row; it cannot create, enumerate, or enter another Workspace. The cutover record must state when that bridge is disabled. Retirement means the token is absent from the active environment, `/api/access/health` reports `legacyBridge: disabled` while remaining healthy, Clerk root and tenant access still work, and the retired bearer returns `401`. There is no unadmitted-user fallback to the legacy owner, `default`, the first Workspace, or a request-supplied tenant.
+The legacy bearer may exist only as a bounded cutover bridge. It is authorized exclusively for the mapped legacy Workspace and `default` state row; it cannot create, enumerate, or enter another Workspace. Retirement means the token is absent, `/api/access/health` reports `legacyBridge: disabled`, and the retired bearer returns `401`. New owners never fall back to the legacy owner, `default`, the first Workspace, or a request-supplied tenant.
 
 ## Rollback boundary
 
@@ -101,14 +103,14 @@ Mike accepted on `2026-08-22T02:19:24Z` that a historical production pre-binding
 ## Permanent release controls
 
 - [ ] A clean validated checkout identifies the candidate deployment. The live controller verifies exact Git provenance or an exact operator-only Git delta, then binds relevant runtime configuration through the immutable deployment, protected routes, readiness, Clerk, and WAF checks.
-- [ ] The candidate is READY, production-targeted, private, and pinned to the exact auth, candidate-root, and candidate-tenant routes. Standard Protection, disabled automatic `main` deployment, disabled automatic domain assignment, and the exact published candidate WAF policy remain active.
+- [ ] The candidate is READY, production-targeted, private, and pinned to the exact auth, candidate-root, and candidate-tenant routes. Standard Protection, enabled staged `main` builds, disabled automatic domain assignment, and the exact published candidate WAF policy remain active.
 - [ ] One fresh candidate-root request from an independent exact source receives HTTP `403` with Vercel deny mitigation. No multi-host atomic receipt, traffic-correlation package, or source-switch choreography is required.
 - [ ] `/api/health` and `/api/access/health` report healthy Postgres, ready registry/state/binding, and no missing configuration.
-- [ ] Exact Clerk authorized parties, auth-host isolation, email-code authentication, session exchange, owner binding, tenant handoff, tenant read/write, and exact-session sign-out pass. Automated fail-closed coverage is sufficient for an authenticated unadmitted identity while production remains Invite-only; do not create a temporary live identity solely for release evidence.
+- [ ] Exact Clerk authorized parties, auth-host isolation, email-link sign-up/sign-in, exact-root return, session exchange, first Workspace creation, tenant handoff, tenant read/write, and exact-session sign-out pass.
 - [ ] Automated and existing live sign-out evidence cover failure/retry behavior; a new same-session forced failure is not required for every release.
 - [ ] If the compatibility bridge is enabled, one bounded read proves it reaches only the mapped legacy Workspace. Card creation, comments, movement, archival, and board comments are not release evidence. If disabled, the retirement negatives and old-deployment closure still pass.
 - [ ] A distinct exact known-good rollback deployment is healthy and recorded before promotion.
-- [ ] `npm run release:gate` passes and promotion receives the literal explicit authorization.
+- [ ] `npm run release:cutover` passes and promotion receives the literal explicit authorization.
 - [ ] Post-promotion proof is a later distinct run covering public health, authentication, exact routing, a focused unchanged-data digest, temporary alias/WAF/Clerk cleanup, and the retained rollback target.
 
 `GET /api/access/health` reports Clerk mode, registry availability, compatibility-bridge state, and coarse `legacyState` and `legacyBinding` readiness without exposing a Clerk user ID, email, display name, secret, Workspace id, or state-row id. It returns `503` for an unavailable registry, a required missing or invalid `default` state, or a pending or mismatched required binding. It is readiness evidence only; it does not replace the identity, isolation, handoff, database, or browser checks above.

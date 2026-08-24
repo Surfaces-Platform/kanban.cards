@@ -172,7 +172,8 @@ test("logout continuations are signed and bind the exact Clerk session and initi
 
   assert.deepEqual(await verifyLogoutContinuationToken(token, SESSION_SECRET), continuation);
   assert.equal(await verifyLogoutContinuationToken(token, `${SESSION_SECRET}-wrong`), null);
-  assert.equal(await verifyLogoutContinuationToken(`${token.slice(0, -1)}x`, SESSION_SECRET), null);
+  const tampered = `${token[0] === "a" ? "b" : "a"}${token.slice(1)}`;
+  assert.equal(await verifyLogoutContinuationToken(tampered, SESSION_SECRET), null);
 });
 
 test("logout completion markers are signed, short-lived host-only cookies bound to the exact root origin", async () => {

@@ -1,5 +1,7 @@
 import { isIP } from "node:net";
 
+import { verifiedProductionDomainNames } from "./release-policy";
+
 export const PROMOTION_CONFIRMATION = "PROMOTE EXACT VERIFIED CANDIDATE";
 export const CANDIDATE_FIREWALL_BYPASS_RULE = "kanban-candidate-mike-bypass";
 export const CANDIDATE_FIREWALL_DENY_RULE = "kanban-candidate-deny";
@@ -22,6 +24,7 @@ export interface CutoverBlocker {
     | "production-boundary"
     | "candidate-readiness"
     | "clerk-access"
+    | "agent-connection"
     | "compatibility-bridge"
     | "data-integrity"
     | "rollback-target"
@@ -101,6 +104,7 @@ export function evaluateCutoverSnapshot(
   const accessHealth = record(evidence.accessHealth);
   const legacyBinding = record(accessHealth.legacyBinding);
   const clerk = record(evidence.clerkProof);
+  const agentConnection = record(evidence.agentConnectionProof);
   const compatibility = record(evidence.compatibilityProof);
   const retirement = record(evidence.retirementProof);
   const data = record(evidence.dataIntegrityProof);
@@ -123,13 +127,16 @@ export function evaluateCutoverSnapshot(
   requireMatch(blockers, "release-policy", "repository", text(policy.repository), trustedTarget.repository, "linked repository");
   requireMatch(blockers, "release-policy", "production-branch", text(policy.productionBranch), trustedTarget.productionBranch, "production branch");
   if (policy.autoAssignCustomDomains !== false) add(blockers, "release-policy", "auto-domain-assignment-enabled", "Auto-assign Custom Production Domains must remain disabled.");
-  if (policy.mainGitDeploymentsEnabled !== false) add(blockers, "release-policy", "main-git-deployments-enabled", "The repository must keep every Git rule that matches main disabled.");
+  if (policy.mainGitDeploymentsEnabled !== true) add(blockers, "release-policy", "main-git-deployments-disabled", "Git deployments from main must create the staged Production artifact; disabled domain auto-assignment keeps traffic unchanged.");
   if (text(policy.deploymentProtection) !== "all_except_custom_domains") {
     add(blockers, "release-policy", "standard-protection-required", "Standard Protection must remain enabled so generated deployments are protected while custom production domains stay public.");
   }
   requireFirewallPolicy(blockers, firewallFacts, phase);
 
   requireMatch(blockers, "candidate-identity", "project-id", text(candidate.projectId), trustedTarget.projectId, "candidate Project id");
+  requireMatch(blockers, "candidate-identity", "source", text(candidate.source), "git", "candidate deployment source");
+  requireMatch(blockers, "candidate-identity", "repository", text(candidate.repository), trustedTarget.repository, "candidate Git repository");
+  if (candidate.gitDirty === true) add(blockers, "candidate-identity", "dirty-source", "Candidate metadata reports a dirty source checkout.");
   requireMatch(blockers, "candidate-identity", "commit-ref", text(candidate.commitRef), trustedTarget.productionBranch, "candidate Git ref");
   requireMatch(blockers, "candidate-identity", "target", text(candidate.target), "production", "candidate environment target");
   requireMatch(blockers, "candidate-identity", "ready-state", text(candidate.readyState), "READY", "candidate readiness state");
@@ -142,11 +149,13 @@ export function evaluateCutoverSnapshot(
   const productionUrl = canonicalDeploymentUrl(currentProduction.url);
   const productionAliases = strings(currentProduction.aliases);
   const projectAliasOrigins = new Set(strings(policy.aliases).map((alias) => canonicalOrigin(alias)).filter(Boolean));
+  const productionDomains = new Set(verifiedProductionDomainNames(policy.domains));
   requireMatch(blockers, "production-boundary", "production-project-id", text(currentProduction.projectId), trustedTarget.projectId, "current production Project id");
   requireMatch(blockers, "production-boundary", "production-target", text(currentProduction.target), "production", "current production target");
   requireMatch(blockers, "production-boundary", "production-ready-state", text(currentProduction.readyState), "READY", "current production readiness state");
   if (!isGeneratedDeploymentUrl(productionUrl, trustedTarget.publicDomain)) add(blockers, "production-boundary", "production-url", "Current production must resolve to an immutable generated deployment URL.");
-  if (!productionAliases.includes(trustedTarget.publicDomain)) add(blockers, "production-boundary", "public-domain-missing", "The inspected production deployment does not own the public domain.");
+  if (!productionDomains.has(trustedTarget.publicDomain)) add(blockers, "production-boundary", "public-domain-unregistered", "The public root must be a verified custom Production Domain in the Vercel Project.");
+  if (!productionDomains.has(trustedTarget.authDomain)) add(blockers, "production-boundary", "auth-domain-unregistered", "The auth host must be a verified custom Production Domain in the Vercel Project.");
   if (phase === "pre-promotion" && productionId === candidateId) add(blockers, "production-boundary", "candidate-already-current", "The candidate must remain unpromoted while pre-promotion gates run.");
   if (phase === "pre-promotion") {
     if (policy.aliasInventoryComplete !== true) add(blockers, "production-boundary", "alias-inventory-incomplete", "Pre-promotion proof requires a complete live Vercel Project alias inventory.");
@@ -154,6 +163,7 @@ export function evaluateCutoverSnapshot(
   }
   if (phase === "post-promotion" && productionId !== candidateId) add(blockers, "production-boundary", "candidate-not-current", "The public production target does not match the verified candidate deployment.");
   if (phase === "post-promotion") {
+    if (!productionDomains.has(`mike.${trustedTarget.publicDomain}`)) add(blockers, "production-boundary", "tenant-domain-unregistered", "The canonical tenant must be a verified custom Production Domain in the Vercel Project.");
     if (policy.aliasInventoryComplete !== true) add(blockers, "production-boundary", "alias-inventory-incomplete", "Post-promotion proof requires a complete live Vercel Project alias inventory.");
     const liveAliasOrigins = new Set(productionAliases.map((alias) => canonicalOrigin(alias)).filter(Boolean));
     if (liveAliasOrigins.has(canonicalOrigin(preEvidence.origin))) {
@@ -186,7 +196,7 @@ export function evaluateCutoverSnapshot(
   requirePassed(blockers, "clerk-access", evidence, "clerkDomainConfiguration", "clerk-domain-configuration", "Single Clerk production FAPI DNS/custom-domain and phase-exact finite effective allowed-origin configuration");
   requirePassed(blockers, "clerk-access", clerk, "authHostSurface", "clerk-auth-host-surface", "Dedicated Clerk auth-host sign-up and sign-in surface");
   requirePassed(blockers, "clerk-access", clerk, "authHostIsolation", "clerk-auth-host-isolation", "Dedicated Clerk auth-host isolation from Workspace application APIs");
-  requirePassed(blockers, "clerk-access", clerk, "emailCodeAuth", "clerk-email-code-auth", "Clerk email-code authentication");
+  requirePassed(blockers, "clerk-access", clerk, "emailLinkAuth", "clerk-email-link-auth", "Clerk email-link sign-up and sign-in");
   requirePassed(blockers, "clerk-access", clerk, "sameRootSessionShare", "clerk-same-root-session-share", "Clerk auth-host completion, exact initiating application-root return, and per-origin Clerk session recognition");
   requirePassed(blockers, "clerk-access", clerk, "sessionExchange", "clerk-session-exchange", "Server-side Clerk session exchange");
   requirePassed(blockers, "clerk-access", clerk, "exactLegacyBinding", "exact-legacy-binding", "Exact Clerk user-to-legacy Workspace binding");
@@ -194,6 +204,12 @@ export function evaluateCutoverSnapshot(
   requirePassed(blockers, "clerk-access", clerk, "tenantProjectAccess", "tenant-project-access", "Tenant Project access");
   requirePassed(blockers, "clerk-access", clerk, "tenantProjectWrite", "tenant-project-write", "Tenant Project write");
   requirePassed(blockers, "clerk-access", clerk, "signOut", "clerk-sign-out", "App-session and Clerk sign-out");
+
+  requirePassed(blockers, "agent-connection", agentConnection, "credentialIssuedOnce", "agent-credential-issued-once", "AgentConnection creation and one-time credential delivery");
+  requirePassed(blockers, "agent-connection", agentConnection, "scopeEnforcement", "agent-scope-enforcement", "AgentConnection read and write scope enforcement");
+  requirePassed(blockers, "agent-connection", agentConnection, "workspaceHostIsolation", "agent-workspace-host-isolation", "AgentConnection cross-Workspace and host denial");
+  requirePassed(blockers, "agent-connection", agentConnection, "activityAttribution", "agent-activity-attribution", "AgentConnection stable-ID Activity attribution");
+  requirePassed(blockers, "agent-connection", agentConnection, "revocation", "agent-revocation", "AgentConnection revoked-credential denial");
 
   const bridgeMode = text(accessHealth.legacyBridge);
   if (bridgeMode === "enabled") {

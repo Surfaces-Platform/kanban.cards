@@ -138,12 +138,16 @@ async function setup(opts) {
     throw new Error("Do not pass tokens on the command line. Pipe the token to setup with --token-stdin.");
   }
   if (opts["token-stdin"] !== true) {
-    throw new Error("Missing --token-stdin. Pipe the owner token to standard input.");
+    throw new Error("Missing --token-stdin. Pipe the AgentConnection credential to standard input.");
   }
   const token = (await readStdin()).trim();
   if (!token) throw new Error("No token was received on standard input.");
   const apiBaseUrl = normalizeBaseUrl(optionalStringOption(opts, "url") || DEFAULT_BASE_URL);
   const actor = optionalStringOption(opts, "actor") || "codex";
+  const session = await request("/session", {}, { baseUrl: apiBaseUrl, token, actor });
+  if (!isRecord(session) || session.authenticated !== true || session.context !== "workspace" && session.context !== "local") {
+    throw new Error("The credential must authenticate an exact Workspace tenant API.");
+  }
   const nextConfig = { apiBaseUrl, token, actor };
   await writeJsonAtomic(USER_CONFIG_PATH, nextConfig, 384);
   return {
@@ -353,7 +357,7 @@ function normalizeBaseUrl(value) {
     throw new Error("The API URL must not contain credentials, a query, or a fragment.");
   }
   if (parsed.protocol === "http:" && !isLoopbackHostname(parsed.hostname)) {
-    throw new Error("A non-loopback kanban.cards API requires https:// so the owner token is encrypted in transit.");
+    throw new Error("A non-loopback kanban.cards API requires https:// so the AgentConnection credential is encrypted in transit.");
   }
   return normalized;
 }

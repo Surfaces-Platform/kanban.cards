@@ -18,7 +18,7 @@ import {
   verifyTenantSession,
   type RootSession
 } from "../src/app-sessions";
-import type { ClerkAuthConfig, ClerkAuthGateway } from "../src/clerk-auth";
+import { ClerkIdentityError, type ClerkAuthConfig, type ClerkAuthGateway } from "../src/clerk-auth";
 import { createApp } from "../src/server";
 import { createWorkspaceStoreResolver, freshWorkspaceState } from "../src/state-store";
 
@@ -107,6 +107,51 @@ test("two Workspaces isolate API reads, writes, idempotency, and client selector
   });
 });
 
+test("verified owner creates a one-time Workspace agent credential, attributed Card, then revokes access", async () => {
+  await withApp(async ({ accessStore, betaWorkspace, client, rootCookie }) => {
+    const betaCookie = await openWorkspace(client, rootCookie, "beta");
+    const issued = await client.post("/api/agent-connections", {
+      host: BETA_HOST,
+      cookie: betaCookie,
+      origin: `https://${BETA_HOST}`,
+      json: { label: "Early signup agent", scopes: ["read", "write"] }
+    });
+    assert.equal(issued.status, 201, JSON.stringify(issued.data));
+    assert.match(issued.data.credential, /^kac_agent-/);
+    assert.equal("credentialHash" in issued.data.connection, false);
+    const listed = await client.get("/api/agent-connections", { host: BETA_HOST, cookie: betaCookie });
+    assert.equal(listed.data.connections.length, 1);
+    assert.equal("credential" in listed.data.connections[0], false);
+    assert.equal("credentialHash" in listed.data.connections[0], false);
+    assert.ok((await accessStore.read()).agentConnections[0].credentialHash.startsWith("sha256:"));
+
+    const project = await client.post("/api/projects", { host: BETA_HOST, bearer: issued.data.credential, json: { name: "First project" } });
+    assert.equal(project.status, 201, JSON.stringify(project.data));
+    const card = await client.post(`/api/projects/${project.data.project.id}/cards`, { host: BETA_HOST, bearer: issued.data.credential, actor: "Forged caller label", json: { title: "Created by agent", body: "" } });
+    assert.equal(card.status, 201, JSON.stringify(card.data));
+    const activity = await client.get(`/api/projects/${project.data.project.id}/activity`, { host: BETA_HOST, bearer: issued.data.credential });
+    const created = activity.data.activity.find((entry: any) => entry.action === "card.created");
+    assert.deepEqual(created.actor, {
+      channel: "api",
+      label: "Early signup agent",
+      agentConnectionId: issued.data.connection.id
+    });
+    const usedAt = (await accessStore.read()).agentConnections.find((connection) => connection.id === issued.data.connection.id)?.lastUsedAt;
+    assert.equal((await client.get("/api/projects", { host: LEGACY_HOST, bearer: issued.data.credential })).status, 401);
+    assert.equal((await accessStore.read()).agentConnections.find((connection) => connection.id === issued.data.connection.id)?.lastUsedAt, usedAt);
+
+    const readOnly = await client.post("/api/agent-connections", { host: BETA_HOST, cookie: betaCookie, origin: `https://${BETA_HOST}`, json: { label: "Reader", scopes: ["read"] } });
+    assert.equal((await client.get("/api/projects", { host: BETA_HOST, bearer: readOnly.data.credential })).status, 200);
+    const readOnlyUsedAt = (await accessStore.read()).agentConnections.find((connection) => connection.id === readOnly.data.connection.id)?.lastUsedAt;
+    assert.equal((await client.post("/api/projects", { host: BETA_HOST, bearer: readOnly.data.credential, json: { name: "Denied" } })).status, 403);
+    assert.equal((await accessStore.read()).agentConnections.find((connection) => connection.id === readOnly.data.connection.id)?.lastUsedAt, readOnlyUsedAt);
+
+    const revoked = await client.delete(`/api/agent-connections/${issued.data.connection.id}`, { host: BETA_HOST, cookie: betaCookie, origin: `https://${BETA_HOST}` });
+    assert.ok(revoked.data.connection.revokedAt);
+    assert.equal((await client.get("/api/projects", { host: BETA_HOST, bearer: issued.data.credential })).status, 401);
+  });
+});
+
 test("legacy bearer is explicitly mapped to default and cannot enter a sibling Workspace", async () => {
   await withApp(async ({ client }) => {
     const legacyWrite = await client.post("/api/projects", {
@@ -183,8 +228,8 @@ test("legacy bearer is explicitly mapped to default and cannot enter a sibling W
       rootOrigin: `https://${ROOT_HOST}`
     }, CLERK_CONFIG.sessionSecret, true, 3_600));
     const unknownWorkspaces = await client.get("/api/workspaces", { host: ROOT_HOST, cookie: unknownCookie });
-    assert.equal(unknownWorkspaces.status, 401);
-    assert.match(unknownWorkspaces.data.error, /sign-in required/i);
+    assert.equal(unknownWorkspaces.status, 200);
+    assert.deepEqual(unknownWorkspaces.data.workspaces, []);
   });
 });
 
@@ -252,7 +297,7 @@ test("Workspace handoffs reject wrong destinations, replay, and expiry without s
   });
 });
 
-test("an explicit candidate host family exchanges only an admitted Clerk session and rejects cross-family sessions and handoffs", async () => {
+test("an explicit candidate host family exchanges only a server-verified Clerk session and rejects cross-family sessions and handoffs", async () => {
   await withApp(async ({ client }) => {
     const candidateRootOrigin = `https://${CANDIDATE_ROOT_HOST}`;
     const candidateTenantOrigin = `https://${CANDIDATE_LEGACY_HOST}`;
@@ -364,7 +409,7 @@ test("an explicit candidate host family exchanges only an admitted Clerk session
   });
 });
 
-test("Clerk session exchange admits only exact configured user IDs and never accepts an email as identity", async () => {
+test("Clerk session exchange admits any server-verified Clerk user ID and never accepts email as identity", async () => {
   await withApp(async ({ client }) => {
     const missing = await client.post("/api/clerk-session", {
       host: ROOT_HOST,
@@ -382,15 +427,14 @@ test("Clerk session exchange admits only exact configured user IDs and never acc
     assert.equal(emailAsIdentity.status, 403);
     assert.equal(emailAsIdentity.headers.get("set-cookie"), null);
 
-    const unauthorized = await client.post("/api/clerk-session", {
+    const newOwner = await client.post("/api/clerk-session", {
       host: ROOT_HOST,
       origin: `https://${ROOT_HOST}`,
       clerkUserId: UNAUTHORIZED_CLERK_USER_ID,
       clerkSessionId: "sess_notAdmitted456"
     });
-    assert.equal(unauthorized.status, 403);
-    assert.match(unauthorized.data.error, /does not have access/i);
-    assert.equal(unauthorized.headers.get("set-cookie"), null);
+    assert.equal(newOwner.status, 201);
+    assert.ok(requiredSessionCookie(newOwner, rootSessionCookieName(true)));
 
     const admitted = await client.post("/api/clerk-session", {
       host: ROOT_HOST,
@@ -1297,6 +1341,7 @@ class SecurityClient {
       "X-Forwarded-Proto": "https"
     };
     if (options.bearer) headers.Authorization = `Bearer ${options.bearer}`;
+    if (options.actor) headers["X-Kanban-Actor"] = options.actor;
     if (options.cookie) headers.Cookie = options.cookie;
     if (options.origin) headers.Origin = options.origin;
     if (options.clerkUserId) headers["X-Test-Clerk-User"] = options.clerkUserId;
@@ -1343,6 +1388,7 @@ class SecurityClient {
 interface RequestOptions {
   host?: string;
   bearer?: string;
+  actor?: string;
   cookie?: string;
   origin?: string;
   clerkUserId?: string;
@@ -1402,12 +1448,12 @@ function createFakeClerkGateway(
       };
     },
     async verifiedIdentity(clerkUserId, clerkSessionId) {
-      if (clerkUserId !== OWNER.providerSubject) throw new Error("Unexpected fake Clerk identity lookup.");
+      if (!/^user_[A-Za-z0-9]+$/.test(clerkUserId)) throw new ClerkIdentityError("The Clerk identity is unavailable.");
       return {
         clerkUserId,
         clerkSessionId,
-        email: OWNER.email,
-        displayName: OWNER.displayName
+        email: clerkUserId === OWNER.providerSubject ? OWNER.email : "new-owner@example.com",
+        displayName: clerkUserId === OWNER.providerSubject ? OWNER.displayName : "New Owner"
       };
     },
     async revokeSession(clerkSessionId) {

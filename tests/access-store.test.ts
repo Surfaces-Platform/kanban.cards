@@ -117,6 +117,41 @@ test("file access registry creates isolated Workspaces and binds legacy default 
   }
 });
 
+test("agent connections persist only a strong hash and enforce expiry and durable revocation", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-agent-connection-"));
+  const dataPath = path.join(directory, "access.json");
+  let clock = new Date("2026-08-12T12:00:00.000Z");
+  const store = createFileAccessStore(dataPath, { now: () => clock });
+  try {
+    const workspace = await store.createWorkspace({ ...MIKE_IDENTITY, slug: "agents", name: "Agents" });
+    const issued = await store.createAgentConnection({ providerSubject: MIKE_IDENTITY.providerSubject, workspaceId: workspace.id, label: "Build bot", scopes: ["read", "write"], expiresAt: "2026-08-12T13:00:00.000Z" });
+    assert.match(issued.credential, /^kac_agent-/);
+    const storedText = await fs.readFile(dataPath, "utf8");
+    assert.doesNotMatch(storedText, new RegExp(issued.credential.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.match(storedText, /"credentialHash": "sha256:[a-f0-9]{64}"/);
+    assert.equal((await store.verifyAgentCredential(issued.credential)).connection.label, "Build bot");
+    assert.equal((await store.listAgentConnections(MIKE_IDENTITY.providerSubject, workspace.id))[0].lastUsedAt, null);
+    await assert.rejects(store.authorizeAgentCredential({ credential: issued.credential, workspaceId: "workspace-wrong", requiredScope: "read" }), (error: any) => error.code === "ACCESS_AGENT_WORKSPACE_MISMATCH");
+    assert.equal((await store.listAgentConnections(MIKE_IDENTITY.providerSubject, workspace.id))[0].lastUsedAt, null);
+    await store.authorizeAgentCredential({ credential: issued.credential, workspaceId: workspace.id, requiredScope: "write" });
+    assert.equal((await store.listAgentConnections(MIKE_IDENTITY.providerSubject, workspace.id))[0].lastUsedAt, clock.toISOString());
+    await store.revokeAgentConnection(MIKE_IDENTITY.providerSubject, workspace.id, issued.connection.id);
+    await assert.rejects(store.verifyAgentCredential(issued.credential), (error: any) => error.code === "ACCESS_AGENT_REVOKED");
+    const reopened = createFileAccessStore(dataPath, { now: () => clock });
+    await assert.rejects(reopened.verifyAgentCredential(issued.credential), (error: any) => error.code === "ACCESS_AGENT_REVOKED");
+
+    clock = new Date("2026-08-12T14:00:00.000Z");
+    const expiring = await reopened.createAgentConnection({ providerSubject: MIKE_IDENTITY.providerSubject, workspaceId: workspace.id, label: "Expired bot", scopes: ["read"], expiresAt: "2026-08-12T15:00:00.000Z" });
+    clock = new Date("2026-08-12T14:01:00.000Z");
+    await assert.rejects(reopened.authorizeAgentCredential({ credential: expiring.credential, workspaceId: workspace.id, requiredScope: "write" }), (error: any) => error.code === "ACCESS_AGENT_SCOPE_MISSING");
+    assert.equal((await reopened.listAgentConnections(MIKE_IDENTITY.providerSubject, workspace.id)).find((connection) => connection.id === expiring.connection.id)?.lastUsedAt, null);
+    clock = new Date("2026-08-12T15:00:00.000Z");
+    await assert.rejects(reopened.verifyAgentCredential(expiring.credential), (error: any) => error.code === "ACCESS_AGENT_EXPIRED");
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("session revocation is durable, idempotent, concurrent, and independent of owner admission", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-access-revocation-"));
   const dataPath = path.join(directory, "access.json");

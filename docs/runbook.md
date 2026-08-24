@@ -1,6 +1,6 @@
 # Runbook
 
-This runbook covers local verification, tenant-aware access migration, candidate proof, promotion, compatibility-credential rotation, and rollback.
+This runbook has two release lanes. Ordinary product changes use the short steady-state path. Changes to authentication, authorization, tenant routing, or durable data use the protected path and the one-time migration evidence where relevant.
 
 ## Operating boundary
 
@@ -20,7 +20,7 @@ openssl rand -hex 32
 
 Copy the result directly into the approved password manager and deployment environment. Do not put the generated value into another command.
 
-The browser uses a Clerk session plus separate signed kanban.cards root and tenant cookies after server-side Clerk verification and a one-time exact-host handoff. The stable Clerk user ID is the owner identity and the Clerk session ID is the app session-family identifier; email is never an admission or binding key. The CLI stores the compatibility key in `~/.kanban-cards/config.json` with mode `0600` and sends it as a bearer token. A deployment using a rotated compatibility key requires CLI setup again but does not define browser identity. Older immutable deployment URLs retain their original environment snapshot; protect or retire them separately.
+The browser uses a Clerk session plus separate signed kanban.cards root and tenant cookies after server-side Clerk verification and a one-time exact-host handoff. The stable Clerk user ID is the owner identity and the Clerk session ID is the app session-family identifier; email is never an admission or binding key. The CLI normally stores a one-time AgentConnection credential in `~/.kanban-cards/config.json` with mode `0600`, verifies `/session` resolves the intended Workspace, and sends the credential only to that exact tenant API origin. Each connection has explicit scopes and can be revoked individually without a deployment. The compatibility bearer remains only as the documented legacy migration bridge; rotating that deployment secret requires legacy CLI setup again but never defines browser or AgentConnection identity. Older immutable deployment URLs retain their original environment snapshot; protect or retire them separately.
 
 ## Runtime contract
 
@@ -29,12 +29,12 @@ Production requires:
 - `KANBAN_CARDS_ROOT_HOST=kanban.cards`
 - `KANBAN_CARDS_AUTH_HOST=auth.kanban.cards`, the exact stable auth-only application host. The server derives `https://auth.kanban.cards/sign-in`; `/sign-up` is retained as a successful shell entry that the client canonicalizes to `/sign-in` with `history.replaceState` while preserving the query and fragment. There are no independently configured auth-flow URLs. Clerk's production FAPI DNS/custom domain is configured separately through Clerk's normal production-domain setup.
 - Vercel Marketplace's `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, plus `CLERK_SECRET_KEY`, `CLERK_ENCRYPTION_KEY`, and `SESSION_SECRET`. `CLERK_PUBLISHABLE_KEY` remains accepted as a compatibility alias, but both names must match if both are set. Vercel production rejects Clerk development-instance keys: the Marketplace values must start with `pk_live_` and `sk_live_`. The last two app-owned values must each be at least 32 bytes; the encryption key is required because Clerk middleware selects the exact root configuration at request time.
-- `KANBAN_CARDS_ALLOWED_CLERK_USER_IDS`, a comma-separated list of exact admitted Clerk user IDs. It is required in production; the configured legacy user ID must be included.
+- Optional `KANBAN_CARDS_ALLOWED_CLERK_USER_IDS`, retained only as validated migration input. It does not gate self-service owners.
 - one of `KANBAN_CARDS_DATABASE_URL`, `POSTGRES_URL`, or `DATABASE_URL`
 
-The Clerk instance must be a production instance configured for email verification codes and one sign-in path. Disable self-service sign-up navigation and do not require a name or any profile field after email verification. Before candidate proof, rename every customer-visible Clerk application label to `kanban.cards` and verify that no generated provider resource, environment, or school name appears in the rendered flow; this external configuration change is a release prerequisite, not a repository-controlled result. Clerk Hobby's required small `Secured by Clerk` badge may remain and must stay subordinate to the form. Create the allowed Clerk user, record the stable user ID without the email or credentials, and add that exact ID to `KANBAN_CARDS_ALLOWED_CLERK_USER_IDS`. A successful email-code verification does not itself grant access; an admitted identity with zero Workspaces may create its first Workspace after sign-in.
+The Clerk instance must be a production instance in Open access mode with sign-up and sign-in by email verification link as the only customer-facing email strategy. Leave same-device/browser enforcement enabled and do not require a profile field. The repository uses Clerk's supported prebuilt component; this dashboard configuration is the one external prerequisite. Any server-verified identity with a verified primary email is admitted by durable Clerk user ID and may create its first Workspace.
 
-Complete Clerk's one normal production FAPI DNS/custom-domain setup for the `kanban.cards` root domain; use the exact DNS names and targets supplied by Clerk and verify them before candidate proof. Do not configure an app-owned `/__clerk` proxy on the auth host or either application root. During protected candidate proof, enable Allowed Subdomains and enter exactly `auth.kanban.cards` and `candidate.release.kanban.cards`; the primary root `kanban.cards` is inherently allowed and must not be entered as a subdomain. After the candidate aliases are removed, remove `candidate.release.kanban.cards` from Clerk before restoring public access, leaving only `auth.kanban.cards` explicitly allowed. Never include `mike.kanban.cards`, `mike.candidate.release.kanban.cards`, wildcards, generated deployment hostnames, or any other tenant/unknown host. The same artifact serves the three app surfaces: the auth host redirects `/` and `/index.html` to `/sign-in`; `/sign-up` loads the shell and is client-canonicalized to `/sign-in`. It exposes one Clerk email-code sign-in component only at canonical `/sign-in` and otherwise exposes only the public session configuration needed by ClerkJS and static shell assets; it rejects Workspace, Project, handoff, and app-session exchange APIs. ClerkJS runs on the auth host and both exact application roots against the single validated production FAPI origin derived from the publishable key. Restrict each request's `authorizedParties` to its exact auth or application origin. Each signed-out application root navigates directly to the auth form and carries the exact initiating application-root return. On return, that same application root must recognize its Clerk browser session before the app exchanges it. Tenant hosts accept only kanban.cards app-session cookies and never load ClerkJS. This topology uses one root domain, requires no Clerk satellite or multi-domain feature, and is supported by Clerk Hobby with its production FAPI custom domain and email-code flow. The Clerk-compatible CSP intentionally permits Clerk's runtime inline styles, bot-protection frames/scripts, protected-service connections, image host, and blob workers; do not remove those directives without replacing them with a tested nonce-based policy.
+Complete Clerk's normal production FAPI DNS/custom-domain setup and exact allowed-origin configuration. The auth host serves only the supported email-link sign-up/sign-in component and public shell assets; it rejects Workspace, AgentConnection, Project, handoff, and app-session exchange APIs. Each signed-out application root carries its exact initiating-root return to the auth host. After the email link is opened, that exact root recognizes the Clerk browser session and exchanges it for the kanban.cards root session. Tenant hosts accept only kanban.cards app-session cookies and never load ClerkJS.
 
 Optional:
 
@@ -53,9 +53,33 @@ Local operator controls:
 
 `KANBAN_CARDS_POSTGRES_SSL=disable` is available for a trusted local database. Do not use it in production.
 
-Use the Clerk-free owner-key fallback for ordinary local development. Real Clerk production email-code proof runs on the approved deployed candidate only after the single production FAPI DNS/custom domain and exact Allowed Subdomains list are verified. `localhost` remains available for deterministic Clerk gateway/browser tests; numeric-IP subdomains are not a supported tenant topology.
+Use the Clerk-free owner-key fallback for ordinary local development. Deterministic browser tests prove the email-link-shaped flow, exact-root return, session exchange, and first Workspace journey; a later authorized candidate verifies real email delivery and dashboard configuration.
 
 The public application shell and dedicated auth-host sign-in entry load without prior authentication. The signed-out session contract contains only public configuration: the exact current origin, publishable key, validated `clerkFrontendApiOrigin`, `clerkSurfaceRole` (`auth` or `app`), server-derived auth-host flow URLs, and finite exact application return origins. It contains no app-owned Clerk proxy URL. Clerk and app secrets remain server-only. The auth host denies application data and session-exchange routes; application Project data returns `503` when required configuration is missing and `401` when the host/session or compatibility credential is invalid. Follow [`workspace-access-migration.md`](workspace-access-migration.md) before any tenant-aware promotion; it is the governing data, cutover, and rollback checklist.
+
+## Fast lane: ordinary product changes
+
+Use this lane when a change does not alter authentication, authorization, tenant routing, database schemas or migrations, secret topology, or Vercel domain/protection configuration.
+
+1. Open a pull request. Vercel creates the normal Preview deployment; hosted CI must pass `npm run check` and `npm test`.
+2. `Land this` merges the validated change to `main`. Git integration creates one staged Production deployment with Production environment values. It does not move traffic because **Auto-assign Custom Production Domains** remains disabled.
+3. Wait for the exact `main` SHA to become `READY`. `npm run release:preflight` auto-discovers the Git-created staged deployment, checks its protected health and access-readiness endpoints, verifies the permanent production-domain registry, and prints the exact candidate and rollback target. Copy its `deploymentId` for the promotion command.
+4. After the literal authorization `PROMOTE EXACT VERIFIED CANDIDATE`, run the single controller command:
+
+   ```bash
+   KANBAN_CARDS_DEPLOYMENT_ID='paste-exact-preflight-deployment-id'
+   KANBAN_CARDS_PROMOTION_CONFIRMATION='PROMOTE EXACT VERIFIED CANDIDATE'
+   npm run release:promote -- --deployment "$KANBAN_CARDS_DEPLOYMENT_ID" \
+     --confirmation "$KANBAN_CARDS_PROMOTION_CONFIRMATION"
+   ```
+
+5. The controller rechecks that exact deployment, writes its candidate and predecessor receipt under `.vercel/release-receipts/`, and checks for an in-progress promotion before it submits anything. It promotes once, or resumes verification when Vercel is already promoting, then waits for `kanban.cards`, `auth.kanban.cards`, and `mike.kanban.cards` to resolve to the candidate. A failed post-check reports the exact blocker; rollback remains a separate explicit action.
+
+The three production domains are permanent Project configuration. This lane never creates candidate aliases, edits Clerk Allowed Subdomains, stages WAF rules, writes product data, or repeats the historical Workspace migration proof.
+
+## Sensitive lane: auth, authorization, and data boundaries
+
+Use the protected lane only when a change touches Clerk configuration or flows, session/cookie authority, Workspace admission or routing, `AgentConnection` credentials/scopes/revocation, database schemas or migrations, compatibility-token retirement, or Vercel domain/protection policy. Run the focused migration/security checks that match the change, then use `npm run release:cutover:preflight` and `npm run release:cutover -- --snapshot ...` where the Workspace cutover contract applies. Do not make ordinary UI, copy, or product behavior releases repeat that one-time choreography.
 
 ## Validate the candidate commit
 
@@ -70,13 +94,13 @@ git status --short
 git rev-parse HEAD
 ```
 
-`git status --short` must be empty. Record the full commit SHA. New application deployments must come from a commit that passed validation. A later operator-only evaluator or documentation change may inspect an older application-equivalent candidate only when the live Git delta is limited to the evaluator's exact operator-only allowlist and all direct live configuration checks still pass. `npm run check` includes `npm run check:release-policy`; that policy fails unless automatic deployments from `main` remain disabled in `vercel.json`.
+`git status --short` must be empty. Record the full commit SHA. New application deployments must come from a commit that passed validation. A later operator-only evaluator or documentation change may inspect an older application-equivalent candidate only when the live Git delta is limited to the evaluator's exact operator-only allowlist and all direct live configuration checks still pass. `npm run check` includes `npm run check:release-policy`; that policy requires Git deployments from `main` so merges create staged Production artifacts while the live auto-assignment control keeps traffic unchanged.
 
-Passing automation confirms the implementation contract. It does not prove the deployed database, browser rendering, Clerk environment, real email-code flow, or exact admission list.
+Passing automation confirms the implementation contract. It does not prove the deployed database, live Clerk environment, or real email delivery.
 
 The CLI test exercises setup, repository binding, create deduplication, comments, movement, stale-version protection, Activity, and credential permissions inside isolated temporary state. Do not overwrite the operator's real local workspace or user-scoped CLI connection merely to repeat that automated loop by hand.
 
-## Verify Vercel scope and configuration
+## Verify Vercel scope and configuration for the sensitive lane
 
 Before reading or changing environment variables, storage, deployments, aliases, or rollback state, verify the active Vercel identity and linked Project:
 
@@ -84,17 +108,17 @@ Before reading or changing environment variables, storage, deployments, aliases,
 vercel whoami
 vercel project inspect
 vercel project protection
-npm run release:preflight
+npm run release:cutover:preflight
 ```
 
 Confirm the expected account or team, the `kanban.cards` Project, and its deployment-protection boundary. Stop on any mismatch. Repeat this preflight immediately before a later Vercel mutation if the session, terminal, or active scope may have changed.
 
-Two independent controls keep a merge from moving production traffic:
+Two independent controls separate merge from traffic promotion:
 
-- `vercel.json` sets `git.deploymentEnabled.main` to `false`, so the Git integration cannot create a deployment from a `main` push or merge.
+- Git deployments from `main` are enabled, so a merge creates the exact staged Production artifact without an operator redeploy.
 - In Vercel Project Settings → Environments → Production → Branch Tracking, **Auto-assign Custom Production Domains** must remain disabled. The live Project API must report `autoAssignCustomDomains: false`.
 
-The first control is repository-enforced and covered by `npm run check:release-policy`. `npm run release:preflight` reads the linked Vercel Project and fails unless the exact Project/team/repository, `main` production branch, disabled domain auto-assignment, local `main` deployment block, and generated-deployment protection all agree. Run it before every candidate and immediately before promotion. If either control is absent, stop. Do not use `github.autoAlias: false`; that changes a merged build into a Preview-environment artifact and cannot prove the production environment that will serve after promotion.
+The first control is repository-enforced and covered by `npm run check:release-policy`. The steady preflight requires main builds to be enabled; the sensitive preflight additionally reads the live candidate Firewall boundary. Both require the exact Project/team/repository, `main` production branch, disabled domain auto-assignment, and generated-deployment protection. If either control is absent, stop. Do not use `github.autoAlias: false`; the staged artifact must use Production environment values.
 
 Keep Vercel Standard Protection (`all_except_custom_domains`) enabled throughout the release. Protect only the temporary dress-rehearsal surface with two published Vercel WAF custom rules. Rule priority is part of the release contract:
 
@@ -122,14 +146,14 @@ vercel firewall diff --json
 # The authorized operator reviews the exact draft, then runs:
 vercel firewall publish --yes
 vercel firewall overview --json
-npm run release:preflight
+npm run release:cutover:preflight
 ```
 
 The live pre-promotion gate reads the published policy and complete alias inventory once. From a different exact `/32` or `/128`, make one fresh request to `https://candidate.release.kanban.cards`; it must return HTTP `403`, `x-vercel-mitigated: deny`, and an `x-vercel-id`. Record only that source and observation in `externalDenyProbe`. The exact WAF rule already covers the other two private hosts, so no five-host package, Traffic correlation, configuration hash, or coordinated source-switch script is required. Stop on an unpublished draft, a policy mismatch, a routed canonical tenant, or a failed independent denial.
 
 The Clerk Marketplace connection automatically syncs `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` and `CLERK_SECRET_KEY` to the connected Vercel environments. Verify those two names are present; do not manually add duplicate copies. The production values must belong to the Marketplace production instance (`pk_live_` and `sk_live_`), but do not print them to prove that condition—the deployed readiness check fails closed on development keys.
 
-Configure every app-owned value through the Vercel dashboard or interactive CLI. Do not use `--value` for secrets, identity lists, or JSON because it places values in command history. For this legacy cutover, the database, root/auth topology, exact admitted user, exact legacy binding, and finite candidate family must all be present before deployment. Add the compatibility token only when the recorded cutover plan still requires the skill bridge.
+Configure every app-owned value through the Vercel dashboard or interactive CLI. Do not use `--value` for secrets, identity lists, or JSON because it places values in command history. For this legacy cutover, the database, root/auth topology, exact legacy user binding, and finite candidate family must all be present before deployment. Add the compatibility token only when the recorded cutover plan still requires the skill bridge.
 
 ```bash
 vercel env list production
@@ -170,7 +194,7 @@ vercel env list production
 
 ## Initialize storage
 
-For a legacy cutover, `kanban_v2_workspaces:default` must already exist and pass the V2 schema check. `KANBAN_CARDS_LEGACY_CLERK_USER_ID` must contain the exact stable Clerk user ID, that ID must appear in `KANBAN_CARDS_ALLOWED_CLERK_USER_IDS`, and the server-verified Clerk session exchange uses a non-creating read before it binds the access registry. A missing table, missing row, unsupported schema, storage error, unadmitted ID, or different Clerk ID returns a failure before any owner or Workspace mapping is written. The candidate must never turn a wrong or empty database into a valid-looking legacy Workspace.
+For a legacy cutover, `kanban_v2_workspaces:default` must already exist and pass the V2 schema check. `KANBAN_CARDS_LEGACY_CLERK_USER_ID` contains the exact stable Clerk user ID, and the server-verified session exchange uses a non-creating read before binding the registry. A missing row, unsupported schema, storage error, or different Clerk ID fails before any legacy mapping is written.
 
 `npm run db:init` remains available only for an explicitly new V2 store when a database URL is already present in the current process. Do not run it as a repair during legacy migration; restore or select the intended existing database instead. Do not rely on `vercel env run` to inject a sensitive database value into the local shell. If an initializer is deliberately used for a new store, it must report:
 
@@ -182,19 +206,19 @@ Stop if it reports `file`. For a future migration, record a backup or recovery p
 
 For the first V2 release, preserve any environment configuration needed by the previous known-good deployment until V2 has passed production verification.
 
-## Create a candidate deployment
+## Select the staged sensitive candidate
 
-Because `main` Git deployments are disabled, merging does not build or promote anything. Create the candidate as a separate explicit action. Deploy the validated commit to the production target without assigning the production domain:
+Merging validated `main` creates a staged Production deployment without assigning production traffic. Reuse that exact artifact; do not rebuild it with a second manual deploy:
 
 ```bash
 vercel whoami
 vercel project inspect
 git status --short
 git rev-parse HEAD
-vercel deploy --prod --skip-domain
+vercel ls --environment production --status READY --format=json
 ```
 
-Confirm the identity, linked Project, clean status, and SHA still match the recorded candidate. Save the full URL returned by the deploy command, then wait for that exact deployment to become ready:
+Confirm the identity, linked Project, clean status, and SHA still match the recorded candidate. Select the exact deployment ID and immutable URL whose Git metadata matches that SHA, then wait for that deployment to become ready:
 
 ```bash
 KANBAN_CARDS_DEPLOYMENT_URL='paste-full-deployment-url'
@@ -214,7 +238,7 @@ vercel curl /api/health --deployment "$KANBAN_CARDS_DEPLOYMENT_URL"
 vercel curl /api/access/health --deployment "$KANBAN_CARDS_DEPLOYMENT_URL"
 ```
 
-A first-migration `legacyBinding: pending` and HTTP `503` is a truthful stop until the exact admitted Clerk session establishes the documented binding. Continue only after both endpoints return `200`, `ok: true`, `store: postgres`, ready registry/state/binding values, and no missing configuration.
+A first-migration `legacyBinding: pending` and HTTP `503` is a truthful stop until the exact legacy Clerk session establishes the documented binding.
 
 The live controller compares the immutable candidate deployment's Git SHA with clean local `main`. An exact SHA passes this check. A different SHA is allowed only when `git diff --name-only --no-renames` contains files from the evaluator's exact operator-only allowlist; any application, API, server, dependency, build, or Vercel configuration change blocks promotion.
 
@@ -233,9 +257,9 @@ vercel inspect "$KANBAN_CARDS_CANDIDATE_TENANT_URL" --format=json
 
 All three must resolve to the candidate deployment. The complete Project alias inventory must leave `mike.kanban.cards` unrouted before promotion.
 
-Complete the invited candidate journey once: signed-out candidate root to the dedicated auth host, email-code completion, return to the exact initiating root, server-side session exchange, expected Workspace enumeration, one-time handoff, tenant Project read, one bounded tenant write, auth-host API isolation, cross-origin/tenant rejection, and an exact-session sign-out. The normal sign-out must reach the persistent `Signed out` state and recover to the supported sign-in path. Existing live evidence plus automated retry-recovery coverage is sufficient; do not force another same-session failure/retry solely for release evidence.
+Complete the self-service candidate journey once: Start free, dedicated auth host, emailed-link completion, exact initiating-root return, server-side session exchange, first Workspace creation, tenant handoff, AgentConnection creation, attributed Card write, revocation denial, auth-host isolation, and exact-session sign-out.
 
-Production remains Invite-only in this release. Automated security and browser coverage is sufficient for the authenticated-but-unadmitted state until self-serve makes that state reachable; do not create a temporary live Clerk identity solely for cutover proof.
+Production admission is self-service for server-verified Clerk identities; Workspace ownership remains isolated by Clerk user ID.
 
 If the compatibility bridge is enabled, perform one authenticated read of the mapped legacy Workspace. Do not create a verification Card, add a Comment, move or archive a Card, or write a board comment as release evidence. If the bridge is disabled, use the retirement checklist.
 
@@ -260,9 +284,9 @@ vercel inspect "$KANBAN_CARDS_ROLLBACK_URL"
 The rollback target must be a distinct READY production deployment with healthy Postgres and a successful bounded compatibility check.
 ## Record and evaluate cutover evidence
 
-Copy [`workspace-cutover-evidence.example.json`](workspace-cutover-evidence.example.json) to an operator-controlled path outside the repository. Do not include credentials, identity values, email codes, cookies, session IDs, or secret configuration values.
+Copy [`workspace-cutover-evidence.example.json`](workspace-cutover-evidence.example.json) to an operator-controlled path outside the repository. Do not include credentials, identity values, email verification artifacts, cookies, session IDs, or secret configuration values.
 
-The pre-promotion receipt binds one fresh run to the immutable candidate identity and deployment Git provenance, the live application-closure check, direct runtime-configuration checks, exact auth/root/tenant routes, healthy readiness, Clerk and tenant isolation checks, one compatibility read when enabled, the known rollback target, one focused current production data baseline, and one independent candidate-root denial. `authHostSurface` no longer implies creation of a live unadmitted identity; Invite-only denial remains covered by the validated automated suite. `signOut` requires a successful exact-session sign-out, while the already accepted live failure result and automated recovery tests cover failure/retry behavior.
+The pre-promotion receipt binds one fresh run to the immutable candidate identity, exact auth/root/tenant routes, healthy readiness, self-service Clerk journey, tenant and AgentConnection isolation checks, one compatibility read when enabled, the rollback target, and focused data preservation.
 
 The unavailable historical production pre-binding receipt is documented in [`workspace-access-migration.md`](workspace-access-migration.md). It is not copied into the evidence JSON, parsed as an exception, rebound to each candidate, or used to authorize promotion.
 
@@ -272,7 +296,7 @@ Run the pre-promotion evaluator:
 
 ```bash
 KANBAN_CARDS_EVIDENCE_PATH='paste-operator-controlled-evidence-path'
-npm run release:gate -- --snapshot "$KANBAN_CARDS_EVIDENCE_PATH" --live
+npm run release:cutover -- --snapshot "$KANBAN_CARDS_EVIDENCE_PATH" --live
 ```
 
 Every blocker is named by gate and code. An unexpected deployable-application delta, pending access binding, unhealthy Postgres, Clerk or tenant-isolation failure, WAF policy or independent-denial failure, unverified rollback target, or disabled release-policy control leaves public production unchanged.
@@ -284,9 +308,9 @@ Promotion is a distinct explicit action. The controller re-reads live policy, ca
 vercel whoami
 vercel project inspect
 vercel project protection
-npm run release:preflight
+npm run release:cutover:preflight
 KANBAN_CARDS_PROMOTION_CONFIRMATION='PROMOTE EXACT VERIFIED CANDIDATE'
-npm run release:gate -- --snapshot "$KANBAN_CARDS_EVIDENCE_PATH" \
+npm run release:cutover -- --snapshot "$KANBAN_CARDS_EVIDENCE_PATH" \
   --live --authorize-promotion --confirmation "$KANBAN_CARDS_PROMOTION_CONFIRMATION" --promote
 vercel inspect https://kanban.cards
 ```
@@ -303,7 +327,7 @@ Immediately after promotion:
 8. Run the distinct post-promotion evaluator:
 
 ```bash
-npm run release:gate -- --snapshot "$KANBAN_CARDS_EVIDENCE_PATH" \
+npm run release:cutover -- --snapshot "$KANBAN_CARDS_EVIDENCE_PATH" \
   --phase post-promotion --live
 vercel logs --environment production --level error --since 15m --no-branch
 ```
@@ -313,14 +337,14 @@ Do not create a release Card or board Comment. Do not describe the release as co
 
 Retirement is complete only when Clerk access works without the bridge and no reachable deployment still accepts the retired key.
 
-1. On the candidate, complete the one-path Clerk email-code sign-in and server-side session exchange, open the legacy tenant, and verify a Project read and write through the tenant session.
+1. On the candidate, complete Clerk email-link sign-up/sign-in, exact-root return, server-side session exchange, first Workspace creation, and the AgentConnection create/write/revoke journey.
 2. Confirm `/api/access/health` reports `legacyState: ready`, `legacyBinding.status: ready`, and `legacyBridge: enabled` before removal.
 3. Remove `KANBAN_CARDS_API_TOKEN` from the candidate environment without changing the stored `default` mapping. Keep `KANBAN_CARDS_API_WORKSPACE_ID=default` only if the deployment process requires the explicit compatibility boundary; it grants no authority without the token.
 4. Build and verify a new exact candidate. `/api/health` and `/api/access/health` must stay healthy, and `/api/access/health` must now report `legacyBridge: disabled`.
-5. Repeat Clerk root, tenant handoff, Project read/write, and a normal exact-session Clerk sign-out. The browser path must not depend on the retired token; automated tests retain failure/retry coverage.
+5. Repeat Clerk root, tenant handoff, Project read/write, and a normal exact-session Clerk sign-out. Repeat the complete AgentConnection proof: create with one-time credential delivery, read/write scope enforcement, cross-Workspace and wrong-host denial, stable-ID and stored-label Activity attribution, revocation, and denial of the revoked credential. Neither browser nor automated paths may depend on the retired token; automated tests retain failure/retry coverage.
 6. Provide the retired key through hidden input and call `https://kanban.cards/api/projects`. The response must be `401`. Repeat against the legacy tenant origin and one sibling tenant; neither may accept it.
 7. Promote only that verified artifact. Inventory and retire every older deployment that still contains the key, using the target-specific closure procedure in the rotation section below.
-8. Remove or replace user-scoped skill connections that contain the retired key. The next roadmap slice supplies the verified agent-principal path; do not relabel the retired bearer as an agent identity.
+8. Replace every user-scoped legacy skill configuration with a one-time AgentConnection credential created for the intended Workspace and the exact tenant API origin. Run the helper's `/session` probe and require that it resolves the intended Workspace before saving the configuration; then prove its assigned scopes and confirm write Activity contains the verified connection's stable ID and stored label. Only after those checks pass, remove the retired bearer configuration. Never relabel or migrate the legacy bearer itself as an agent identity.
 
 Record the candidate SHA, health responses, Clerk browser proof, three `401` results, promoted deployment, and old-deployment closure. A disabled bridge with broken Clerk access is an outage, not successful retirement.
 
@@ -402,7 +426,7 @@ Do not log either key during comparison. Never use an old-key deployment as a ro
 
 ## Failure interpretation
 
-- `401`: authentication failed. Check the Clerk session, exact admitted Clerk user ID, authorized party, canonical host, user-scoped CLI configuration, recent bridge rotation or retirement, and the active deployment's environment snapshot.
+- `401`: authentication failed. Check the Clerk session or AgentConnection credential, exact tenant host, authorized party, revocation/expiry state, user-scoped CLI configuration, and active deployment environment.
 - `409` with a stale-version message: read the current Project or Card, reconcile, and retry with the returned revision or version.
 - `409` for an idempotency-key mismatch: reuse the original request body or choose a new stable key for the changed request.
 - `409` for an archived Project: stop writing to it or restore it deliberately through the resource API.
@@ -411,9 +435,9 @@ Do not log either key during comparison. Never use an old-key deployment as a ro
 - `428`: the caller omitted the required `X-Kanban-Version` revision or version on an edit.
 - `503`: inspect both readiness endpoints. Required Clerk/database configuration may be missing, the access registry may be unavailable, the required `default` state may be missing or invalid, the legacy binding may be pending or mismatched, or global sign-out revocation may be incomplete.
 - `/api/health` or `/api/access/health` fails: stop promotion. Do not initialize or replace legacy storage as a shortcut.
-- `main-git-deployments-enabled` or `auto-domain-assignment-enabled`: stop. Restore both release controls before creating another candidate; a merge is never promotion authorization.
+- `main-git-deployments-disabled` or `auto-domain-assignment-enabled`: stop. Restore staged `main` builds and disabled traffic auto-assignment before creating another candidate; a merge is never promotion authorization.
 - `Workspace unavailable` on an immutable generated deployment hostname: that hostname cannot prove canonical Clerk or compatibility access. Configure and verify approved protected auth, candidate-root, and candidate-tenant routes pinned to the exact deployment; do not weaken host or Clerk authorized-party validation.
-- Any `npm run release:gate` blocker: leave the current production deployment serving. Correct and re-run the failed proof against the same candidate, or build and record a new candidate if its artifact or environment changed.
+- Any `npm run release:cutover` blocker: leave the current production deployment serving. Correct and re-run the failed proof against the same candidate, or build and record a new candidate if its artifact or environment changed.
 - `Global sign-out could not be completed`: the current host instructed the browser to clear its cookie, but sibling sessions may remain active. Retry sign-out after the registry recovers and verify the full session family is revoked.
 - Duplicate Card creation: the caller omitted a stable external key and did not reuse the same idempotency key, or server deduplication regressed.
 - Browser and helper disagree: reload the browser, then confirm both clients use the same origin and Project. A repository binding selects context but does not scope authority.
