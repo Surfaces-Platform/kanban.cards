@@ -236,15 +236,44 @@ test("one fresh independent candidate-root denial remains mandatory", () => {
   assert.ok(evaluateCutoverSnapshot(stale, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "firewall-external-candidate-root-stale"));
 });
 
-test("complete pre-promotion alias inventory must exclude the canonical tenant", () => {
+test("complete pre-promotion alias inventory keeps an established canonical tenant on the rollback target", () => {
   const incomplete = readySnapshot();
   incomplete.policy.aliasInventoryComplete = false;
   assert.ok(evaluateCutoverSnapshot(incomplete, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "alias-inventory-incomplete"));
 
   for (const alias of ["mike.kanban.cards", "https://mike.kanban.cards"]) {
-    const prematurelyRouted = readySnapshot();
-    prematurelyRouted.policy.aliases.push(alias);
-    assert.ok(evaluateCutoverSnapshot(prematurelyRouted, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "canonical-tenant-alias-premature"));
+    const established = readySnapshot();
+    established.policy.aliases.push(alias);
+    established.currentProduction.aliases.push(alias);
+    assert.equal(evaluateCutoverSnapshot(established, "pre-promotion", TARGET, NOW).ok, true);
+
+    const unverified = readySnapshot();
+    unverified.policy.aliases.push(alias);
+    assert.ok(evaluateCutoverSnapshot(unverified, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "canonical-tenant-alias-unverified"));
+
+    const candidateOwned = readySnapshot();
+    candidateOwned.policy.aliases.push(alias);
+    candidateOwned.currentProduction.aliases.push(alias);
+    candidateOwned.candidate.aliases = [alias];
+    assert.ok(evaluateCutoverSnapshot(candidateOwned, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "canonical-tenant-alias-candidate"));
+
+    const unhealthyBaseline = readySnapshot();
+    unhealthyBaseline.policy.aliases.push(alias);
+    unhealthyBaseline.currentProduction.aliases.push(alias);
+    unhealthyBaseline.currentProduction.health.authentication = "local-owner-key";
+    assert.ok(evaluateCutoverSnapshot(unhealthyBaseline, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === "canonical-tenant-auth-not-ready"));
+  }
+
+  for (const [field, blockerCode] of [
+    ["registry", "canonical-tenant-registry-not-ready"],
+    ["legacyState", "canonical-tenant-legacyState-not-ready"],
+    ["legacyBinding", "canonical-tenant-legacyBinding-not-ready"]
+  ] as const) {
+    const unhealthyAccess = readySnapshot();
+    unhealthyAccess.policy.aliases.push("mike.kanban.cards");
+    unhealthyAccess.currentProduction.aliases.push("mike.kanban.cards");
+    unhealthyAccess.currentProduction.health.access[field] = "not-ready";
+    assert.ok(evaluateCutoverSnapshot(unhealthyAccess, "pre-promotion", TARGET, NOW).blockers.some((blocker) => blocker.code === blockerCode));
   }
 });
 
@@ -356,7 +385,7 @@ test("post-promotion completion requires both temporary candidate aliases to be 
       "candidate.release.kanban.cards",
       "mike.candidate.release.kanban.cards"
     ],
-    health: { status: 200, ok: true, store: "postgres" }
+    health: snapshot.currentProduction.health
   };
   const blockers = evaluateCutoverSnapshot(snapshot, "post-promotion", TARGET, NOW).blockers;
   assert.ok(blockers.some((blocker) => blocker.code === "candidate-root-alias-still-live"));
@@ -583,8 +612,8 @@ function readySnapshot() {
   });
   return {
     policy: { projectId: TARGET.projectId, teamId: TARGET.teamId, repository: TARGET.repository, productionBranch: "main", autoAssignCustomDomains: false, mainGitDeploymentsEnabled: true, deploymentProtection: "all_except_custom_domains", domains: [{ name: "kanban.cards", verified: true }, { name: "auth.kanban.cards", verified: true }, { name: "mike.kanban.cards", verified: true }], firewall, aliases: ["auth.kanban.cards", "candidate.release.kanban.cards", "mike.candidate.release.kanban.cards", "kanban.cards"], aliasInventoryComplete: true },
-    candidate: { id: "dpl_candidate", url: "https://candidate-abc.vercel.app", projectId: TARGET.projectId, source: "git", repository: TARGET.repository, gitDirty: false, commitSha: candidateSha, commitRef: "main", target: "production", readyState: "READY", aliases: [] },
-    currentProduction: { id: "dpl_known_good", url: "https://known-good-abc.vercel.app", projectId: TARGET.projectId, commitSha: productionSha, commitRef: "main", target: "production", readyState: "READY", aliases: ["kanban.cards"], health: { status: 200, ok: true, store: "postgres" } },
+    candidate: { id: "dpl_candidate", url: "https://candidate-abc.vercel.app", projectId: TARGET.projectId, source: "git", repository: TARGET.repository, gitDirty: false, commitSha: candidateSha, commitRef: "main", target: "production", readyState: "READY", aliases: [] as string[] },
+    currentProduction: { id: "dpl_known_good", url: "https://known-good-abc.vercel.app", projectId: TARGET.projectId, commitSha: productionSha, commitRef: "main", target: "production", readyState: "READY", aliases: ["kanban.cards"], health: { status: 200, ok: true, store: "postgres", authentication: "clerk-session+workspace", access: { registry: "ready", legacyState: "ready", legacyBinding: "ready" } } },
     evidence: {
       prePromotion: receipt("pre-promotion", "run-pre", "https://candidate.release.kanban.cards"),
       postPromotion: receipt("post-promotion", "run-post", "https://kanban.cards")
@@ -606,7 +635,7 @@ function readyPostSnapshot() {
   const snapshot = readySnapshot();
   snapshot.policy.firewall = { firewallEnabled: true, hasDraft: false, pendingChanges: 0, rules: [] };
   snapshot.policy.aliases = ["auth.kanban.cards", "kanban.cards", "mike.kanban.cards"];
-  snapshot.currentProduction = { ...snapshot.candidate, aliases: ["auth.kanban.cards", "kanban.cards", "mike.kanban.cards"], health: { status: 200, ok: true, store: "postgres" } };
+  snapshot.currentProduction = { ...snapshot.candidate, aliases: ["auth.kanban.cards", "kanban.cards", "mike.kanban.cards"], health: snapshot.currentProduction.health };
   return snapshot;
 }
 

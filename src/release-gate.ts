@@ -148,7 +148,10 @@ export function evaluateCutoverSnapshot(
   const productionId = text(currentProduction.id);
   const productionUrl = canonicalDeploymentUrl(currentProduction.url);
   const productionAliases = strings(currentProduction.aliases);
+  const productionAliasOrigins = new Set(productionAliases.map((alias) => canonicalOrigin(alias)).filter(Boolean));
+  const candidateAliasOrigins = new Set(strings(candidate.aliases).map((alias) => canonicalOrigin(alias)).filter(Boolean));
   const projectAliasOrigins = new Set(strings(policy.aliases).map((alias) => canonicalOrigin(alias)).filter(Boolean));
+  const canonicalTenantOrigin = canonicalOrigin(`mike.${trustedTarget.publicDomain}`);
   const productionDomains = new Set(verifiedProductionDomainNames(policy.domains));
   requireMatch(blockers, "production-boundary", "production-project-id", text(currentProduction.projectId), trustedTarget.projectId, "current production Project id");
   requireMatch(blockers, "production-boundary", "production-target", text(currentProduction.target), "production", "current production target");
@@ -159,17 +162,24 @@ export function evaluateCutoverSnapshot(
   if (phase === "pre-promotion" && productionId === candidateId) add(blockers, "production-boundary", "candidate-already-current", "The candidate must remain unpromoted while pre-promotion gates run.");
   if (phase === "pre-promotion") {
     if (policy.aliasInventoryComplete !== true) add(blockers, "production-boundary", "alias-inventory-incomplete", "Pre-promotion proof requires a complete live Vercel Project alias inventory.");
-    if (projectAliasOrigins.has(canonicalOrigin(`mike.${trustedTarget.publicDomain}`))) add(blockers, "production-boundary", "canonical-tenant-alias-premature", "The canonical tenant must remain absent from the complete Project alias inventory before promotion.");
+    if (candidateAliasOrigins.has(canonicalTenantOrigin)) add(blockers, "production-boundary", "canonical-tenant-alias-candidate", "The candidate must not own the canonical tenant before promotion.");
+    if (projectAliasOrigins.has(canonicalTenantOrigin)) {
+      if (!productionAliasOrigins.has(canonicalTenantOrigin)) add(blockers, "production-boundary", "canonical-tenant-alias-unverified", "An established canonical tenant must remain pinned to the current production rollback target before promotion.");
+      if (text(currentProductionHealth.authentication) !== "clerk-session+workspace") add(blockers, "production-boundary", "canonical-tenant-auth-not-ready", "An established canonical tenant requires a Clerk and Workspace-aware current production deployment.");
+      const currentAccess = record(currentProductionHealth.access);
+      for (const [field, label] of [["registry", "registry"], ["legacyState", "legacy state"], ["legacyBinding", "legacy binding"]] as const) {
+        if (text(currentAccess[field]) !== "ready") add(blockers, "production-boundary", `canonical-tenant-${field}-not-ready`, `The current production ${label} must be ready while the canonical tenant remains routed.`);
+      }
+    }
   }
   if (phase === "post-promotion" && productionId !== candidateId) add(blockers, "production-boundary", "candidate-not-current", "The public production target does not match the verified candidate deployment.");
   if (phase === "post-promotion") {
     if (!productionDomains.has(`mike.${trustedTarget.publicDomain}`)) add(blockers, "production-boundary", "tenant-domain-unregistered", "The canonical tenant must be a verified custom Production Domain in the Vercel Project.");
     if (policy.aliasInventoryComplete !== true) add(blockers, "production-boundary", "alias-inventory-incomplete", "Post-promotion proof requires a complete live Vercel Project alias inventory.");
-    const liveAliasOrigins = new Set(productionAliases.map((alias) => canonicalOrigin(alias)).filter(Boolean));
-    if (liveAliasOrigins.has(canonicalOrigin(preEvidence.origin))) {
+    if (productionAliasOrigins.has(canonicalOrigin(preEvidence.origin))) {
       add(blockers, "production-boundary", "candidate-root-alias-still-live", "The pre-promotion candidate root alias must be removed before Standard Protection and public post-promotion proof.");
     }
-    if (liveAliasOrigins.has(canonicalOrigin(preEvidence.tenantOrigin))) {
+    if (productionAliasOrigins.has(canonicalOrigin(preEvidence.tenantOrigin))) {
       add(blockers, "production-boundary", "candidate-tenant-alias-still-live", "The pre-promotion candidate tenant alias must be removed before Standard Protection and public post-promotion proof.");
     }
     if (projectAliasOrigins.has(canonicalOrigin(preEvidence.origin))) add(blockers, "production-boundary", "candidate-root-alias-still-routed", "The candidate root alias remains routed somewhere in the Vercel Project.");
