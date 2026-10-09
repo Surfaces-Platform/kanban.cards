@@ -210,7 +210,7 @@ test("retained drafts leave Card-local recovery cues instead of a workspace bann
   await expect(toastRegion.locator(".toast")).toHaveCount(0);
   await expect(draftCard.locator(".card-draft-state")).toHaveText("Draft retained");
 
-  await draftCard.click();
+  await openCard(page, title);
   await expect(page.locator(".draft-retained-note").getByText("Draft retained", { exact: true })).toBeVisible();
   await expect(page.locator(".card-status")).toHaveCount(0);
   await expect(page.getByLabel("Description", { exact: true })).toHaveValue(draftSource);

@@ -5,39 +5,17 @@ import { isIP } from "node:net";
 import path from "node:path";
 import express, { type ErrorRequestHandler, type NextFunction, type Request, type RequestHandler, type Response } from "express";
 
-import { AccessStoreError, createAccessStore, type AccessStore, type AccessWorkspace } from "./access-store";
+import { AccessStoreError, createAccessStore, type AccessStore, type AccessWorkspace, type AccessRegistryState } from "./access-store";
 import {
-  clearLogoutCompletionCookie,
-  clearRootSessionCookie,
-  clearTenantSessionCookie,
-  clearLogoutRetryCookie,
-  createLogoutCompletionCookie,
-  createLogoutContinuationToken,
-  createLogoutRetryCookie,
-  createRootSessionCookie,
-  createTenantSessionCookie,
-  isProductionRequest,
-  verifyRootSession,
-  verifyLogoutCompletionSession,
-  verifyLogoutContinuationToken,
-  verifyLogoutRetrySession,
-  verifyTenantSession,
-  type LogoutRetrySession,
-  type RootSession
+  clearRootSessionCookie, clearTenantSessionCookie,
+  createRootSessionCookie, createTenantSessionCookie,
+  isProductionRequest, verifyRootSession, verifyTenantSession, type RootSession
 } from "./app-sessions";
 import {
-  ClerkIdentityError,
-  clerkAuthOrigin,
-  clerkAuthSignInUrl,
-  clerkAuthSignUpUrl,
-  clerkFrontendApiOrigin,
-  clerkAuthConfigurationRequested,
-  createClerkAuthGateway,
-  getClerkAuthConfig,
-  validateClerkAuthConfig,
-  type ClerkAuthConfig,
-  type ClerkAuthGateway
-} from "./clerk-auth";
+  createPasskeyRouter, getPasskeyConfig, validatePasskeyConfig,
+  passkeyAuthConfigurationRequested, hashSecret, readAuthIntent, activeOwnerSession, authenticationClientIp,
+  type PasskeyAuthConfig
+} from "./passkey-auth";
 import { createStateStore, createWorkspaceStoreResolver, DEFAULT_WORKSPACE_ID } from "./state-store";
 import type {
   Activity,
@@ -82,14 +60,9 @@ export interface CreateAppOptions extends StateStoreOptions {
   store?: StateStore;
   accessStore?: AccessStore;
   workspaceStoreResolver?: WorkspaceStoreResolver;
-  clerkAuthConfig?: ClerkAuthConfig | null;
-  clerkAuthGateway?: ClerkAuthGateway;
+  passkeyAuthConfig?: PasskeyAuthConfig | null;
   rootHost?: string;
   candidateHostFamily?: CandidateHostFamilyOptions | null;
-  legacyApiWorkspaceId?: string;
-  legacyWorkspaceSlug?: string;
-  legacyWorkspaceName?: string;
-  legacyClerkUserId?: string;
   trustForwardedHost?: boolean;
   host?: string;
   port?: string | number;
@@ -134,10 +107,9 @@ interface ResolvedHostContext {
 interface AccessContextConfig {
   accessStore: AccessStore;
   apiToken: string;
-  legacyApiWorkspaceId: string;
   legacyStore: StateStore;
   ownerLabel: string;
-  clerkAuthConfig: ClerkAuthConfig | null;
+  passkeyAuthConfig: PasskeyAuthConfig | null;
   hostFamilies: readonly HostFamily[];
   primaryHostFamily: HostFamily;
   trustForwardedHost: boolean;
@@ -151,7 +123,7 @@ const PRODUCT_NAME = "kanban.cards";
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 4317;
 const SESSION_COOKIE = "kanban_cards_session";
-const RESERVED_WORKSPACE_SLUGS = new Set(["api", "app", "auth", "admin", "clerk", "www"]);
+const RESERVED_WORKSPACE_SLUGS = new Set(["api", "app", "auth", "admin", "www"]);
 const DEFAULT_SESSION_TTL_SECONDS = 60 * 60 * 24 * 7;
 const MAX_ACTIVITY = 1_000;
 const MAX_IDEMPOTENCY_RECORDS = 1_000;
@@ -183,81 +155,33 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
   const databaseRequired = options.requireDatabase ?? production;
   const connectionString = options.connectionString || process.env.KANBAN_CARDS_DATABASE_URL || process.env.POSTGRES_URL || process.env.DATABASE_URL;
   const trustForwardedHost = options.trustForwardedHost ?? Boolean(process.env.VERCEL);
-  const clerkAuthConfig = options.clerkAuthConfig === null
+  const passkeyAuthConfig = options.passkeyAuthConfig === null
     ? null
-    : options.clerkAuthConfig || (clerkAuthConfigurationRequested() ? getClerkAuthConfig() : null);
-  const clerkAuthConfigured = Boolean(clerkAuthConfig);
-  if (clerkAuthConfig) validateClerkAuthConfig(clerkAuthConfig);
-  const rootHost = canonicalConfiguredHost(
-    options.rootHost ||
-    process.env.KANBAN_CARDS_ROOT_HOST ||
-    (production ? PRODUCT_NAME : configuredHost)
-  );
+    : options.passkeyAuthConfig || (passkeyAuthConfigurationRequested() ? getPasskeyConfig() : null);
+  if (passkeyAuthConfig) validatePasskeyConfig(passkeyAuthConfig);
+  const rootHost = canonicalConfiguredHost(options.rootHost || process.env.KANBAN_CARDS_ROOT_HOST || (production ? PRODUCT_NAME : configuredHost));
   const rootOrigin = originForHost(rootHost);
-  const rootHostname = new URL(`http://${rootHost}`).hostname.replace(/^\[|\]$/g, "");
-  if (clerkAuthConfig && isIP(rootHostname)) {
-    throw new Error("Clerk Workspace mode requires a DNS root host such as localhost or kanban.cards; numeric-IP tenant hosts are unsupported.");
+  if (passkeyAuthConfig && isIP(new URL(rootOrigin).hostname.replace(/^\[|\]$/g, ""))) {
+    throw new Error("Passkey Workspace mode requires a DNS root host such as localhost or kanban.cards.");
   }
-  const primaryHostFamily: HostFamily = {
-    rootHost,
-    rootOrigin,
-    deriveTenantHosts: true,
-    tenantHosts: new Map()
-  };
-  const candidateHostFamilyInput = options.candidateHostFamily === null
-    ? null
-    : options.candidateHostFamily || candidateHostFamilyFromEnv();
-  const candidateHostFamily = candidateHostFamilyInput
-    ? createCandidateHostFamily(candidateHostFamilyInput, Boolean(clerkAuthConfig))
-    : null;
+  const primaryHostFamily: HostFamily = { rootHost, rootOrigin, deriveTenantHosts: true, tenantHosts: new Map() };
+  const candidateInput = options.candidateHostFamily === null ? null : options.candidateHostFamily || candidateHostFamilyFromEnv();
+  const candidateHostFamily = candidateInput ? createCandidateHostFamily(candidateInput, Boolean(passkeyAuthConfig)) : null;
   const hostFamilies = candidateHostFamily ? [primaryHostFamily, candidateHostFamily] : [primaryHostFamily];
   validateHostFamilies(hostFamilies);
-  const authHost = clerkAuthConfig?.authHost || "";
-  const authOrigin = clerkAuthConfig ? clerkAuthOrigin(clerkAuthConfig) : "";
-  const clerkFrontendApi = clerkAuthConfig ? clerkFrontendApiOrigin(clerkAuthConfig) : "";
-  if (clerkAuthConfig) {
-    validateSameRootClerkTopology(authHost, primaryHostFamily, candidateHostFamily);
-    validateClerkFrontendApiHostIsolation(clerkFrontendApi, authHost, hostFamilies);
-    validateProductionClerkFrontendApi(clerkFrontendApi, primaryHostFamily);
-  }
-  const clerkRootDomains = clerkAuthConfig ? [
-    { origin: authOrigin, role: "auth" as const },
-    ...hostFamilies.map((family) => ({ origin: family.rootOrigin, role: "app" as const }))
-  ] : [];
-  const clerkAuthGateway = clerkAuthConfig
-    ? options.clerkAuthGateway || createClerkAuthGateway(clerkAuthConfig)
-    : null;
-  const legacyApiWorkspaceId = String(options.legacyApiWorkspaceId ?? process.env.KANBAN_CARDS_API_WORKSPACE_ID ?? DEFAULT_WORKSPACE_ID).trim();
-  if (legacyApiWorkspaceId !== DEFAULT_WORKSPACE_ID) {
-    throw new Error(`KANBAN_CARDS_API_WORKSPACE_ID must remain ${DEFAULT_WORKSPACE_ID} during the compatibility bridge.`);
-  }
-  const legacyClerkUserId = String(options.legacyClerkUserId ?? process.env.KANBAN_CARDS_LEGACY_CLERK_USER_ID ?? "").trim();
-  const legacyWorkspaceSlug = String(options.legacyWorkspaceSlug ?? process.env.KANBAN_CARDS_LEGACY_WORKSPACE_SLUG ?? "").trim().toLowerCase();
-  const legacyWorkspaceName = String(options.legacyWorkspaceName ?? process.env.KANBAN_CARDS_LEGACY_WORKSPACE_NAME ?? "").trim();
-  if (legacyWorkspaceSlug) {
-    try {
-      workspaceSlug(legacyWorkspaceSlug);
-    } catch {
-      throw new Error("KANBAN_CARDS_LEGACY_WORKSPACE_SLUG must be a valid, non-reserved Workspace hostname label.");
+  const authHost = passkeyAuthConfig?.authHost || "";
+  const authOrigin = passkeyAuthConfig?.authOrigin || "";
+  if (passkeyAuthConfig) {
+    if (candidateHostFamily && !isStrictSubdomainHost(candidateHostFamily.rootHost, rootHost)) throw new Error("Candidate auth roots must remain same-site beneath the canonical root.");
+    if (!isStrictSubdomainHost(authHost, rootHost)) throw new Error("The auth host must be a strict same-root subdomain with a matching port.");
+    if (JSON.stringify([...passkeyAuthConfig.rootOrigins].sort()) !== JSON.stringify(hostFamilies.map(f => f.rootOrigin).sort())) {
+      throw new Error("Passkey root origins must exactly match the configured application roots.");
     }
   }
-  if (candidateHostFamily) {
-    const candidateSlugs = [...candidateHostFamily.tenantHosts.values()];
-    if (!legacyWorkspaceSlug || candidateSlugs.length !== 1 || candidateSlugs[0] !== legacyWorkspaceSlug) {
-      throw new Error("KANBAN_CARDS_CANDIDATE_TENANT_HOSTS must contain exactly the configured legacy Workspace slug and one exact candidate host.");
-    }
-  }
-  const sessionTtlSeconds = positiveInteger(
-    options.sessionTtlSeconds ?? process.env.KANBAN_CARDS_SESSION_TTL_SECONDS,
-    DEFAULT_SESSION_TTL_SECONDS
-  );
-  const legacyMigrationValues = [legacyClerkUserId, legacyWorkspaceSlug, legacyWorkspaceName];
+  const sessionTtlSeconds = passkeyAuthConfig?.sessionTtlSeconds || positiveInteger(options.sessionTtlSeconds ?? process.env.KANBAN_CARDS_SESSION_TTL_SECONDS, DEFAULT_SESSION_TTL_SECONDS);
   const missingConfiguration = [
-    ...(!clerkAuthConfigured && !apiToken ? ["KANBAN_CARDS_API_TOKEN"] : []),
-    ...(production && !clerkAuthConfigured ? ["NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY, CLERK_SECRET_KEY, CLERK_ENCRYPTION_KEY, SESSION_SECRET, and KANBAN_CARDS_AUTH_HOST"] : []),
-    ...(legacyMigrationValues.some(Boolean) && !legacyMigrationValues.every(Boolean)
-      ? ["KANBAN_CARDS_LEGACY_CLERK_USER_ID, KANBAN_CARDS_LEGACY_WORKSPACE_SLUG, and KANBAN_CARDS_LEGACY_WORKSPACE_NAME must be set together"]
-      : []),
+    ...(!passkeyAuthConfig && !apiToken ? ["KANBAN_CARDS_API_TOKEN (local development only)"] : []),
+    ...(production && !passkeyAuthConfig ? ["SESSION_SECRET and KANBAN_CARDS_AUTH_HOST"] : []),
     ...(databaseRequired && !connectionString ? ["KANBAN_CARDS_DATABASE_URL or POSTGRES_URL or DATABASE_URL"] : [])
   ];
   const legacyStore = options.store || createStateStore({
@@ -269,7 +193,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     ssl: options.ssl
   });
   const workspaceStoreResolver = options.workspaceStoreResolver || (options.store
-    ? fixedWorkspaceStoreResolver(options.store, legacyApiWorkspaceId)
+    ? fixedWorkspaceStoreResolver(options.store, DEFAULT_WORKSPACE_ID)
     : createWorkspaceStoreResolver({
         dataPath: options.dataPath,
         workspaceDirectory: options.workspaceDirectory,
@@ -285,433 +209,205 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     pool: options.pool,
     ssl: options.ssl
   });
-  const legacyMigrationConfigured = legacyMigrationValues.every(Boolean);
-
+  const contextConfig: AccessContextConfig = { accessStore, apiToken, legacyStore, ownerLabel, passkeyAuthConfig, hostFamilies, primaryHostFamily, trustForwardedHost, workspaceStoreResolver };
   async function requireExistingLegacyState(): Promise<WorkspaceState> {
-    try {
-      const existing = await defaultWorkspaceStore.readExisting();
-      if (!existing) throw httpError(503, "Legacy Workspace state is unavailable.");
-      return existing;
-    } catch (error) {
-      if (isHttpError(error)) throw error;
-      throw httpError(503, "Legacy Workspace state is unavailable.");
-    }
+    const existing = await defaultWorkspaceStore.readExisting();
+    if (!existing) throw httpError(503, "Existing Workspace state is unavailable.");
+    return existing;
   }
-
-  async function inspectAccessReadiness(): Promise<{
-    ready: boolean;
-    registry: "ready" | "unavailable" | "not-required";
-    legacyState: "ready" | "missing" | "invalid" | "not-required";
-    legacyBinding: "ready" | "pending" | "mismatch" | "not-required";
-  }> {
-    if (!clerkAuthConfig) {
-      return {
-        ready: missingConfiguration.length === 0,
-        registry: "not-required",
-        legacyState: "not-required",
-        legacyBinding: "not-required"
-      };
-    }
-
-    let registryState;
+  async function inspectAccessReadiness() {
+    if (!passkeyAuthConfig) return { ready: !missingConfiguration.length, registry: "not-required", legacyState: "not-required", legacyBinding: "not-required" };
     try {
-      registryState = await accessStore.read();
+      const state = await accessStore.read();
+      const existing = state.workspaces.find(w => w.storageId === DEFAULT_WORKSPACE_ID);
+      if (existing) await requireExistingLegacyState();
+      return { ready: !missingConfiguration.length, registry: "ready", legacyState: existing ? "ready" : "not-required", legacyBinding: existing ? "ready" : "not-required" };
     } catch {
-      return {
-        ready: false,
-        registry: "unavailable",
-        legacyState: "not-required",
-        legacyBinding: "not-required"
-      };
+      return { ready: false, registry: "unavailable", legacyState: "unavailable", legacyBinding: "not-required" };
     }
-
-    const legacyWorkspace = registryState.workspaces.find((workspace) => workspace.storageId === DEFAULT_WORKSPACE_ID) || null;
-    const legacyAccessRequired = Boolean(apiToken || legacyMigrationConfigured || legacyWorkspace);
-    if (!legacyAccessRequired) {
-      return {
-        ready: missingConfiguration.length === 0,
-        registry: "ready",
-        legacyState: "not-required",
-        legacyBinding: "not-required"
-      };
-    }
-
-    let legacyState: "ready" | "missing" | "invalid" = "ready";
-    try {
-      if (!await defaultWorkspaceStore.readExisting()) legacyState = "missing";
-    } catch {
-      legacyState = "invalid";
-    }
-
-    let legacyBinding: "ready" | "pending" | "mismatch";
-    if (!legacyWorkspace) {
-      legacyBinding = "pending";
-    } else if (legacyMigrationConfigured) {
-      const owner = registryState.owners.find((candidate) => candidate.providerSubject === legacyClerkUserId);
-      legacyBinding = owner &&
-        legacyWorkspace.slug === legacyWorkspaceSlug &&
-        legacyWorkspace.name === legacyWorkspaceName &&
-        legacyWorkspace.ownerIds.includes(owner.id)
-        ? "ready"
-        : "mismatch";
-    } else {
-      legacyBinding = "ready";
-    }
-
-    return {
-      ready: missingConfiguration.length === 0 && legacyState === "ready" && legacyBinding === "ready",
-      registry: "ready",
-      legacyState,
-      legacyBinding
-    };
   }
-
-  let legacyBindingPromise: Promise<AccessWorkspace | null> | null = null;
-  function ensureLegacyBinding(identity?: RootSession): Promise<AccessWorkspace | null> {
-    if (!legacyClerkUserId && !legacyWorkspaceSlug && !legacyWorkspaceName) return Promise.resolve(null);
-    if (!legacyClerkUserId || !legacyWorkspaceSlug || !legacyWorkspaceName) {
-      return Promise.reject(httpError(503, "Legacy Workspace migration requires a Clerk user ID, Workspace slug, and Workspace name together."));
-    }
-    if (!identity || identity.providerSubject !== legacyClerkUserId) {
-      return Promise.resolve(null);
-    }
-    if (!legacyBindingPromise) {
-      legacyBindingPromise = requireExistingLegacyState().then(() => accessStore.bindLegacyWorkspace({
-          providerSubject: legacyClerkUserId,
-          email: identity.email,
-          displayName: identity.displayName,
-          slug: legacyWorkspaceSlug,
-          name: legacyWorkspaceName
-        })).catch((error) => {
-        legacyBindingPromise = null;
-        throw error;
-      });
-    }
-    return legacyBindingPromise;
+  async function requireBrowserOwner(req: Request, fresh = false) {
+    if (!passkeyAuthConfig) throw httpError(404, "API route not found.");
+    const context = await resolveAccessContext(req, contextConfig);
+    if (!context.identity || context.auth?.method !== "cookie") throw httpError(401, "Owner sign-in required.");
+    const active = await activeOwnerSession(accessStore, context.identity.sessionId);
+    if (!active) throw httpError(401, "Owner sign-in required.");
+    if (fresh && Date.now() - Date.parse(active.session.verifiedAt) > 5 * 60_000) throw httpError(403, "Fresh passkey verification required.");
+    return { ...active, context };
   }
-
+  const loginCookieName = production ? "__Host-kanban_login_nonce" : "kanban_login_nonce";
   app.disable("x-powered-by");
-  if (clerkAuthGateway) {
-    app.use(clerkAuthGateway.middleware(
-      clerkRootDomains,
-      trustForwardedHost
-    ));
-  }
-  app.use(securityHeaders(clerkFrontendApi));
+  app.use(securityHeaders(passkeyAuthConfig, hostFamilies));
   app.use(express.urlencoded({ extended: false, limit: "16kb", type: "application/x-www-form-urlencoded" }));
   app.use(express.json({ limit: "256kb", type: "application/json" }));
-  if (clerkAuthConfig) {
-    app.use((req, res, next) => {
-      if (requestHost(req, trustForwardedHost) !== authHost) {
-        next();
-        return;
-      }
-      if ((req.method === "GET" || req.method === "HEAD") && (req.path === "/" || req.path === "/index.html")) {
-        res.redirect(302, "/sign-in");
-        return;
-      }
-      if (authHostSurfaceAllows(req)) {
-        next();
-        return;
-      }
-      res.status(404).type("text/plain").send("Not found");
+  app.use((req, res, next) => {
+    if (passkeyAuthConfig && requestHost(req, trustForwardedHost) === authHost) {
+      if ((req.method === "GET" || req.method === "HEAD") && (req.path === "/" || req.path === "/index.html")) { res.redirect(302, "/sign-in"); return; }
+      if (!authHostSurfaceAllows(req)) { res.status(404).type("text/plain").send("Not found"); return; }
+    }
+    next();
+  });
+  app.use((req, res, next) => {
+    if (production && missingConfiguration.length && req.path.startsWith("/api/") && !["/api/health", "/api/access/health"].includes(req.path)) {
+      noStore(res);
+      res.status(503).json({ error: "Required server configuration is unavailable." });
+      return;
+    }
+    next();
+  });
+  if (passkeyAuthConfig) {
+    const router = createPasskeyRouter({ config: passkeyAuthConfig, accessStore });
+    app.use("/api/passkeys", (req, res, next) => {
+      if (requestHost(req, trustForwardedHost) !== authHost) { next(); return; }
+      router(req, res, next);
     });
   }
-
   app.get("/api/health", asyncHandler(async (_req, res) => {
     const access = await inspectAccessReadiness();
-    res.status(access.ready ? 200 : 503).json({
-      ok: access.ready,
-      product: PRODUCT_NAME,
-      schemaVersion: 2,
-      store: legacyStore.kind,
-      authentication: clerkAuthConfigured ? "clerk-session+workspace" : "local-owner-key",
-      access,
-      missingConfiguration
-    });
+    res.status(access.ready ? 200 : 503).json({ ok: access.ready, product: PRODUCT_NAME, schemaVersion: 2, store: legacyStore.kind, authentication: passkeyAuthConfig ? "passkey-session+workspace" : "local-owner-key", access, missingConfiguration });
   }));
-
   app.get("/api/access/health", asyncHandler(async (_req, res) => {
     const access = await inspectAccessReadiness();
-    res.status(access.ready ? 200 : 503).json({
-      ok: access.ready,
-      authentication: clerkAuthConfigured ? "clerk-session+workspace" : "local-owner-key",
-      registry: accessStore.kind,
-      legacyBridge: apiToken ? "enabled" : "disabled",
-      registryState: access.registry,
-      legacyState: access.legacyState,
-      legacyBinding: { present: access.legacyBinding === "ready", status: access.legacyBinding },
-      missingConfiguration
-    });
+    res.status(access.ready ? 200 : 503).json({ ok: access.ready, authentication: passkeyAuthConfig ? "passkey-session+workspace" : "local-owner-key", registry: accessStore.kind, legacyBridge: "disabled", registryState: access.registry, legacyState: access.legacyState, legacyBinding: { present: access.legacyBinding === "ready", status: access.legacyBinding }, missingConfiguration });
   }));
-
-  app.post("/api/clerk-session", asyncHandler(async (req, res) => {
-    noStore(res);
-    const family = requireRootRequest(req, hostFamilies, trustForwardedHost);
-    assertExactOrigin(req, family.rootOrigin);
-    if (!clerkAuthConfig || !clerkAuthGateway) throw httpError(503, "Clerk sign-in is not configured.");
-    const appRequest = webRequest(req, trustForwardedHost);
-    const productionRequest = isProductionRequest(appRequest);
-    if (await verifyLogoutRetrySession(appRequest, clerkAuthConfig.sessionSecret, productionRequest)) {
-      throw httpError(409, "Sign-out must complete before creating a new browser session.");
-    }
-    const requestAuth = clerkAuthGateway.requestAuth(req);
-    if (!requestAuth.authenticated || !requestAuth.clerkUserId || !requestAuth.clerkSessionId) {
-      throw httpError(401, "Clerk sign-in required.");
-    }
-    let identity;
-    try {
-      identity = await clerkAuthGateway.verifiedIdentity(requestAuth.clerkUserId, requestAuth.clerkSessionId);
-    } catch (error) {
-      if (error instanceof ClerkIdentityError) throw httpError(403, error.message);
-      throw httpError(503, "Clerk identity verification is unavailable.");
-    }
-    const rootSession: RootSession = {
-      providerSubject: identity.clerkUserId,
-      email: identity.email,
-      displayName: identity.displayName,
-      sessionId: identity.clerkSessionId,
-      rootOrigin: family.rootOrigin
-    };
-    await ensureLegacyBinding(rootSession);
-    const cookie = await createRootSessionCookie(
-      rootSession,
-      clerkAuthConfig.sessionSecret,
-      productionRequest,
-      clerkAuthConfig.rootSessionTtlSeconds
-    );
-    res.append("Set-Cookie", clearLogoutCompletionCookie(productionRequest));
-    res.append("Set-Cookie", cookie);
-    res.status(201).json({ authenticated: true });
-  }));
-
-  app.post("/auth/logout", asyncHandler(async (req, res) => {
-    noStore(res);
-    if (req.originalUrl !== "/auth/logout") throw httpError(404, "API route not found.");
-    const family = requireRootRequest(req, hostFamilies, trustForwardedHost);
-    if (!clerkAuthConfig || !clerkAuthGateway) throw httpError(404, "API route not found.");
-    await assertLogoutCompletionOrigin(req, family, accessStore);
-    const continuationToken = requiredString(asRecord(req.body).continuation, "Logout continuation");
-    const continuation = await verifyLogoutContinuationToken(continuationToken, clerkAuthConfig.sessionSecret);
-    if (
-      !continuation
-      || continuation.rootOrigin !== family.rootOrigin
-      || continuation.initiatingOrigin !== req.get("origin")
-    ) {
-      throw httpError(403, "Logout continuation is invalid or expired.");
-    }
-    const appRequest = webRequest(req, trustForwardedHost);
-    const productionRequest = isProductionRequest(appRequest);
-    const currentRootSession = await verifyRootSession(
-      appRequest,
-      clerkAuthConfig.sessionSecret,
-      productionRequest
-    );
-    const [continuationRevoked, currentRootRevoked] = await Promise.all([
-      accessStore.isSessionRevoked(continuation.providerSubject, continuation.sessionId),
-      currentRootSession
-        ? accessStore.isSessionRevoked(currentRootSession.providerSubject, currentRootSession.sessionId)
-        : Promise.resolve(true)
-    ]);
-    if (!continuationRevoked || !currentRootRevoked) {
-      throw httpError(409, "Logout continuation no longer matches the active browser state.");
-    }
-    res.append("Set-Cookie", clearRootSessionCookie(productionRequest));
-    res.append("Set-Cookie", clearLogoutRetryCookie(productionRequest));
-    res.append("Set-Cookie", await createLogoutCompletionCookie({
-      completionId: continuation.completionId,
-      providerSubject: continuation.providerSubject,
-      sessionId: continuation.sessionId,
-      rootOrigin: family.rootOrigin
-    }, clerkAuthConfig.sessionSecret, productionRequest));
-    res.redirect(303, "/?signout=clerk");
-  }));
-
   app.get("/api/session", asyncHandler(async (req, res) => {
     noStore(res);
-    if (clerkAuthConfig && requestHost(req, trustForwardedHost) === authHost) {
-      res.json({
-        authenticated: false,
-        context: "auth",
-        rootUrl: authOrigin,
-        ...clerkBrowserRuntimeConfig({
-          config: clerkAuthConfig,
-          surfaceRole: "auth",
-          allowedRedirectOrigins: hostFamilies.map((family) => family.rootOrigin),
-          fallbackRedirectUrl: primaryHostFamily.rootOrigin
-        })
-      });
+    if (passkeyAuthConfig && requestHost(req, trustForwardedHost) === authHost) {
+      const intent = readAuthIntent(req, passkeyAuthConfig);
+      res.json({ authenticated: false, context: "auth", rootUrl: intent?.rootOrigin || rootOrigin, authMode: "passkey", loginUrl: `${authOrigin}/sign-in`, ...(intent ? { authIntent: { mode: intent.mode, rootOrigin: intent.rootOrigin, action: intent.action } } : {}), setupAvailable: Boolean(passkeyAuthConfig.setupOwnerId && !((await accessStore.read()).setupConsumed)) });
       return;
     }
-    const requestContext = await resolveAccessContext(req, {
-      accessStore,
-      apiToken,
-      legacyApiWorkspaceId,
-      legacyStore,
-      ownerLabel,
-      clerkAuthConfig,
-      hostFamilies,
-      primaryHostFamily,
-      trustForwardedHost,
-      workspaceStoreResolver
-    });
-    const family = requestContext.hostFamily || primaryHostFamily;
-    const appRequest = clerkAuthConfig && requestContext.kind !== "local"
-      ? webRequest(req, trustForwardedHost)
-      : null;
-    const logoutRetryPending = clerkAuthConfig && appRequest
-      ? Boolean(await verifyLogoutRetrySession(
-          appRequest,
-          clerkAuthConfig.sessionSecret,
-          isProductionRequest(appRequest)
-        ))
-      : false;
-    const logoutCompletionSession = clerkAuthConfig && appRequest && requestContext.kind === "root"
-      ? await verifyLogoutCompletionSession(
-          appRequest,
-          clerkAuthConfig.sessionSecret,
-          isProductionRequest(appRequest)
-        )
-      : null;
-    if (!requestContext.auth) {
-      res.json({
-        authenticated: false,
-        context: requestContext.kind,
-        rootUrl: family.rootOrigin,
-        ...(clerkAuthConfig ? { logoutUrl: rootLogoutUrl(family) } : {}),
-        ...(clerkAuthConfig ? { logoutRetryPending } : {}),
-        ...(clerkAuthConfig && requestContext.kind === "root" ? {
-          logoutCompletion: Boolean(logoutCompletionSession),
-          ...(logoutCompletionSession ? { logoutCompletionSessionId: logoutCompletionSession.sessionId } : {}),
-          ...clerkBrowserRuntimeConfig({
-            config: clerkAuthConfig,
-            surfaceRole: "app",
-            allowedRedirectOrigins: [],
-            fallbackRedirectUrl: primaryHostFamily.rootOrigin
-          })
-        } : {})
-      });
-      return;
-    }
-    res.json({
-      authenticated: true,
-      context: requestContext.kind,
-      rootUrl: family.rootOrigin,
-      logoutUrl: rootLogoutUrl(family),
-      ...(clerkAuthConfig ? { logoutRetryPending } : {}),
-      ...(clerkAuthConfig && requestContext.kind === "root" ? {
-        logoutCompletion: false,
-        ...clerkBrowserRuntimeConfig({
-          config: clerkAuthConfig,
-          surfaceRole: "app",
-          allowedRedirectOrigins: [],
-          fallbackRedirectUrl: primaryHostFamily.rootOrigin
-        })
-      } : {}),
-      label: requestContext.auth.actor.label,
-      email: requestContext.identity?.email,
-      ...(requestContext.workspace ? { workspace: publicAccessWorkspace(requestContext.workspace, family) } : {})
-    });
+    const context = await resolveAccessContext(req, contextConfig);
+    const family = context.hostFamily || primaryHostFamily;
+    res.json({ authenticated: Boolean(context.auth), context: context.kind, rootUrl: family.rootOrigin, authMode: passkeyAuthConfig ? "passkey" : "local", loginUrl: passkeyAuthConfig ? `${authOrigin}/sign-in` : "", ...(context.auth ? { label: context.auth.actor.label, email: context.identity?.email } : {}), ...(context.workspace ? { workspace: publicAccessWorkspace(context.workspace, family) } : {}), setupAvailable: Boolean(passkeyAuthConfig?.setupOwnerId && !((await accessStore.read()).setupConsumed)) });
   }));
-
-  app.delete("/api/logout-completion", asyncHandler(async (req, res) => {
+  app.post("/api/auth-start", asyncHandler(async (req, res) => {
     noStore(res);
+    if (!passkeyAuthConfig) throw httpError(404, "API route not found.");
     const family = requireRootRequest(req, hostFamilies, trustForwardedHost);
-    if (!clerkAuthConfig) throw httpError(404, "API route not found.");
     assertExactOrigin(req, family.rootOrigin);
-    const appRequest = webRequest(req, trustForwardedHost);
-    const productionRequest = isProductionRequest(appRequest);
-    const [completion, rootSession] = await Promise.all([
-      verifyLogoutCompletionSession(appRequest, clerkAuthConfig.sessionSecret, productionRequest),
-      verifyRootSession(appRequest, clerkAuthConfig.sessionSecret, productionRequest)
-    ]);
-    if (!completion || completion.rootOrigin !== family.rootOrigin || rootSession) {
-      throw httpError(401, "Logout completion required.");
-    }
-    res.append("Set-Cookie", clearLogoutCompletionCookie(productionRequest));
-    res.json({ completed: true });
+    const body = asRecord(req.body);
+    const mode = requiredString(body.mode, "Authentication mode");
+    if (!["signup", "signin", "setup", "recover", "add", "verify"].includes(mode)) throw httpError(400, "Invalid authentication mode.");
+    const active = mode === "add" || mode === "verify" ? await requireBrowserOwner(req, mode === "add") : null;
+    const nonce = crypto.randomBytes(32).toString("base64url");
+    const intentToken = crypto.randomBytes(32).toString("base64url");
+    await accessStore.authTransaction(state => {
+      const now = Date.now();
+      state.authChallenges = state.authChallenges.filter(c => Date.parse(c.expiresAt) > now);
+      const rateId = `auth-start:${hashSecret(authenticationClientIp(req))}`;
+      let rate = state.authRateLimits.find(r => r.id === rateId);
+      if (!rate || Date.parse(rate.resetAt) <= now) { state.authRateLimits = state.authRateLimits.filter(r => r.id !== rateId); rate = { id: rateId, count: 0, resetAt: new Date(now + 60_000).toISOString() }; state.authRateLimits.push(rate); }
+      if (rate.count >= 30) throw httpError(429, "Too many authentication attempts. Try again shortly.");
+      rate.count++;
+      state.authChallenges.push({ id: crypto.randomUUID(), challenge: hashSecret(intentToken), browserHash: hashSecret(nonce), purpose: "authorize", ownerId: active?.owner.id || null, rootOrigin: family.rootOrigin, expiresAt: new Date(now + 5 * 60_000).toISOString(), data: { mode, action: optionalString(body.action) || "", ...(active ? { sessionId: active.session.id } : {}) } });
+    });
+    res.cookie(loginCookieName, nonce, { httpOnly: true, secure: production, sameSite: "lax", path: "/", maxAge: 10 * 60_000 });
+    res.json({ destination: `${authOrigin}/api/passkeys/start`, intentToken, browserNonce: nonce, rootOrigin: family.rootOrigin });
   }));
-
+  app.post("/api/auth-handoff", asyncHandler(async (req, res) => {
+    noStore(res);
+    if (!passkeyAuthConfig) throw httpError(404, "API route not found.");
+    const family = requireRootRequest(req, hostFamilies, trustForwardedHost);
+    assertExactOrigin(req, authOrigin);
+    const token = requiredString(asRecord(req.body).handoffToken, "Handoff token");
+    const nonce = parseCookies(req.get("cookie") || "")[loginCookieName] || "";
+    if (!nonce) throw httpError(401, "Sign-in must begin in this browser.");
+    const result = await accessStore.authTransaction(state => {
+      const now = Date.now();
+      const h = state.authHandoffs.find(h => h.tokenHash === hashSecret(token));
+      const session = h && state.authSessions.find(s => s.id === h.sessionId && s.ownerId === h.ownerId && s.rootOrigin === family.rootOrigin && !s.revokedAt && Date.parse(s.expiresAt) > now);
+      const owner = h && state.owners.find(o => o.id === h.ownerId);
+      if (!h || !session || !owner || h.consumedAt || Date.parse(h.expiresAt) <= now || h.browserHash !== hashSecret(nonce) || h.destinationOrigin !== family.rootOrigin) throw httpError(401, "The sign-in handoff was not accepted.");
+      h.consumedAt = new Date(now).toISOString();
+      return { owner, session };
+    });
+    const identity = { providerSubject: result.owner.id, email: result.owner.email, displayName: result.owner.displayName, sessionId: result.session.id, rootOrigin: family.rootOrigin };
+    const remaining = Math.max(1, Math.floor((Date.parse(result.session.expiresAt) - Date.now()) / 1000));
+    res.append("Set-Cookie", await createRootSessionCookie(identity, passkeyAuthConfig.sessionSecret, isProductionRequest(webRequest(req, trustForwardedHost)), remaining));
+    res.clearCookie(loginCookieName, { httpOnly: true, secure: production, sameSite: "lax", path: "/" });
+    res.redirect(303, "/");
+  }));
   app.post("/api/session", asyncHandler(async (req, res) => {
     noStore(res);
+    if (passkeyAuthConfig || production) throw httpError(404, "API route not found.");
     assertRequestOrigin(req, false, trustForwardedHost);
-    if (clerkAuthConfigured) throw httpError(404, "API route not found.");
     if (!apiToken) throw httpError(503, "Local owner authentication is not configured.");
-    const suppliedToken = requiredString(asRecord(req.body).token, "Access key");
-    if (!safeEqual(suppliedToken, apiToken)) throw httpError(401, "Invalid access key.");
+    if (!safeEqual(requiredString(asRecord(req.body).token, "Access key"), apiToken)) throw httpError(401, "Invalid access key.");
     const expiresAt = Math.floor(Date.now() / 1_000) + sessionTtlSeconds;
-    res.cookie(SESSION_COOKIE, createSessionValue(expiresAt, apiToken), {
-      httpOnly: true,
-      secure: production,
-      sameSite: "lax",
-      path: "/",
-      maxAge: sessionTtlSeconds * 1_000
-    });
+    res.cookie(SESSION_COOKIE, createSessionValue(expiresAt, apiToken), { httpOnly: true, secure: false, sameSite: "lax", path: "/", maxAge: sessionTtlSeconds * 1000 });
     res.json({ authenticated: true, label: ownerLabel });
   }));
-
   app.delete("/api/session", asyncHandler(async (req, res) => {
     noStore(res);
-    assertRequestOrigin(req, Boolean(clerkAuthConfig), trustForwardedHost);
-    res.clearCookie(SESSION_COOKIE, { httpOnly: true, secure: production, sameSite: "lax", path: "/" });
-    if (clerkAuthConfig) {
-      const appRequest = webRequest(req, trustForwardedHost);
-      const productionRequest = isProductionRequest(appRequest);
-      const family = requireKnownHost(req, hostFamilies, trustForwardedHost).family;
-      const [rootSession, tenantSession, retrySession] = await Promise.all([
-        verifyRootSession(appRequest, clerkAuthConfig.sessionSecret, productionRequest),
-        verifyTenantSession(appRequest, clerkAuthConfig.sessionSecret, productionRequest),
-        verifyLogoutRetrySession(appRequest, clerkAuthConfig.sessionSecret, productionRequest)
-      ]);
-      res.append("Set-Cookie", clearRootSessionCookie(productionRequest));
-      res.append("Set-Cookie", clearTenantSessionCookie(productionRequest));
-      res.append("Set-Cookie", clearLogoutCompletionCookie(productionRequest));
-      const session = tenantSession || rootSession || retrySession;
-      if (!session || session.rootOrigin !== family.rootOrigin) {
-        res.append("Set-Cookie", clearLogoutRetryCookie(productionRequest));
-        throw httpError(401, "Authentication required.");
-      }
-      let logoutContinuation = "";
-      try {
-        await accessStore.revokeSession(session.providerSubject, session.sessionId);
-        if (!clerkAuthGateway) throw new Error("Clerk sign-out is unavailable.");
-        await clerkAuthGateway.revokeSession(session.sessionId);
-        logoutContinuation = await createLogoutContinuationToken({
-          completionId: crypto.randomUUID(),
-          providerSubject: session.providerSubject,
-          sessionId: session.sessionId,
-          rootOrigin: family.rootOrigin,
-          initiatingOrigin: requestOrigin(appRequest)
-        }, clerkAuthConfig.sessionSecret);
-      } catch {
-        res.append("Set-Cookie", await createLogoutRetryCookie(
-          logoutRetrySession(session, family.rootOrigin, requestOrigin(appRequest)),
-          clerkAuthConfig.sessionSecret,
-          productionRequest
-        ));
-        res.status(503).json({
-          error: "Global sign-out could not be completed.",
-          signedOutHere: true,
-          globalSignOutComplete: false
-        });
-        return;
-      }
-      res.append("Set-Cookie", clearLogoutRetryCookie(productionRequest));
-      res.json({
-        signedOutHere: true,
-        globalSignOutComplete: true,
-        logoutUrl: rootLogoutUrl(family),
-        logoutContinuation
+    assertRequestOrigin(req, Boolean(passkeyAuthConfig), trustForwardedHost);
+    if (passkeyAuthConfig) {
+      const { session } = await requireBrowserOwner(req);
+      await accessStore.authTransaction(state => {
+        const active = state.authSessions.find(s => s.id === session.id);
+        if (active) active.revokedAt = new Date().toISOString();
+        state.authHandoffs = state.authHandoffs.filter(h => h.sessionId !== session.id);
+        state.handoffs = state.handoffs.filter(h => h.sessionId !== session.id);
       });
+      const secure = isProductionRequest(webRequest(req, trustForwardedHost));
+      res.append("Set-Cookie", clearRootSessionCookie(secure));
+      res.append("Set-Cookie", clearTenantSessionCookie(secure));
+      res.json({ signedOutHere: true, globalSignOutComplete: true });
       return;
     }
+    res.clearCookie(SESSION_COOKIE, { httpOnly: true, secure: production, sameSite: "lax", path: "/" });
+    res.status(204).end();
+  }));
+  app.get("/api/access-settings", asyncHandler(async (req, res) => {
+    noStore(res);
+    const { owner, session } = await requireBrowserOwner(req);
+    const state = await accessStore.read();
+    res.json({ passkeys: state.passkeys.filter(p => p.ownerId === owner.id && !p.revokedAt).map(p => ({ id: p.id, createdAt: p.createdAt, lastUsedAt: p.lastUsedAt })), sessions: state.authSessions.filter(s => s.ownerId === owner.id && !s.revokedAt && Date.parse(s.expiresAt) > Date.now()).map(s => ({ id: s.id, createdAt: s.createdAt, expiresAt: s.expiresAt, current: s.id === session.id })) });
+  }));
+  app.delete("/api/passkeys/:id", asyncHandler(async (req, res) => {
+    assertRequestOrigin(req, true, trustForwardedHost);
+    const { owner, session } = await requireBrowserOwner(req, true);
+    await accessStore.authTransaction(state => {
+      assertCurrentAuthSession(state, owner.id, session.id, true);
+      const keys = state.passkeys.filter(p => p.ownerId === owner.id && !p.revokedAt);
+      const key = keys.find(p => p.id === routeParam(req, "id"));
+      if (!key) throw httpError(404, "Passkey unavailable.");
+      if (keys.length <= 1) throw httpError(409, "Add another passkey before removing your last one.");
+      key.revokedAt = new Date().toISOString();
+    });
+    res.status(204).end();
+  }));
+  app.post("/api/recovery-code", asyncHandler(async (req, res) => {
+    assertRequestOrigin(req, true, trustForwardedHost);
+    const { owner, session } = await requireBrowserOwner(req, true);
+    const code = `kcr_${owner.id}.${crypto.randomBytes(32).toString("base64url")}`;
+    await accessStore.authTransaction(state => {
+      assertCurrentAuthSession(state, owner.id, session.id, true);
+      state.recoveryCodes = state.recoveryCodes.filter(c => c.ownerId !== owner.id);
+      state.recoveryCodes.push({ ownerId: owner.id, codeHash: hashSecret(code), createdAt: new Date().toISOString(), consumedAt: null });
+    });
+    res.json({ recoveryCode: code });
+  }));
+  app.delete("/api/sessions/:id", asyncHandler(async (req, res) => {
+    assertRequestOrigin(req, true, trustForwardedHost);
+    const { owner, session } = await requireBrowserOwner(req);
+    await accessStore.authTransaction(state => {
+      assertCurrentAuthSession(state, owner.id, session.id);
+      const id = routeParam(req, "id");
+      const targets = state.authSessions.filter(s => s.ownerId === owner.id && (id === "all" || s.id === id));
+      if (!targets.length) throw httpError(404, "Session unavailable.");
+      for (const target of targets) target.revokedAt = new Date().toISOString();
+      const ids = new Set(targets.map(s => s.id));
+      state.authHandoffs = state.authHandoffs.filter(h => !ids.has(h.sessionId));
+      state.handoffs = state.handoffs.filter(h => !ids.has(h.sessionId));
+    });
     res.status(204).end();
   }));
 
   app.get("/api/workspaces", asyncHandler(async (req, res) => {
     const family = requireRootRequest(req, hostFamilies, trustForwardedHost);
-    if (!clerkAuthConfig) throw httpError(404, "API route not found.");
-    const identity = await verifiedRootIdentity(req, clerkAuthConfig, trustForwardedHost, accessStore);
+    if (!passkeyAuthConfig) throw httpError(404, "API route not found.");
+    const identity = await verifiedRootIdentity(req, passkeyAuthConfig, trustForwardedHost, accessStore);
     if (!identity) throw httpError(401, "Owner sign-in required.");
     const workspaces = await accessStore.listWorkspacesForOwner(identity.providerSubject);
     res.json({ workspaces: workspaces.filter((workspace) => supportsWorkspace(family, workspace.slug)).map((workspace) => publicAccessWorkspace(workspace, family)) });
@@ -720,16 +416,13 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
   app.post("/api/workspaces", asyncHandler(async (req, res) => {
     const family = requireRootRequest(req, hostFamilies, trustForwardedHost);
     assertRequestOrigin(req, true, trustForwardedHost);
-    if (!clerkAuthConfig) throw httpError(404, "API route not found.");
-    const identity = await verifiedRootIdentity(req, clerkAuthConfig, trustForwardedHost, accessStore);
+    if (!passkeyAuthConfig) throw httpError(404, "API route not found.");
+    const identity = await verifiedRootIdentity(req, passkeyAuthConfig, trustForwardedHost, accessStore);
     if (!identity) throw httpError(401, "Owner sign-in required.");
     rejectWorkspaceSelectors(req, true);
     const body = asRecord(req.body);
     const slug = workspaceSlug(body.slug);
     workspaceHost(slug, family);
-    if (legacyMigrationConfigured && slug === legacyWorkspaceSlug) {
-      throw httpError(409, "Workspace address is reserved for the configured legacy migration.");
-    }
     let workspace: AccessWorkspace;
     try {
       workspace = await accessStore.createWorkspace({
@@ -751,8 +444,8 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
   app.post("/api/workspace-handoffs", asyncHandler(async (req, res) => {
     const family = requireRootRequest(req, hostFamilies, trustForwardedHost);
     assertRequestOrigin(req, true, trustForwardedHost);
-    if (!clerkAuthConfig) throw httpError(404, "API route not found.");
-    const identity = await verifiedRootIdentity(req, clerkAuthConfig, trustForwardedHost, accessStore);
+    if (!passkeyAuthConfig) throw httpError(404, "API route not found.");
+    const identity = await verifiedRootIdentity(req, passkeyAuthConfig, trustForwardedHost, accessStore);
     if (!identity) throw httpError(401, "Owner sign-in required.");
     const slug = workspaceSlug(asRecord(req.body).slug);
     const workspace = (await accessStore.listWorkspacesForOwner(identity.providerSubject)).find((candidate) => candidate.slug === slug);
@@ -776,14 +469,16 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     const hostContext = await resolveKnownHost(host, hostFamilies, accessStore);
     const family = hostContext?.family;
     const workspace = hostContext?.kind === "workspace" ? hostContext.workspace : null;
-    if (!family || !clerkAuthConfig) throw httpError(404, "API route not found.");
+    if (!family || !passkeyAuthConfig) throw httpError(404, "API route not found.");
     if (!workspace) throw httpError(404, "Workspace unavailable.");
     assertExactOrigin(req, family.rootOrigin);
     try {
       const consumed = await accessStore.consumeHandoff({ token: requiredString(asRecord(req.body).token, "Handoff token"), destinationHost: host });
+      const active = await activeOwnerSession(accessStore, consumed.sessionId);
+      if (!active || active.session.ownerId !== consumed.owner.id || active.session.rootOrigin !== family.rootOrigin) throw httpError(401, "The sign-in handoff was not accepted.");
       if (consumed.workspace.id !== workspace.id) throw httpError(401, "The sign-in handoff was not accepted.");
       const tenantSession = {
-        providerSubject: consumed.owner.providerSubject,
+        providerSubject: consumed.owner.id,
         email: consumed.owner.email,
         displayName: consumed.owner.displayName,
         sessionId: consumed.sessionId,
@@ -793,9 +488,9 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       };
       res.append("Set-Cookie", await createTenantSessionCookie(
         tenantSession,
-        clerkAuthConfig.sessionSecret,
+        passkeyAuthConfig.sessionSecret,
         isProductionRequest(webRequest(req, trustForwardedHost)),
-        clerkAuthConfig.tenantSessionTtlSeconds
+        passkeyAuthConfig.sessionTtlSeconds
       ));
       if (req.is("application/x-www-form-urlencoded")) {
         res.redirect(303, "/");
@@ -810,9 +505,9 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
 
   app.use("/api/agent-connections", (req, _res, next) => {
     void (async () => {
-      if (!clerkAuthConfig) throw httpError(404, "API route not found.");
+      if (!passkeyAuthConfig) throw httpError(404, "API route not found.");
       rejectWorkspaceSelectors(req, req.method !== "GET" && req.method !== "HEAD");
-      const context = await resolveAccessContext(req, { accessStore, apiToken, legacyApiWorkspaceId, legacyStore, ownerLabel, clerkAuthConfig, hostFamilies, primaryHostFamily, trustForwardedHost, workspaceStoreResolver });
+      const context = await resolveAccessContext(req, contextConfig);
       if (!context.auth || context.auth.method !== "cookie" || !context.identity || !context.workspace) throw httpError(401, "Owner sign-in required.");
       if (req.method !== "GET" && req.method !== "HEAD") assertRequestOrigin(req, true, trustForwardedHost);
       req.ownerAuth = context.auth;
@@ -822,19 +517,21 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
 
   app.get("/api/agent-connections", asyncHandler(async (req, res) => {
     noStore(res);
-    const identity = (await resolveTenantOwner(req, clerkAuthConfig!, trustForwardedHost, accessStore, req.ownerAuth!.workspace!));
+    const identity = (await resolveTenantOwner(req, passkeyAuthConfig!, trustForwardedHost, accessStore, req.ownerAuth!.workspace!));
     const connections = await accessStore.listAgentConnections(identity.providerSubject, req.ownerAuth!.workspace!.id);
     res.json({ connections: connections.map(publicAgentConnection) });
   }));
 
   app.post("/api/agent-connections", asyncHandler(async (req, res) => {
     noStore(res);
-    const identity = await resolveTenantOwner(req, clerkAuthConfig!, trustForwardedHost, accessStore, req.ownerAuth!.workspace!);
+    const identity = await resolveTenantOwner(req, passkeyAuthConfig!, trustForwardedHost, accessStore, req.ownerAuth!.workspace!);
+    const { session } = await requireBrowserOwner(req, true);
     const body = asRecord(req.body);
     let issued;
     try {
-      issued = await accessStore.createAgentConnection({ providerSubject: identity.providerSubject, workspaceId: req.ownerAuth!.workspace!.id, label: requiredString(body.label, "Agent label"), scopes: body.scopes as ("read" | "write")[], expiresAt: body.expiresAt == null ? null : requiredString(body.expiresAt, "Agent expiry") });
+      issued = await accessStore.createAgentConnection({ authSessionId: session.id, providerSubject: identity.providerSubject, workspaceId: req.ownerAuth!.workspace!.id, label: requiredString(body.label, "Agent label"), scopes: body.scopes as ("read" | "write")[], expiresAt: body.expiresAt == null ? null : requiredString(body.expiresAt, "Agent expiry") });
     } catch (error) {
+      if (error instanceof AccessStoreError && error.code === "ACCESS_RATE_LIMITED") throw httpError(429, error.message);
       if (error instanceof AccessStoreError && error.code === "ACCESS_FORBIDDEN") throw httpError(403, error.message);
       if (error instanceof Error) throw httpError(400, error.message);
       throw error;
@@ -843,7 +540,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
   }));
 
   app.delete("/api/agent-connections/:connectionId", asyncHandler(async (req, res) => {
-    const identity = await resolveTenantOwner(req, clerkAuthConfig!, trustForwardedHost, accessStore, req.ownerAuth!.workspace!);
+    const identity = await resolveTenantOwner(req, passkeyAuthConfig!, trustForwardedHost, accessStore, req.ownerAuth!.workspace!);
     const connection = await accessStore.revokeAgentConnection(identity.providerSubject, req.ownerAuth!.workspace!.id, routeParam(req, "connectionId"));
     res.json({ connection: publicAgentConnection(connection) });
   }));
@@ -862,18 +559,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     void (async () => {
       if (missingConfiguration.length) throw httpError(503, `Missing required configuration: ${missingConfiguration.join(", ")}.`);
       rejectWorkspaceSelectors(req, req.method !== "GET" && req.method !== "HEAD");
-      const context = await resolveAccessContext(req, {
-        accessStore,
-        apiToken,
-        legacyApiWorkspaceId,
-        legacyStore,
-        ownerLabel,
-        clerkAuthConfig,
-        hostFamilies,
-        primaryHostFamily,
-        trustForwardedHost,
-        workspaceStoreResolver
-      });
+      const context = await resolveAccessContext(req, contextConfig);
       const auth = context.auth;
       if (!auth || context.kind === "root") throw httpError(401, "Authentication required.");
       if (context.workspace?.storageId === DEFAULT_WORKSPACE_ID) await requireExistingLegacyState();
@@ -1095,18 +781,23 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
   return app;
 }
 
-function securityHeaders(clerkFrontendApi: string): RequestHandler {
+function assertCurrentAuthSession(state: AccessRegistryState, ownerId: string, sessionId: string, fresh = false): void {
+  const session = state.authSessions.find(s => s.id === sessionId && s.ownerId === ownerId && !s.revokedAt && Date.parse(s.expiresAt) > Date.now());
+  if (!session || state.revokedSessions.some(s => s.sessionId === sessionId)) throw httpError(401, "Owner sign-in required.");
+  if (fresh && Date.now() - Date.parse(session.verifiedAt) > 5 * 60_000) throw httpError(403, "Fresh passkey verification required.");
+}
+
+function securityHeaders(config: PasskeyAuthConfig | null, families: readonly HostFamily[]): RequestHandler {
+  const formOrigins = ["'self'", ...(config ? [config.authOrigin] : []), ...families.flatMap(family => {
+    const root = new URL(family.rootOrigin);
+    return [family.rootOrigin, ...(family.deriveTenantHosts ? [`${root.protocol}//*.${root.hostname}${root.port ? `:${root.port}` : ""}`] : [...family.tenantHosts.keys()].map(originForHost))];
+  })].join(" ");
   return (req, res, next) => {
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
     res.setHeader("X-Frame-Options", "DENY");
     res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
-    res.setHeader(
-      "Content-Security-Policy",
-      clerkFrontendApi
-        ? `default-src 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'; script-src 'self' 'unsafe-inline' ${clerkFrontendApi} https://challenges.cloudflare.com https://*.protect.clerk.com; style-src 'self' 'unsafe-inline'; connect-src 'self' ${clerkFrontendApi} https://*.protect.clerk.com; img-src 'self' https://img.clerk.com; worker-src 'self' blob:; frame-src 'self' https://challenges.cloudflare.com https://*.protect.clerk.com`
-        : "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'"
-    );
+    res.setHeader("Content-Security-Policy", `default-src 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; form-action ${formOrigins}`);
     if (req.path.startsWith("/api/")) noStore(res);
     next();
   };
@@ -1141,7 +832,7 @@ async function resolveAccessContext(req: Request, config: AccessContextConfig): 
   const hostFamily = hostContext?.family || null;
   const tenantWorkspace = hostContext?.kind === "workspace" ? hostContext.workspace : null;
 
-  if (!config.clerkAuthConfig) {
+  if (!config.passkeyAuthConfig) {
     return {
       kind: "local",
       auth: authenticateLocal(req, { apiToken: config.apiToken, ownerLabel: config.ownerLabel, store: config.legacyStore }),
@@ -1157,74 +848,20 @@ async function resolveAccessContext(req: Request, config: AccessContextConfig): 
 
   const authorization = req.get("authorization") || "";
   if (authorization) {
+    if (hostContext.kind !== "workspace" || !tenantWorkspace) return { kind: hostContext.kind, auth: null, identity: null, workspace: tenantWorkspace, hostFamily };
     const bearer = /^Bearer\s+(\S+)$/.exec(authorization)?.[1] || "";
-    if (!config.apiToken || !safeEqual(bearer, config.apiToken)) {
-      try {
-        if (hostContext.kind !== "workspace" || !tenantWorkspace || !supportsWorkspace(hostFamily, tenantWorkspace.slug)) {
-          return { kind: hostContext.kind, auth: null, identity: null, workspace: tenantWorkspace, hostFamily };
-        }
-        const verified = await config.accessStore.authorizeAgentCredential({
-          credential: bearer,
-          workspaceId: tenantWorkspace.id,
-          requiredScope: req.method === "GET" || req.method === "HEAD" ? "read" : "write"
-        });
-        return {
-          kind: "workspace",
-          auth: {
-            method: "agent",
-            actor: {
-              channel: "api",
-              label: verified.connection.label,
-              agentConnectionId: verified.connection.id
-            },
-            workspace: verified.workspace,
-            store: config.workspaceStoreResolver.resolve(verified.workspace.storageId),
-            scopes: verified.connection.scopes
-          },
-          identity: null,
-          workspace: verified.workspace,
-          hostFamily
-        };
-      } catch (error) {
-        if (error instanceof AccessStoreError && error.code === "ACCESS_AGENT_SCOPE_MISSING") throw httpError(403, error.message);
-        if (!(error instanceof AccessStoreError)) throw error;
-      }
-      return {
-        kind: hostContext.kind,
-        auth: null,
-        identity: null,
-        workspace: tenantWorkspace,
-        hostFamily
-      };
+    try {
+      const verified = await config.accessStore.authorizeAgentCredential({ credential: bearer, workspaceId: tenantWorkspace.id, requiredScope: req.method === "GET" || req.method === "HEAD" ? "read" : "write" });
+      return { kind: "workspace", auth: { method: "agent", actor: { channel: "api", label: verified.connection.label, agentConnectionId: verified.connection.id }, workspace: verified.workspace, store: config.workspaceStoreResolver.resolve(verified.workspace.storageId), scopes: verified.connection.scopes }, identity: null, workspace: verified.workspace, hostFamily };
+    } catch (error) {
+      if (error instanceof AccessStoreError && error.code === "ACCESS_AGENT_SCOPE_MISSING") throw httpError(403, error.message);
+      if (!(error instanceof AccessStoreError)) throw error;
+      return { kind: "workspace", auth: null, identity: null, workspace: tenantWorkspace, hostFamily };
     }
-    const bearerWorkspace = hostContext.kind === "root"
-      ? (await config.accessStore.read()).workspaces.find((workspace) => workspace.storageId === config.legacyApiWorkspaceId) || null
-      : tenantWorkspace;
-    if (bearerWorkspace?.storageId !== config.legacyApiWorkspaceId || !supportsWorkspace(hostFamily, bearerWorkspace.slug)) {
-      return {
-        kind: hostContext.kind,
-        auth: null,
-        identity: null,
-        workspace: bearerWorkspace,
-        hostFamily
-      };
-    }
-    return {
-      kind: "workspace",
-      auth: {
-        method: "bearer",
-        actor: { channel: "api", label: cleanLabel(req.get("x-kanban-actor"), config.ownerLabel) },
-        workspace: bearerWorkspace,
-        store: config.workspaceStoreResolver.resolve(bearerWorkspace.storageId)
-      },
-      identity: null,
-      workspace: bearerWorkspace,
-      hostFamily
-    };
   }
 
   if (hostContext.kind === "root") {
-    const identity = await verifiedRootIdentity(req, config.clerkAuthConfig, config.trustForwardedHost, config.accessStore);
+    const identity = await verifiedRootIdentity(req, config.passkeyAuthConfig, config.trustForwardedHost, config.accessStore);
     return {
       kind: "root",
       auth: identity ? {
@@ -1242,11 +879,12 @@ async function resolveAccessContext(req: Request, config: AccessContextConfig): 
   if (!tenantWorkspace) return { kind: "workspace", auth: null, identity: null, workspace: null, hostFamily };
 
   const appRequest = webRequest(req, config.trustForwardedHost);
-  const tenantSession = await verifyTenantSession(appRequest, config.clerkAuthConfig.sessionSecret, isProductionRequest(appRequest));
+  const tenantSession = await verifyTenantSession(appRequest, config.passkeyAuthConfig.sessionSecret, isProductionRequest(appRequest));
   if (!tenantSession || tenantSession.workspaceId !== tenantWorkspace.id) {
     return { kind: "workspace", auth: null, identity: null, workspace: tenantWorkspace, hostFamily };
   }
-  if (await config.accessStore.isSessionRevoked(tenantSession.providerSubject, tenantSession.sessionId)) {
+  const active = await activeOwnerSession(config.accessStore, tenantSession.sessionId);
+  if (!active || active.owner.id !== tenantSession.providerSubject || active.session.rootOrigin !== hostFamily.rootOrigin || tenantSession.rootOrigin !== hostFamily.rootOrigin) {
     return { kind: "workspace", auth: null, identity: null, workspace: tenantWorkspace, hostFamily };
   }
   const ownerAccess = await config.accessStore.resolveOwner(tenantSession.providerSubject);
@@ -1262,7 +900,7 @@ async function resolveAccessContext(req: Request, config: AccessContextConfig): 
       store: config.workspaceStoreResolver.resolve(tenantWorkspace.storageId)
     },
     identity: {
-      providerSubject: ownerAccess.owner.providerSubject,
+      providerSubject: ownerAccess.owner.id,
       email: ownerAccess.owner.email,
       displayName: ownerAccess.owner.displayName,
       sessionId: tenantSession.sessionId,
@@ -1290,32 +928,35 @@ function fixedWorkspaceStoreResolver(store: StateStore, storageId: string): Work
 
 async function verifiedRootIdentity(
   req: Request,
-  config: ClerkAuthConfig,
+  config: PasskeyAuthConfig,
   trustForwardedHost: boolean,
   accessStore?: AccessStore
 ): Promise<RootSession | null> {
   const platformRequest = webRequest(req, trustForwardedHost);
   const identity = await verifyRootSession(platformRequest, config.sessionSecret, isProductionRequest(platformRequest));
   if (!identity) return null;
-  if (accessStore && await accessStore.isSessionRevoked(identity.providerSubject, identity.sessionId)) return null;
-  return identity;
+  if (!accessStore) return null;
+  const active = await activeOwnerSession(accessStore, identity.sessionId);
+  if (!active || active.owner.id !== identity.providerSubject || active.session.rootOrigin !== identity.rootOrigin) return null;
+  return { ...identity, email: active.owner.email, displayName: active.owner.displayName };
 }
 
 async function resolveTenantOwner(
   req: Request,
-  config: ClerkAuthConfig,
+  config: PasskeyAuthConfig,
   trustForwardedHost: boolean,
   accessStore: AccessStore,
   workspace: AccessWorkspace
 ): Promise<RootSession> {
   const platformRequest = webRequest(req, trustForwardedHost);
   const session = await verifyTenantSession(platformRequest, config.sessionSecret, isProductionRequest(platformRequest));
-  if (!session || session.workspaceId !== workspace.id || await accessStore.isSessionRevoked(session.providerSubject, session.sessionId)) {
+  const active = session && await activeOwnerSession(accessStore, session.sessionId);
+  if (!session || session.workspaceId !== workspace.id || !active || active.owner.id !== session.providerSubject || active.session.rootOrigin !== session.rootOrigin) {
     throw httpError(401, "Owner sign-in required.");
   }
   const owner = await accessStore.resolveOwner(session.providerSubject);
   if (!owner || !owner.workspaces.some((candidate) => candidate.id === workspace.id)) throw httpError(401, "Owner sign-in required.");
-  return { providerSubject: owner.owner.providerSubject, email: owner.owner.email, displayName: owner.owner.displayName, sessionId: session.sessionId, rootOrigin: session.rootOrigin };
+  return { providerSubject: owner.owner.id, email: owner.owner.email, displayName: owner.owner.displayName, sessionId: session.sessionId, rootOrigin: session.rootOrigin };
 }
 
 function publicAgentConnection(connection: import("./access-store").AgentConnection): UnknownRecord {
@@ -1343,20 +984,6 @@ function webRequest(req: Request, trustForwardedHost: boolean): globalThis.Reque
 
 function requestOrigin(request: globalThis.Request): string {
   return new URL(request.url).origin;
-}
-
-function logoutRetrySession(
-  session: { providerSubject: string; sessionId: string; rootOrigin: string },
-  rootOrigin: string,
-  cookieOrigin: string
-): LogoutRetrySession {
-  if (session.rootOrigin !== rootOrigin) throw httpError(401, "Authentication required.");
-  return {
-    providerSubject: session.providerSubject,
-    sessionId: session.sessionId,
-    rootOrigin,
-    cookieOrigin
-  };
 }
 
 function canonicalConfiguredHost(raw: string): string {
@@ -1389,11 +1016,11 @@ function candidateHostFamilyFromEnv(env: Record<string, string | undefined> = pr
   return { rootHost, tenantHosts };
 }
 
-function createCandidateHostFamily(input: CandidateHostFamilyOptions, clerkConfigured: boolean): HostFamily {
-  if (!clerkConfigured) throw new Error("A candidate host family requires Clerk authentication.");
+function createCandidateHostFamily(input: CandidateHostFamilyOptions, passkeyConfigured: boolean): HostFamily {
+  if (!passkeyConfigured) throw new Error("A candidate host family requires passkey authentication.");
   const candidateRootHost = canonicalConfiguredHost(input.rootHost);
   if (isIP(new URL(`http://${candidateRootHost}`).hostname.replace(/^\[|\]$/g, ""))) {
-    throw new Error("A Clerk candidate root must use a DNS hostname.");
+    throw new Error("A passkey candidate root must use a DNS hostname.");
   }
   const candidateRootOrigin = originForHost(candidateRootHost);
   const tenantHosts = new Map<string, string>();
@@ -1407,60 +1034,13 @@ function createCandidateHostFamily(input: CandidateHostFamilyOptions, clerkConfi
     tenantHosts.set(host, slug);
     tenantSlugs.add(slug);
   }
-  if (tenantHosts.size !== 1) throw new Error("KANBAN_CARDS_CANDIDATE_TENANT_HOSTS must contain exactly one legacy Workspace route for this cutover.");
+  if (tenantHosts.size !== 1) throw new Error("KANBAN_CARDS_CANDIDATE_TENANT_HOSTS must contain exactly one Workspace route.");
   return {
     rootHost: candidateRootHost,
     rootOrigin: candidateRootOrigin,
     deriveTenantHosts: false,
     tenantHosts
   };
-}
-
-function clerkBrowserRuntimeConfig(input: {
-  config: ClerkAuthConfig;
-  surfaceRole: "auth" | "app";
-  allowedRedirectOrigins: readonly string[];
-  fallbackRedirectUrl: string;
-}): UnknownRecord {
-  return {
-    clerkPublishableKey: input.config.publishableKey,
-    clerkFrontendApiOrigin: clerkFrontendApiOrigin(input.config),
-    clerkSurfaceRole: input.surfaceRole,
-    clerkAuthSignInUrl: clerkAuthSignInUrl(input.config),
-    clerkAuthSignUpUrl: clerkAuthSignUpUrl(input.config),
-    clerkAllowedRedirectOrigins: [...input.allowedRedirectOrigins],
-    clerkFallbackRedirectUrl: input.fallbackRedirectUrl
-  };
-}
-
-function validateSameRootClerkTopology(
-  authHost: string,
-  primaryFamily: HostFamily,
-  candidateFamily: HostFamily | null
-): void {
-  if (!authHost) throw new Error("KANBAN_CARDS_AUTH_HOST is required for Clerk authentication.");
-  if (!isStrictSubdomainHost(authHost, primaryFamily.rootHost)) {
-    throw new Error("KANBAN_CARDS_AUTH_HOST must be a strict same-root subdomain of KANBAN_CARDS_ROOT_HOST with a matching port.");
-  }
-  const families = candidateFamily ? [primaryFamily, candidateFamily] : [primaryFamily];
-  for (const family of families) {
-    if (
-      authHost === family.rootHost
-      || family.tenantHosts.has(authHost)
-      || family.deriveTenantHosts && isDerivedTenantHost(authHost, family.rootHost)
-    ) {
-      throw new Error("KANBAN_CARDS_AUTH_HOST must be distinct from every application root and tenant host.");
-    }
-  }
-  if (!candidateFamily) return;
-  if (!isStrictSubdomainHost(candidateFamily.rootHost, primaryFamily.rootHost)) {
-    throw new Error("KANBAN_CARDS_CANDIDATE_ROOT_HOST must be nested beneath KANBAN_CARDS_ROOT_HOST with a matching port.");
-  }
-  for (const tenantHost of candidateFamily.tenantHosts.keys()) {
-    if (!isStrictSubdomainHost(tenantHost, candidateFamily.rootHost)) {
-      throw new Error("Every candidate tenant host must be nested beneath KANBAN_CARDS_CANDIDATE_ROOT_HOST with a matching port.");
-    }
-  }
 }
 
 function isStrictSubdomainHost(host: string, rootHost: string): boolean {
@@ -1470,42 +1050,9 @@ function isStrictSubdomainHost(host: string, rootHost: string): boolean {
     && parsedHost.hostname.endsWith(`.${parsedRoot.hostname}`);
 }
 
-function validateClerkFrontendApiHostIsolation(
-  frontendApiOrigin: string,
-  authHost: string,
-  hostFamilies: readonly HostFamily[]
-): void {
-  const frontendApiHost = new URL(frontendApiOrigin).host;
-  const applicationHosts = new Set([
-    authHost,
-    ...hostFamilies.flatMap((family) => [family.rootHost, ...family.tenantHosts.keys()])
-  ]);
-  if (applicationHosts.has(frontendApiHost)) {
-    throw new Error("The Clerk Frontend API hostname must be distinct from every auth, application-root, and explicit tenant host.");
-  }
-}
-
-function validateProductionClerkFrontendApi(frontendApiOrigin: string, primaryFamily: HostFamily): void {
-  if (process.env.VERCEL_ENV?.trim().toLowerCase() !== "production") return;
-  const rootHostname = new URL(`http://${primaryFamily.rootHost}`).hostname;
-  const expectedOrigin = `https://clerk.${rootHostname}`;
-  if (frontendApiOrigin !== expectedOrigin) {
-    throw new Error(`Vercel production requires the Clerk Frontend API origin ${expectedOrigin} derived from the production publishable key.`);
-  }
-}
-
 function authHostSurfaceAllows(req: Request): boolean {
-  if (req.method !== "GET" && req.method !== "HEAD") return false;
-  return new Set([
-    "/sign-in",
-    "/sign-up",
-    "/app.js",
-    "/judgmentkit.css",
-    "/styles.css",
-    "/robots.txt",
-    "/favicon.ico",
-    "/api/session"
-  ]).has(req.path);
+  if (req.path.startsWith("/api/passkeys/")) return true;
+  return (req.method === "GET" || req.method === "HEAD") && new Set(["/sign-in", "/sign-up", "/app.js", "/judgmentkit.css", "/styles.css", "/robots.txt", "/favicon.ico", "/api/session"]).has(req.path);
 }
 
 function validateHostFamilies(families: readonly HostFamily[]): void {
@@ -1854,32 +1401,6 @@ function assertExactOrigin(req: Request, expectedOrigin: string): void {
     throw httpError(403, "Invalid request origin.");
   }
   if (actual.origin !== expected.origin) throw httpError(403, "Cross-origin request rejected.");
-}
-
-async function assertLogoutCompletionOrigin(
-  req: Request,
-  family: HostFamily,
-  accessStore: AccessStore
-): Promise<void> {
-  const origin = req.get("origin");
-  if (!origin) throw httpError(403, "A trusted application origin is required.");
-  let parsed: URL;
-  try {
-    parsed = new URL(origin);
-  } catch {
-    throw httpError(403, "Invalid request origin.");
-  }
-  if (parsed.origin !== origin || parsed.username || parsed.password) {
-    throw httpError(403, "Invalid request origin.");
-  }
-  if (origin === family.rootOrigin) return;
-  if (originForHost(parsed.host.toLowerCase()) !== origin) {
-    throw httpError(403, "Cross-origin request rejected.");
-  }
-  const context = await resolveKnownHost(parsed.host.toLowerCase(), [family], accessStore);
-  if (!context || context.kind !== "workspace" || !context.workspace) {
-    throw httpError(403, "Cross-origin request rejected.");
-  }
 }
 
 function requireActor(req: Request): ActivityActor {

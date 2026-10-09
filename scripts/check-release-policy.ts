@@ -41,7 +41,8 @@ async function main(): Promise<void> {
     "npm run release:preflight",
     "npm run release:promote",
     "PROMOTE EXACT VERIFIED CANDIDATE",
-    "release:cutover"
+    "passkey",
+    "scoped API key"
   ]) {
     if (!runbook.includes(requiredText)) {
       violations.push({ file: "docs/runbook.md", reason: `missing release boundary: ${requiredText}` });

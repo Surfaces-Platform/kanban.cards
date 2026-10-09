@@ -117,8 +117,9 @@ export function evaluateSteadyRelease(
     addUnless(blockers, text(current.target) === "production", "rollback-environment", "Rollback target must use the Production environment.");
     addUnless(blockers, /^[0-9a-f]{40}$/i.test(text(current.commitSha)), "rollback-sha", "Rollback target must carry a full Git SHA.");
     addUnless(blockers, isGeneratedDeploymentUrl(current.url, target.publicDomain), "rollback-url", "Rollback target must use an immutable generated deployment URL.");
-    requireHealth(blockers, record(current.health), "rollback-health");
-    requireAccessHealth(blockers, record(current.accessHealth), "rollback-access");
+    requireHealth(blockers, record(current.health), "current-health", false);
+    const currentAccess = record(current.accessHealth);
+    addUnless(blockers, currentAccess.status === 200 && currentAccess.ok === true && text(currentAccess.registryState) === "ready", "current-access", "Current production must report a ready access registry.");
   } else {
     addUnless(blockers, text(current.id) === deploymentId, "candidate-not-current", "Production does not resolve to the promoted deployment.");
     for (const [name, domain] of [["root", target.publicDomain], ["auth", target.authDomain], ["tenant", `mike.${target.publicDomain}`]] as const) {
@@ -415,14 +416,20 @@ function addUnless(blockers: SteadyReleaseBlocker[], passed: boolean, code: stri
   if (!passed) blockers.push({ code, message });
 }
 
-function requireHealth(blockers: SteadyReleaseBlocker[], health: Record<string, unknown>, prefix: string): void {
+function requireHealth(blockers: SteadyReleaseBlocker[], health: Record<string, unknown>, prefix: string, requirePasskeys = true): void {
   addUnless(blockers, health.status === 200 && health.ok === true && text(health.store) === "postgres", prefix, `${prefix} must return HTTP 200, ok:true, and Postgres.`);
   addUnless(blockers, strings(health.missingConfiguration).length === 0, `${prefix}-configuration`, `${prefix} reports missing configuration.`);
+  if (requirePasskeys) {
+    addUnless(blockers, text(health.authentication) === "passkey-session+workspace", `${prefix}-authentication`, `${prefix} must use passkey sessions with Workspace access.`);
+    addUnless(blockers, text(record(health.access).registry) === "ready", `${prefix}-registry`, `${prefix} must report a ready access registry.`);
+  }
 }
 
 function requireAccessHealth(blockers: SteadyReleaseBlocker[], health: Record<string, unknown>, prefix: string): void {
-  const binding = record(health.legacyBinding);
-  addUnless(blockers, health.status === 200 && health.ok === true && text(health.registryState) === "ready" && text(health.legacyState) === "ready" && text(binding.status) === "ready", prefix, `${prefix} must report ready registry, state, and binding.`);
+  addUnless(blockers, health.status === 200 && health.ok === true && text(health.registryState) === "ready", prefix, `${prefix} must report a ready access registry.`);
+  addUnless(blockers, ["ready", "not-required"].includes(text(health.legacyState)), `${prefix}-state`, `${prefix} must report readable existing state or no legacy state requirement.`);
+  addUnless(blockers, text(health.legacyBridge) === "disabled", `${prefix}-legacy-bridge`, `${prefix} must keep the retired global credential disabled.`);
+  addUnless(blockers, strings(health.missingConfiguration).length === 0, `${prefix}-configuration`, `${prefix} reports missing configuration.`);
 }
 
 function requirePublicRoute(blockers: SteadyReleaseBlocker[], route: Record<string, unknown>, prefix: string, minimum: number, maximum: number): void {

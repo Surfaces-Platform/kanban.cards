@@ -14,6 +14,11 @@ export const LEGACY_WORKSPACE_STORAGE_ID = "default";
 const ACCESS_REGISTRY_ROW_ID = "registry";
 const DEFAULT_HANDOFF_TTL_SECONDS = 5 * 60;
 const MAX_HANDOFF_TTL_SECONDS = 15 * 60;
+const MAX_WORKSPACES_PER_OWNER = 10;
+const MAX_ACTIVE_AGENT_CONNECTIONS_PER_WORKSPACE = 50;
+const FRESH_OWNER_VERIFICATION_MS = 5 * 60 * 1000;
+const MAX_AGENT_CONNECTIONS_PER_HOUR = 100;
+const AGENT_CONNECTION_RATE_WINDOW_MS = 60 * 60 * 1000;
 
 export interface AccessOwner {
   id: string;
@@ -67,6 +72,62 @@ export interface AgentConnection {
   revokedAt: string | null;
 }
 
+export interface AccessPasskey {
+  id: string;
+  ownerId: string;
+  publicKey: string;
+  counter: number;
+  transports: string[];
+  createdAt: string;
+  lastUsedAt: string | null;
+  revokedAt: string | null;
+}
+
+export interface AuthChallenge {
+  id: string;
+  challenge: string;
+  browserHash: string;
+  purpose: string;
+  ownerId: string | null;
+  rootOrigin: string;
+  expiresAt: string;
+  data: Record<string, unknown>;
+}
+
+export interface AuthSession {
+  id: string;
+  ownerId: string;
+  rootOrigin: string;
+  createdAt: string;
+  expiresAt: string;
+  revokedAt: string | null;
+  verifiedAt: string;
+}
+
+export interface RecoveryCode {
+  ownerId: string;
+  codeHash: string;
+  createdAt: string;
+  consumedAt: string | null;
+}
+
+export interface AuthHandoff {
+  id: string;
+  tokenHash: string;
+  browserHash: string;
+  ownerId: string;
+  sessionId: string;
+  destinationOrigin: string;
+  expiresAt: string;
+  consumedAt: string | null;
+}
+
+export interface AuthRateLimit {
+  id: string;
+  count: number;
+  resetAt: string;
+}
+
 export interface AccessRegistryState {
   schemaVersion: 1;
   owners: AccessOwner[];
@@ -74,6 +135,13 @@ export interface AccessRegistryState {
   handoffs: AccessHandoff[];
   revokedSessions: RevokedAccessSession[];
   agentConnections: AgentConnection[];
+  passkeys: AccessPasskey[];
+  authChallenges: AuthChallenge[];
+  authSessions: AuthSession[];
+  recoveryCodes: RecoveryCode[];
+  authHandoffs: AuthHandoff[];
+  authRateLimits: AuthRateLimit[];
+  setupConsumed: boolean;
 }
 
 export interface AccessStoreOptions extends PostgresOptions {
@@ -123,6 +191,7 @@ export interface CreateAgentConnectionInput {
   label: string;
   scopes: AgentConnectionScope[];
   expiresAt?: string | null;
+  authSessionId?: string;
 }
 
 export interface IssuedAgentConnection {
@@ -158,6 +227,7 @@ export interface ResolvedAccessOwner {
 export type AccessStoreErrorCode =
   | "ACCESS_CONFLICT"
   | "ACCESS_FORBIDDEN"
+  | "ACCESS_RATE_LIMITED"
   | "ACCESS_HANDOFF_CONSUMED"
   | "ACCESS_HANDOFF_DESTINATION_MISMATCH"
   | "ACCESS_HANDOFF_EXPIRED"
@@ -182,6 +252,7 @@ export interface AccessStore {
   kind: "file" | "postgres";
   path: string;
   read(): Promise<AccessRegistryState>;
+  authTransaction<T>(mutator: (state: AccessRegistryState) => T): Promise<T>;
   resolveOwner(providerSubject: string): Promise<ResolvedAccessOwner | null>;
   getOwnerByProviderSubject(providerSubject: string): Promise<AccessOwner | null>;
   getWorkspaceById(workspaceId: string): Promise<AccessWorkspace | null>;
@@ -345,7 +416,14 @@ export function freshAccessRegistryState(): AccessRegistryState {
     workspaces: [],
     handoffs: [],
     revokedSessions: [],
-    agentConnections: []
+    agentConnections: [],
+    passkeys: [],
+    authChallenges: [],
+    authSessions: [],
+    recoveryCodes: [],
+    authHandoffs: [],
+    authRateLimits: [],
+    setupConsumed: false
   };
 }
 
@@ -363,6 +441,16 @@ export function normalizeAccessRegistry(rawState: unknown): AccessRegistryState 
   const agentConnections = state.agentConnections === undefined
     ? []
     : requireArray(state.agentConnections, "Access registry agentConnections").map(normalizeAgentConnection);
+  const passkeys = optionalArray(state.passkeys, "Access registry passkeys").map(normalizePasskey);
+  const authChallenges = optionalArray(state.authChallenges, "Access registry authChallenges").map(normalizeAuthChallenge);
+  const authSessions = optionalArray(state.authSessions, "Access registry authSessions").map(normalizeAuthSession);
+  const recoveryCodes = optionalArray(state.recoveryCodes, "Access registry recoveryCodes").map(normalizeRecoveryCode);
+  const authHandoffs = optionalArray(state.authHandoffs, "Access registry authHandoffs").map(normalizeAuthHandoff);
+  const authRateLimits = optionalArray(state.authRateLimits, "Access registry authRateLimits").map(normalizeAuthRateLimit);
+  if (state.setupConsumed !== undefined && typeof state.setupConsumed !== "boolean") {
+    throw new Error("Access registry setupConsumed must be a boolean.");
+  }
+  const setupConsumed = state.setupConsumed === true;
 
   assertUnique(owners.map((owner) => owner.id), "owner id");
   assertUnique(owners.map((owner) => owner.providerSubject), "provider subject");
@@ -373,6 +461,13 @@ export function normalizeAccessRegistry(rawState: unknown): AccessRegistryState 
   assertUnique(handoffs.map((handoff) => handoff.tokenHash), "handoff token hash");
   assertUnique(agentConnections.map((connection) => connection.id), "agent connection id");
   assertUnique(agentConnections.map((connection) => connection.credentialHash), "agent credential hash");
+  assertUnique(passkeys.map((passkey) => passkey.id), "passkey credential id");
+  assertUnique(authChallenges.map((challenge) => challenge.id), "auth challenge id");
+  assertUnique(authSessions.map((session) => session.id), "auth session id");
+  assertUnique(recoveryCodes.map((code) => code.codeHash), "recovery code hash");
+  assertUnique(authHandoffs.map((handoff) => handoff.id), "auth handoff id");
+  assertUnique(authHandoffs.map((handoff) => handoff.tokenHash), "auth handoff token hash");
+  assertUnique(authRateLimits.map((limit) => limit.id), "auth rate limit id");
   assertUnique(
     revokedSessions.map((session) => revokedSessionKey(session.providerSubject, session.sessionId)),
     "revoked session"
@@ -413,21 +508,65 @@ export function normalizeAccessRegistry(rawState: unknown): AccessRegistryState 
     if (!ownerIds.has(connection.ownerId)) throw new Error(`Agent connection ${connection.id} refers to a missing owner.`);
     if (!workspace || !workspace.ownerIds.includes(connection.ownerId)) throw new Error(`Agent connection ${connection.id} is not bound to its owner's Workspace.`);
   }
-  return { schemaVersion: ACCESS_REGISTRY_SCHEMA_VERSION, owners, workspaces, handoffs, revokedSessions, agentConnections };
+  for (const passkey of passkeys) {
+    if (!ownerIds.has(passkey.ownerId)) throw new Error(`Passkey ${passkey.id} refers to a missing owner.`);
+    assertNotBefore(passkey.lastUsedAt, passkey.createdAt, "Passkey lastUsedAt");
+    assertNotBefore(passkey.revokedAt, passkey.createdAt, "Passkey revokedAt");
+  }
+  for (const challenge of authChallenges) {
+    if (challenge.ownerId !== null && !ownerIds.has(challenge.ownerId)) {
+      throw new Error(`Auth challenge ${challenge.id} refers to a missing owner.`);
+    }
+  }
+  const sessionsById = new Map(authSessions.map((session) => [session.id, session]));
+  for (const session of authSessions) {
+    if (!ownerIds.has(session.ownerId)) throw new Error(`Auth session ${session.id} refers to a missing owner.`);
+    if (Date.parse(session.expiresAt) <= Date.parse(session.createdAt)) {
+      throw new Error(`Auth session ${session.id} must expire after it is created.`);
+    }
+    assertNotBefore(session.verifiedAt, session.createdAt, "Auth session verifiedAt");
+    assertNotBefore(session.revokedAt, session.createdAt, "Auth session revokedAt");
+  }
+  for (const code of recoveryCodes) {
+    if (!ownerIds.has(code.ownerId)) throw new Error("Recovery code refers to a missing owner.");
+    assertNotBefore(code.consumedAt, code.createdAt, "Recovery code consumedAt");
+  }
+  for (const handoff of authHandoffs) {
+    const session = sessionsById.get(handoff.sessionId);
+    if (!ownerIds.has(handoff.ownerId)) throw new Error(`Auth handoff ${handoff.id} refers to a missing owner.`);
+    if (!session || session.ownerId !== handoff.ownerId) {
+      throw new Error(`Auth handoff ${handoff.id} is not bound to its owner's session.`);
+    }
+  }
+  return {
+    schemaVersion: ACCESS_REGISTRY_SCHEMA_VERSION, owners, workspaces, handoffs, revokedSessions, agentConnections,
+    passkeys, authChallenges, authSessions, recoveryCodes, authHandoffs, authRateLimits, setupConsumed
+  };
 }
 
 function accessStoreFromAdapter(adapter: AccessRegistryAdapter, nowOption?: () => Date): AccessStore {
   const now = nowOption || (() => new Date());
 
+  async function authTransaction<T>(mutator: (state: AccessRegistryState) => T): Promise<T> {
+    return (await adapter.update((state) => {
+      const result = mutator(state);
+      if (result && (typeof result === "object" || typeof result === "function") && "then" in result && typeof result.then === "function") {
+        void Promise.resolve(result).catch(() => undefined);
+        throw new Error("Access registry transaction callbacks must be synchronous.");
+      }
+      return result;
+    })).result;
+  }
+
   async function getOwnerByProviderSubject(providerSubject: string): Promise<AccessOwner | null> {
     const subject = normalizeProviderSubject(providerSubject);
-    return (await adapter.read()).owners.find((owner) => owner.providerSubject === subject) || null;
+    return findOwner(await adapter.read(), subject) || null;
   }
 
   async function resolveOwner(providerSubject: string): Promise<ResolvedAccessOwner | null> {
     const subject = normalizeProviderSubject(providerSubject);
     const state = await adapter.read();
-    const owner = state.owners.find((candidate) => candidate.providerSubject === subject);
+    const owner = findOwner(state, subject);
     if (!owner) return null;
     const workspaces = state.workspaces
       .filter((workspace) => workspace.ownerIds.includes(owner.id))
@@ -448,35 +587,13 @@ function accessStoreFromAdapter(adapter: AccessRegistryAdapter, nowOption?: () =
   async function listWorkspacesForOwner(providerSubject: string): Promise<AccessWorkspace[]> {
     const subject = normalizeProviderSubject(providerSubject);
     const state = await adapter.read();
-    const owner = state.owners.find((candidate) => candidate.providerSubject === subject);
+    const owner = findOwner(state, subject);
     if (!owner) return [];
     return state.workspaces.filter((workspace) => workspace.ownerIds.includes(owner.id)).sort((left, right) => left.slug.localeCompare(right.slug));
   }
 
   async function createWorkspace(input: CreateWorkspaceInput): Promise<AccessWorkspace> {
-    const providerSubject = normalizeProviderSubject(input.providerSubject);
-    const email = normalizeOwnerEmail(input.email);
-    const displayName = normalizeOwnerDisplayName(input.displayName);
-    const slug = normalizeWorkspaceSlug(input.slug);
-    const name = normalizeWorkspaceName(input.name);
-    return (await adapter.update((state) => {
-      if (state.workspaces.some((workspace) => workspace.slug === slug)) {
-        throw new AccessStoreError("ACCESS_CONFLICT", `Workspace slug ${slug} is already registered.`);
-      }
-      const timestamp = validNow(now);
-      const owner = ensureOwner(state, { providerSubject, email, displayName }, timestamp);
-      const workspace: AccessWorkspace = {
-        id: uniqueId("workspace", new Set(state.workspaces.map((candidate) => candidate.id))),
-        slug,
-        name,
-        storageId: uniqueId("state", new Set(state.workspaces.map((candidate) => candidate.storageId))),
-        ownerIds: [owner.id],
-        createdAt: timestamp,
-        updatedAt: timestamp
-      };
-      state.workspaces.push(workspace);
-      return workspace;
-    })).result;
+    return (await adapter.update((state) => createWorkspaceInRegistry(state, input, validNow(now)))).result;
   }
 
   async function bindLegacyWorkspace(input: BindLegacyWorkspaceInput): Promise<AccessWorkspace> {
@@ -527,12 +644,13 @@ function accessStoreFromAdapter(adapter: AccessRegistryAdapter, nowOption?: () =
     const subject = normalizeProviderSubject(providerSubject);
     const familyId = normalizeSessionId(sessionId);
     return (await adapter.update((state) => {
+      const canonicalSubject = findOwner(state, subject)?.providerSubject || subject;
       const existing = state.revokedSessions.find(
-        (candidate) => candidate.providerSubject === subject && candidate.sessionId === familyId
+        (candidate) => candidate.providerSubject === canonicalSubject && candidate.sessionId === familyId
       );
       if (existing) return existing;
       const revokedSession: RevokedAccessSession = {
-        providerSubject: subject,
+        providerSubject: canonicalSubject,
         sessionId: familyId,
         revokedAt: validNow(now)
       };
@@ -554,7 +672,7 @@ function accessStoreFromAdapter(adapter: AccessRegistryAdapter, nowOption?: () =
       if (hasRevokedSession(state, providerSubject, sessionId)) {
         throw new AccessStoreError("ACCESS_SESSION_REVOKED", "Session has been revoked.");
       }
-      const owner = state.owners.find((candidate) => candidate.providerSubject === providerSubject);
+      const owner = findOwner(state, providerSubject);
       if (!owner) throw new AccessStoreError("ACCESS_OWNER_NOT_FOUND", "Owner is not registered.");
       const workspace = state.workspaces.find((candidate) => candidate.id === workspaceId);
       if (!workspace) throw new AccessStoreError("ACCESS_WORKSPACE_NOT_FOUND", "Workspace is not registered.");
@@ -619,7 +737,7 @@ function accessStoreFromAdapter(adapter: AccessRegistryAdapter, nowOption?: () =
     const subject = normalizeProviderSubject(providerSubject);
     const id = requiredIdentifier(workspaceId, "Workspace id");
     const state = await adapter.read();
-    const owner = state.owners.find((candidate) => candidate.providerSubject === subject);
+    const owner = findOwner(state, subject);
     const workspace = state.workspaces.find((candidate) => candidate.id === id);
     if (!owner || !workspace?.ownerIds.includes(owner.id)) throw new AccessStoreError("ACCESS_FORBIDDEN", "Workspace access is unavailable.");
     return state.agentConnections.filter((connection) => connection.ownerId === owner.id && connection.workspaceId === id);
@@ -631,17 +749,40 @@ function accessStoreFromAdapter(adapter: AccessRegistryAdapter, nowOption?: () =
     const label = normalizeAgentLabel(input.label);
     const scopes = normalizeAgentScopes(input.scopes);
     const expiresAt = input.expiresAt == null ? null : timestamp(input.expiresAt, "Agent connection expiresAt");
-    const issuedAt = validNow(now);
-    if (expiresAt && Date.parse(expiresAt) <= Date.parse(issuedAt)) throw new Error("Agent connection expiry must be in the future.");
+    const authSessionId = input.authSessionId === undefined ? null : normalizeSessionId(input.authSessionId);
     const secret = crypto.randomBytes(32).toString("base64url");
     return (await adapter.update((state) => {
-      const owner = state.owners.find((candidate) => candidate.providerSubject === subject);
+      const issuedAt = validNow(now);
+      if (expiresAt && Date.parse(expiresAt) <= Date.parse(issuedAt)) throw new Error("Agent connection expiry must be in the future.");
+      const owner = findOwner(state, subject);
       const workspace = state.workspaces.find((candidate) => candidate.id === workspaceId);
       if (!owner || !workspace?.ownerIds.includes(owner.id)) throw new AccessStoreError("ACCESS_FORBIDDEN", "Workspace access is unavailable.");
+      if (authSessionId) {
+        const session = state.authSessions.find((candidate) => candidate.id === authSessionId && candidate.ownerId === owner.id);
+        const currentTime = Date.parse(issuedAt);
+        if (!session || session.revokedAt || hasRevokedSession(state, owner.id, authSessionId) || Date.parse(session.expiresAt) <= currentTime || Date.parse(session.verifiedAt) > currentTime || currentTime - Date.parse(session.verifiedAt) > FRESH_OWNER_VERIFICATION_MS) {
+          throw new AccessStoreError("ACCESS_FORBIDDEN", "Verify your passkey in an active session before creating an API key.");
+        }
+      }
+      if (state.agentConnections.filter((connection) => connection.ownerId === owner.id && connection.workspaceId === workspaceId && !connection.revokedAt).length >= MAX_ACTIVE_AGENT_CONNECTIONS_PER_WORKSPACE) {
+        throw new AccessStoreError("ACCESS_FORBIDDEN", "A Workspace can have up to 50 unrevoked API keys. Revoke an existing key before creating another.");
+      }
+      const currentTime = Date.parse(issuedAt);
+      state.authRateLimits = state.authRateLimits.filter((limit) => Date.parse(limit.resetAt) > currentTime);
+      const rateLimitId = `agent-key-issuance:${crypto.createHash("sha256").update(owner.id).digest("hex")}`;
+      let rateLimit = state.authRateLimits.find((limit) => limit.id === rateLimitId);
+      if (rateLimit && rateLimit.count >= MAX_AGENT_CONNECTIONS_PER_HOUR) {
+        throw new AccessStoreError("ACCESS_RATE_LIMITED", `API-key creation limit reached. Try again after ${rateLimit.resetAt}.`);
+      }
       const id = uniqueId("agent", new Set(state.agentConnections.map((candidate) => candidate.id)));
       const credential = `kac_${id}_${secret}`;
       const connection: AgentConnection = { id, credentialHash: hashAgentCredential(credential), ownerId: owner.id, workspaceId, label, scopes, createdAt: issuedAt, lastUsedAt: null, expiresAt, revokedAt: null };
       state.agentConnections.push(connection);
+      if (!rateLimit) {
+        rateLimit = { id: rateLimitId, count: 0, resetAt: new Date(currentTime + AGENT_CONNECTION_RATE_WINDOW_MS).toISOString() };
+        state.authRateLimits.push(rateLimit);
+      }
+      rateLimit.count += 1;
       return { connection, credential };
     })).result;
   }
@@ -651,7 +792,7 @@ function accessStoreFromAdapter(adapter: AccessRegistryAdapter, nowOption?: () =
     const workspace = requiredIdentifier(workspaceId, "Workspace id");
     const id = requiredIdentifier(connectionId, "Agent connection id");
     return (await adapter.update((state) => {
-      const owner = state.owners.find((candidate) => candidate.providerSubject === subject);
+      const owner = findOwner(state, subject);
       const connection = state.agentConnections.find((candidate) => candidate.id === id && candidate.workspaceId === workspace);
       if (!owner || !connection || connection.ownerId !== owner.id) throw new AccessStoreError("ACCESS_FORBIDDEN", "Agent connection is unavailable.");
       if (!connection.revokedAt) connection.revokedAt = validNow(now);
@@ -684,6 +825,7 @@ function accessStoreFromAdapter(adapter: AccessRegistryAdapter, nowOption?: () =
     kind: adapter.kind,
     path: adapter.path,
     read: adapter.read,
+    authTransaction,
     resolveOwner,
     getOwnerByProviderSubject,
     getWorkspaceById,
@@ -703,15 +845,53 @@ function accessStoreFromAdapter(adapter: AccessRegistryAdapter, nowOption?: () =
   };
 }
 
+export function createWorkspaceInRegistry(
+  state: AccessRegistryState,
+  input: CreateWorkspaceInput,
+  createdAt: string = new Date().toISOString()
+): AccessWorkspace {
+  const providerSubject = normalizeProviderSubject(input.providerSubject);
+  const email = normalizeOwnerEmail(input.email);
+  const displayName = normalizeOwnerDisplayName(input.displayName);
+  const slug = normalizeWorkspaceSlug(input.slug);
+  const name = normalizeWorkspaceName(input.name);
+  const timestampValue = timestamp(createdAt, "Workspace createdAt");
+  if (state.workspaces.some((workspace) => workspace.slug === slug)) {
+    throw new AccessStoreError("ACCESS_CONFLICT", `Workspace slug ${slug} is already registered.`);
+  }
+  const existingOwner = findOwner(state, providerSubject);
+  if (existingOwner && state.workspaces.filter((workspace) => workspace.ownerIds.includes(existingOwner.id)).length >= MAX_WORKSPACES_PER_OWNER) {
+    throw new AccessStoreError("ACCESS_FORBIDDEN", "An owner can have up to 10 Workspaces.");
+  }
+  const owner = ensureOwner(state, { providerSubject, email, displayName }, timestampValue);
+  const workspace: AccessWorkspace = {
+    id: uniqueId("workspace", new Set(state.workspaces.map((candidate) => candidate.id))),
+    slug,
+    name,
+    storageId: uniqueId("state", new Set(state.workspaces.map((candidate) => candidate.storageId))),
+    ownerIds: [owner.id],
+    createdAt: timestampValue,
+    updatedAt: timestampValue
+  };
+  state.workspaces.push(workspace);
+  return workspace;
+}
+
+function findOwner(state: AccessRegistryState, identifier: string): AccessOwner | undefined {
+  return state.owners.find((owner) => owner.id === identifier)
+    || state.owners.find((owner) => owner.providerSubject === identifier);
+}
+
 function ensureOwner(
   state: AccessRegistryState,
   identity: { providerSubject: string; email: string; displayName: string },
   timestamp: string
 ): AccessOwner {
-  const existing = state.owners.find((owner) => owner.providerSubject === identity.providerSubject);
+  const existing = findOwner(state, identity.providerSubject);
   if (existing) {
-    if (existing.email !== identity.email || existing.displayName !== identity.displayName) {
-      existing.email = identity.email;
+    const email = identity.email || existing.email;
+    if (existing.email !== email || existing.displayName !== identity.displayName) {
+      existing.email = email;
       existing.displayName = identity.displayName;
       existing.updatedAt = timestamp;
     }
@@ -795,6 +975,129 @@ function normalizeAgentConnection(value: unknown): AgentConnection {
   };
 }
 
+function normalizePasskey(value: unknown): AccessPasskey {
+  const passkey = requireRecord(value, "Passkey");
+  return {
+    id: base64urlString(passkey.id, "Passkey credential id"),
+    ownerId: requiredIdentifier(passkey.ownerId, "Passkey owner id"),
+    publicKey: base64urlString(passkey.publicKey, "Passkey public key"),
+    counter: nonnegativeInteger(passkey.counter, "Passkey counter"),
+    transports: requireArray(passkey.transports, "Passkey transports").map((transport) => requiredIdentifier(transport, "Passkey transport")),
+    createdAt: timestamp(passkey.createdAt, "Passkey createdAt"),
+    lastUsedAt: passkey.lastUsedAt == null ? null : timestamp(passkey.lastUsedAt, "Passkey lastUsedAt"),
+    revokedAt: passkey.revokedAt == null ? null : timestamp(passkey.revokedAt, "Passkey revokedAt")
+  };
+}
+
+function normalizeAuthChallenge(value: unknown): AuthChallenge {
+  const challenge = requireRecord(value, "Auth challenge");
+  return {
+    id: requiredIdentifier(challenge.id, "Auth challenge id"),
+    challenge: requiredIdentifier(challenge.challenge, "Auth challenge value"),
+    browserHash: storedHash(challenge.browserHash, "Auth challenge browserHash"),
+    purpose: requiredIdentifier(challenge.purpose, "Auth challenge purpose"),
+    ownerId: challenge.ownerId == null ? null : requiredIdentifier(challenge.ownerId, "Auth challenge owner id"),
+    rootOrigin: normalizeAuthOrigin(challenge.rootOrigin, "Auth challenge rootOrigin"),
+    expiresAt: timestamp(challenge.expiresAt, "Auth challenge expiresAt"),
+    data: normalizeJsonRecord(challenge.data, "Auth challenge data")
+  };
+}
+
+function normalizeAuthSession(value: unknown): AuthSession {
+  const session = requireRecord(value, "Auth session");
+  return {
+    id: normalizeSessionId(session.id),
+    ownerId: requiredIdentifier(session.ownerId, "Auth session owner id"),
+    rootOrigin: normalizeAuthOrigin(session.rootOrigin, "Auth session rootOrigin"),
+    createdAt: timestamp(session.createdAt, "Auth session createdAt"),
+    expiresAt: timestamp(session.expiresAt, "Auth session expiresAt"),
+    revokedAt: session.revokedAt == null ? null : timestamp(session.revokedAt, "Auth session revokedAt"),
+    verifiedAt: timestamp(session.verifiedAt, "Auth session verifiedAt")
+  };
+}
+
+function normalizeRecoveryCode(value: unknown): RecoveryCode {
+  const code = requireRecord(value, "Recovery code");
+  return {
+    ownerId: requiredIdentifier(code.ownerId, "Recovery code owner id"),
+    codeHash: storedHash(code.codeHash, "Recovery code hash"),
+    createdAt: timestamp(code.createdAt, "Recovery code createdAt"),
+    consumedAt: code.consumedAt == null ? null : timestamp(code.consumedAt, "Recovery code consumedAt")
+  };
+}
+
+function normalizeAuthHandoff(value: unknown): AuthHandoff {
+  const handoff = requireRecord(value, "Auth handoff");
+  return {
+    id: requiredIdentifier(handoff.id, "Auth handoff id"),
+    tokenHash: storedHash(handoff.tokenHash, "Auth handoff tokenHash"),
+    browserHash: storedHash(handoff.browserHash, "Auth handoff browserHash"),
+    ownerId: requiredIdentifier(handoff.ownerId, "Auth handoff owner id"),
+    sessionId: normalizeSessionId(handoff.sessionId),
+    destinationOrigin: normalizeAuthOrigin(handoff.destinationOrigin, "Auth handoff destinationOrigin"),
+    expiresAt: timestamp(handoff.expiresAt, "Auth handoff expiresAt"),
+    consumedAt: handoff.consumedAt == null ? null : timestamp(handoff.consumedAt, "Auth handoff consumedAt")
+  };
+}
+
+function normalizeAuthRateLimit(value: unknown): AuthRateLimit {
+  const limit = requireRecord(value, "Auth rate limit");
+  return {
+    id: requiredIdentifier(limit.id, "Auth rate limit id"),
+    count: nonnegativeInteger(limit.count, "Auth rate limit count"),
+    resetAt: timestamp(limit.resetAt, "Auth rate limit resetAt")
+  };
+}
+
+function normalizeAuthOrigin(value: unknown, label: string): string {
+  const origin = requiredString(value, label);
+  let parsed: URL;
+  try { parsed = new URL(origin); } catch { throw new Error(`${label} is invalid.`); }
+  const localHost = ["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname) || parsed.hostname.endsWith(".localhost");
+  if (
+    (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && localHost))
+    || parsed.username || parsed.password || parsed.origin !== origin
+  ) throw new Error(`${label} must be an exact secure origin or local HTTP origin.`);
+  return parsed.origin;
+}
+
+function normalizeJsonRecord(value: unknown, label: string): Record<string, unknown> {
+  const record = requireRecord(value, label);
+  function validateJson(item: unknown, ancestors: Set<object>): void {
+    if (item === null || typeof item === "string" || typeof item === "boolean") return;
+    if (typeof item === "number" && Number.isFinite(item)) return;
+    if (typeof item !== "object" || !item || ancestors.has(item)) throw new Error(`${label} must contain JSON values.`);
+    if (!Array.isArray(item) && Object.getPrototypeOf(item) !== Object.prototype && Object.getPrototypeOf(item) !== null) {
+      throw new Error(`${label} must contain JSON values.`);
+    }
+    const nextAncestors = new Set(ancestors).add(item);
+    for (const child of Object.values(item)) validateJson(child, nextAncestors);
+  }
+  validateJson(record, new Set());
+  return JSON.parse(JSON.stringify(record)) as Record<string, unknown>;
+}
+
+function base64urlString(value: unknown, label: string): string {
+  const result = requiredString(value, label);
+  if (result.length > 16384 || !/^[A-Za-z0-9_-]+$/.test(result)) throw new Error(`${label} must be base64url.`);
+  return result;
+}
+
+function storedHash(value: unknown, label: string): string {
+  const result = requiredString(value, label);
+  if (!/^sha256:[a-f0-9]{64}$/.test(result)) throw new Error(`${label} is invalid.`);
+  return result;
+}
+
+function nonnegativeInteger(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw new Error(`${label} must be a nonnegative integer.`);
+  return value;
+}
+
+function assertNotBefore(value: string | null, minimum: string, label: string): void {
+  if (value && Date.parse(value) < Date.parse(minimum)) throw new Error(`${label} cannot be before createdAt.`);
+}
+
 function normalizeAgentLabel(value: unknown): string {
   const label = requiredString(value, "Agent label");
   if (label.length > 120 || /[\r\n\0]/.test(label)) throw new Error("Agent label is invalid.");
@@ -850,13 +1153,20 @@ function revokedSessionKey(providerSubject: string, sessionId: string): string {
 }
 
 function hasRevokedSession(state: AccessRegistryState, providerSubject: string, sessionId: string): boolean {
+  const owner = findOwner(state, providerSubject);
   return state.revokedSessions.some(
-    (candidate) => candidate.providerSubject === providerSubject && candidate.sessionId === sessionId
+    (candidate) => candidate.sessionId === sessionId && (
+      candidate.providerSubject === providerSubject
+      || candidate.providerSubject === owner?.providerSubject
+      || candidate.providerSubject === owner?.id
+    )
   );
 }
 
 function normalizeOwnerEmail(value: unknown): string {
-  const email = requiredString(value, "Owner email").toLowerCase();
+  if (typeof value !== "string") throw new Error("Owner email must be a string.");
+  const email = value.trim().toLowerCase();
+  if (!email) return "";
   if (email.length > 320 || /[\s\r\n\0]/.test(email) || !/^[^@]+@[^@]+$/.test(email)) {
     throw new Error("Owner email is invalid.");
   }
@@ -959,6 +1269,10 @@ function requireRecord(value: unknown, label: string): Record<string, unknown> {
 function requireArray(value: unknown, label: string): unknown[] {
   if (!Array.isArray(value)) throw new Error(`${label} must be an array.`);
   return value;
+}
+
+function optionalArray(value: unknown, label: string): unknown[] {
+  return value === undefined ? [] : requireArray(value, label);
 }
 
 function requiredString(value: unknown, label: string): string {

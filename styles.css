@@ -118,13 +118,12 @@ h3 {
   text-align: center;
 }
 
-.clerk-access-view {
-  justify-items: center;
-}
-
-.clerk-access-view > * {
-  inline-size: min(100%, 29rem);
-  margin-inline: auto;
+.recovery-code {
+  overflow-wrap: anywhere;
+  padding: var(--jk-space-4);
+  border: 1px solid var(--jk-color-border);
+  border-radius: var(--jk-radius-control);
+  user-select: all;
 }
 
 .auth-card,

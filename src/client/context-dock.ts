@@ -1,88 +1,14 @@
 import { renderCardMarkdown } from "./markdown";
+import { startRegistration, startAuthentication, type PublicKeyCredentialCreationOptionsJSON, type PublicKeyCredentialRequestOptionsJSON } from "@simplewebauthn/browser";
 
 declare global {
   interface Window {
     KANBAN_CARDS_API_BASE_URL?: string;
-    Clerk?: ClerkBrowser;
-    __internal_ClerkUICtor?: unknown;
   }
-}
-
-interface ClerkBrowserSession {
-  id: string;
-  end(): Promise<unknown>;
-}
-
-type ClerkAppearanceVariable =
-  | "colorPrimary"
-  | "colorPrimaryForeground"
-  | "colorNeutral"
-  | "colorForeground"
-  | "colorMutedForeground"
-  | "colorBackground"
-  | "colorInput"
-  | "colorInputForeground"
-  | "colorBorder"
-  | "colorRing"
-  | "colorDanger"
-  | "borderRadius"
-  | "fontFamily";
-type ClerkAppearanceElement = "headerSubtitle" | "cardBox" | "formFieldInput" | "formButtonPrimary";
-
-interface ClerkAppearance {
-  theme?: "simple";
-  variables?: Partial<Record<ClerkAppearanceVariable, string>>;
-  elements?: Partial<Record<ClerkAppearanceElement, Record<string, string>>>;
-}
-
-interface ClerkBrowser {
-  isSignedIn?: boolean;
-  session?: ClerkBrowserSession | null;
-  client?: { signedInSessions?: ClerkBrowserSession[] } | null;
-  load(options?: {
-    ui?: { ClerkUI?: unknown };
-    signInUrl?: string;
-    signUpUrl?: string;
-    allowedRedirectOrigins?: string[];
-    localization?: {
-      formButtonPrimary?: string;
-      formFieldLabel__emailAddress?: string;
-      signIn?: {
-        start?: { title?: string; titleCombined?: string; subtitle?: string; subtitleCombined?: string };
-      };
-    };
-    appearance?: ClerkAppearance;
-  }): Promise<void>;
-  buildSignInUrl?(options?: { redirectUrl?: string }): string;
-  buildSignUpUrl?(options?: { redirectUrl?: string }): string;
-  mountSignIn(
-    node: HTMLDivElement,
-    options?: {
-      routing?: "hash" | "path";
-      withSignUp?: boolean;
-      transferable?: boolean;
-      forceRedirectUrl?: string;
-      fallbackRedirectUrl?: string;
-      signUpForceRedirectUrl?: string;
-      signUpFallbackRedirectUrl?: string;
-    }
-  ): void;
-  mountSignUp(
-    node: HTMLDivElement,
-    options?: {
-      routing?: "hash" | "path";
-      fallbackRedirectUrl?: string;
-      signInUrl?: string;
-    }
-  ): void;
-  unmountSignIn?(node: HTMLDivElement): void;
-  unmountSignUp?(node: HTMLDivElement): void;
-  signOut(options?: { redirectUrl?: string; sessionId?: string }): Promise<void>;
 }
 
 type Revision = string | number;
 type AccessContext = "auth" | "local" | "root" | "workspace";
-type ClerkSurfaceRole = "auth" | "app" | "";
 type ProjectEditorMode = "create" | "edit" | null;
 type InspectorTab = "card" | "activity";
 type DescriptionView = "write" | "preview";
@@ -97,22 +23,20 @@ interface Session {
   workspace?: WorkspaceAccess;
 }
 
+type PasskeyMode = "signup" | "signin" | "setup" | "recover" | "add" | "verify";
+interface AuthIntent { mode: PasskeyMode; rootOrigin: string; action?: string }
 interface SessionEnvelope {
   authenticated: boolean;
   context: AccessContext;
   rootUrl: string;
-  logoutUrl: string;
-  clerkPublishableKey: string;
-  clerkFrontendApiOrigin: string;
-  clerkSurfaceRole: ClerkSurfaceRole;
-  clerkAuthSignInUrl: string;
-  clerkAuthSignUpUrl: string;
-  clerkAllowedRedirectOrigins: string[];
-  clerkFallbackRedirectUrl: string;
-  logoutRetryPending: boolean;
-  logoutCompletion: boolean;
-  logoutCompletionSessionId: string;
+  loginUrl: string;
+  authIntent: AuthIntent | null;
+  setupAvailable: boolean;
   session: Session | null;
+}
+interface AccessSettings {
+  passkeys: Array<{ id: string; createdAt: string; lastUsedAt: string | null }>;
+  sessions: Array<{ id: string; createdAt: string; expiresAt: string; current: boolean }>;
 }
 
 interface AccessFailure {
@@ -314,22 +238,17 @@ const cardOnlyQuery = window.matchMedia("(max-width: 56rem)");
 let session: Session | null = null;
 let accessContext: AccessContext = "local";
 let rootUrl = window.location.origin;
-let logoutUrl = "";
-let clerkPublishableKey = "";
-let clerkFrontendApiOrigin = "";
-let clerkSurfaceRole: ClerkSurfaceRole = "";
-let clerkAuthSignInUrl = "";
-let clerkAuthSignUpUrl = "";
-let clerkAllowedRedirectOrigins: string[] = [];
-let clerkFallbackRedirectUrl = "";
-let logoutRetryPending = false;
-let logoutCompletion = false;
-let logoutCompletionSessionId = "";
+let loginUrl = "";
+let authIntent: AuthIntent | null = null;
+let setupAvailable = false;
 let signOutPending = false;
-let clerkRuntimeSignature = "";
-let clerkRuntimePromise: Promise<ClerkBrowser> | null = null;
-let clerkSignInMount: HTMLDivElement | null = null;
-let clerkSignInBlocked = false;
+let recoveryCode = "";
+let pendingAuthHandoff: { destination: string; token: string } | null = null;
+let accessSettings: AccessSettings | null = null;
+let accessPanelOpen = false;
+let accessStatus: StatusMessage | null = null;
+let agentNeedsVerification = false;
+let passkeyDraft = { workspaceName: "", workspaceSlug: "", displayName: "" };
 let workspaceHandoffPending = false;
 let workspaceChoices: WorkspaceAccess[] = [];
 let accessFailure: AccessFailure | null = null;
@@ -533,94 +452,24 @@ function normalizeSession(value: unknown): SessionEnvelope {
   const result = objectValue(value);
   const context: AccessContext = result.context === "auth" || result.context === "root" || result.context === "workspace" ? result.context : "local";
   const nextRootUrl = safeOrigin(result.rootUrl) || (context === "local" ? window.location.origin : "");
-  const nextLogoutUrl = safeRootAccessUrl(result.logoutUrl, nextRootUrl, "/auth/logout") || "";
-  const nextClerkPublishableKey = typeof result.clerkPublishableKey === "string" && result.clerkPublishableKey === result.clerkPublishableKey.trim()
-    ? result.clerkPublishableKey
-    : "";
-  const derivedClerkFrontendApiOrigin = clerkFrontendApiOriginFromPublishableKey(nextClerkPublishableKey) || "";
-  const suppliedClerkFrontendApiOrigin = safeClerkFrontendApiOrigin(result.clerkFrontendApiOrigin) || "";
-  const nextClerkFrontendApiOrigin = suppliedClerkFrontendApiOrigin === derivedClerkFrontendApiOrigin
-    ? suppliedClerkFrontendApiOrigin
-    : "";
-  const expectedClerkSurfaceRole: ClerkSurfaceRole = context === "auth" ? "auth" : context === "root" ? "app" : "";
-  const nextClerkSurfaceRole: ClerkSurfaceRole = result.clerkSurfaceRole === expectedClerkSurfaceRole
-    ? expectedClerkSurfaceRole
-    : "";
-  const nextClerkAuthSignInUrl = safeClerkFlowUrl(result.clerkAuthSignInUrl, "/sign-in") || "";
-  const nextClerkAuthSignUpUrl = safeClerkFlowUrl(result.clerkAuthSignUpUrl, "/sign-up") || "";
-  const nextClerkAllowedRedirectOrigins = arrayValue(result.clerkAllowedRedirectOrigins)
-    .map(safeOrigin)
-    .filter((origin): origin is string => Boolean(origin));
-  const nextClerkFallbackRedirectUrl = safeOrigin(result.clerkFallbackRedirectUrl) || "";
-  const clerkFlowOriginMatches = Boolean(
-    nextClerkAuthSignInUrl &&
-    nextClerkAuthSignUpUrl &&
-    new URL(nextClerkAuthSignInUrl).origin === new URL(nextClerkAuthSignUpUrl).origin
-  );
-  const clerkRuntime = {
-    clerkPublishableKey: nextClerkPublishableKey,
-    clerkFrontendApiOrigin: nextClerkFrontendApiOrigin,
-    clerkSurfaceRole: nextClerkSurfaceRole,
-    clerkAuthSignInUrl: clerkFlowOriginMatches ? nextClerkAuthSignInUrl : "",
-    clerkAuthSignUpUrl: clerkFlowOriginMatches ? nextClerkAuthSignUpUrl : "",
-    clerkAllowedRedirectOrigins: [...new Set(nextClerkAllowedRedirectOrigins)],
-    clerkFallbackRedirectUrl: nextClerkFallbackRedirectUrl
-  };
-  const nextLogoutRetryPending = result.logoutRetryPending === true;
-  const nextLogoutCompletion = context === "root" && result.authenticated === false && result.logoutCompletion === true;
-  const nextLogoutCompletionSessionId = nextLogoutCompletion
-    && typeof result.logoutCompletionSessionId === "string"
-    && Boolean(result.logoutCompletionSessionId)
-    && result.logoutCompletionSessionId === result.logoutCompletionSessionId.trim()
-    ? result.logoutCompletionSessionId
-    : "";
-  if (result.authenticated === false) {
-    return {
-      authenticated: false,
-      context,
-      rootUrl: nextRootUrl,
-      logoutUrl: nextLogoutUrl,
-      ...clerkRuntime,
-      logoutRetryPending: nextLogoutRetryPending,
-      logoutCompletion: nextLogoutCompletion,
-      logoutCompletionSessionId: nextLogoutCompletionSessionId,
-      session: null
-    };
-  }
+  const nextLoginUrl = safeAccessUrl(result.loginUrl, "/sign-in") || "";
+  const intent = objectValue(result.authIntent);
+  const modes: PasskeyMode[] = ["signup", "signin", "setup", "recover", "add", "verify"];
+  const nextIntent = context === "auth" && modes.includes(intent.mode as PasskeyMode) && safeOrigin(intent.rootOrigin) === nextRootUrl
+    ? { mode: intent.mode as PasskeyMode, rootOrigin: nextRootUrl, ...(typeof intent.action === "string" ? { action: intent.action } : {}) }
+    : null;
   const source = objectValue(result.session ?? result.user ?? result.actor ?? result);
-  if (result.authenticated !== true && !source.label && !source.name && !source.email) {
-    return {
-      authenticated: false,
-      context,
-      rootUrl: nextRootUrl,
-      logoutUrl: nextLogoutUrl,
-      ...clerkRuntime,
-      logoutRetryPending: nextLogoutRetryPending,
-      logoutCompletion: nextLogoutCompletion,
-      logoutCompletionSessionId: nextLogoutCompletionSessionId,
-      session: null
-    };
-  }
+  const authenticated = result.authenticated !== false && (result.authenticated === true || Boolean(source.label || source.name || source.email));
   const workspaceSource = objectValue(result.workspace ?? source.workspace);
-  const workspace = workspaceSource.id && workspaceSource.slug
-    ? normalizeWorkspaceAccess(workspaceSource)
-    : undefined;
+  const workspace = workspaceSource.id && workspaceSource.slug ? normalizeWorkspaceAccess(workspaceSource) : undefined;
   return {
-    authenticated: true,
-    context,
-    rootUrl: nextRootUrl,
-    logoutUrl: nextLogoutUrl,
-    ...clerkRuntime,
-    logoutRetryPending: nextLogoutRetryPending,
-    logoutCompletion: nextLogoutCompletion,
-    logoutCompletionSessionId: nextLogoutCompletionSessionId,
-    session: {
+    authenticated, context, rootUrl: nextRootUrl, loginUrl: nextLoginUrl,
+    authIntent: nextIntent, setupAvailable: result.setupAvailable === true,
+    session: authenticated ? {
       authenticated: true,
-      label: String(source.label || source.displayName || source.name || source.email || "Owner"),
-      context,
-      ...(source.email ? { email: String(source.email) } : {}),
-      ...(workspace ? { workspace } : {})
-    }
+      label: String(source.label || source.displayName || source.name || source.email || "Owner"), context,
+      ...(source.email ? { email: String(source.email) } : {}), ...(workspace ? { workspace } : {})
+    } : null
   };
 }
 
@@ -636,277 +485,109 @@ function safeOrigin(value: unknown): string | null {
   }
 }
 
-function safeRootAccessUrl(value: unknown, expectedRootUrl: string, expectedPath: "/auth/logout"): string | null {
-  if (!expectedRootUrl || typeof value !== "string" || !value.trim() || value !== value.trim() || value.includes("\\")) return null;
+function safeAccessUrl(value: unknown, path: string, expectedOrigin?: string): string | null {
+  if (typeof value !== "string" || value !== value.trim() || value.includes("\\")) return null;
   try {
     const parsed = new URL(value);
-    if (parsed.origin !== expectedRootUrl || parsed.pathname !== expectedPath) return null;
-    if (parsed.username || parsed.password || parsed.search || parsed.hash) return null;
+    if (!safeOrigin(parsed.origin) || (expectedOrigin && parsed.origin !== expectedOrigin)) return null;
+    if (parsed.pathname !== path || parsed.username || parsed.password || parsed.search || parsed.hash) return null;
     return parsed.toString();
-  } catch {
-    return null;
+  } catch { return null; }
+}
+
+function submitAuthForm(destination: string, fields: Record<string, string>): void {
+  const form = document.createElement("form");
+  form.method = "POST";
+  form.action = destination;
+  form.hidden = true;
+  for (const [name, value] of Object.entries(fields)) {
+    const input = document.createElement("input");
+    input.type = "hidden";
+    input.name = name;
+    input.value = value;
+    form.append(input);
   }
+  document.body.append(form);
+  try { form.submit(); } finally { form.remove(); }
 }
 
-function safeClerkFrontendApiOrigin(value: unknown): string | null {
-  if (typeof value !== "string" || !value.trim() || value !== value.trim() || value.includes("\\")) return null;
-  try {
-    const parsed = new URL(value);
-    if (parsed.protocol !== "https:" || parsed.origin !== value || parsed.pathname !== "/") return null;
-    if (parsed.username || parsed.password || parsed.port || parsed.search || parsed.hash) return null;
-    if (!isExactDnsHostname(parsed.hostname)) return null;
-    return parsed.origin;
-  } catch {
-    return null;
+async function beginPasskeyFlow(mode: PasskeyMode, action?: string): Promise<void> {
+  if (accessContext === "workspace") {
+    if (!session) { if (rootUrl) window.location.assign(rootUrl); return; }
+    if (action === "api-key") window.sessionStorage.setItem("kanban.cards:open-agents", "1");
+    const destination = new URL("/", rootUrl);
+    destination.searchParams.set("access", mode);
+    if (action) destination.searchParams.set("action", action);
+    window.location.assign(destination.toString());
+    return;
   }
-}
-
-function clerkFrontendApiOriginFromPublishableKey(publishableKey: string): string | null {
-  const match = /^(?:pk_(?:test|live)_)([A-Za-z0-9+/]+)$/.exec(publishableKey);
-  if (!match) return null;
-  try {
-    const encoded = match[1];
-    const decoded = window.atob(encoded);
-    if (window.btoa(decoded).replace(/=+$/, "") !== encoded) return null;
-    if (!decoded.endsWith("$") || decoded.slice(0, -1).includes("$")) return null;
-    const host = decoded.slice(0, -1);
-    const parsed = new URL(`https://${host}`);
-    if (parsed.hostname !== host || parsed.host !== host || parsed.pathname !== "/") return null;
-    if (!isExactDnsHostname(parsed.hostname)) return null;
-    return parsed.origin;
-  } catch {
-    return null;
-  }
-}
-
-function isExactDnsHostname(hostname: string): boolean {
-  if (hostname.length > 253 || !hostname.includes(".")) return false;
-  return hostname.split(".").every((label) => (
-    label.length <= 63
-    && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label)
-  ));
-}
-
-function safeClerkFlowUrl(value: unknown, expectedPath: "/sign-in" | "/sign-up"): string | null {
-  if (typeof value !== "string" || !value.trim() || value !== value.trim() || value.includes("\\")) return null;
-  try {
-    const parsed = new URL(value);
-    if (parsed.pathname !== expectedPath || parsed.search || parsed.hash || parsed.username || parsed.password) return null;
-    if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && isLoopbackHostname(parsed.hostname))) return null;
-    return parsed.toString();
-  } catch {
-    return null;
-  }
-}
-
-function clerkConfigured(): boolean {
-  const expectedSurfaceRole = accessContext === "auth" ? "auth" : accessContext === "root" ? "app" : "";
-  return Boolean(expectedSurfaceRole && clerkSurfaceRole === expectedSurfaceRole &&
-    clerkPublishableKey && clerkFrontendApiOrigin && clerkAuthSignInUrl && clerkAuthSignUpUrl && clerkFallbackRedirectUrl
-  );
-}
-
-function clerkBundleUrl(packageName: "@clerk/ui@1" | "@clerk/clerk-js@6", filename: string): string {
-  if (!clerkConfigured()) throw new Error("Sign-in is unavailable.");
-  const expectedPath = `/npm/${packageName}/dist/${filename}`;
-  const bundle = new URL(expectedPath, `${clerkFrontendApiOrigin}/`);
-  if (bundle.origin !== clerkFrontendApiOrigin || bundle.pathname !== expectedPath || bundle.search || bundle.hash) {
-    throw new Error("Sign-in could not start.");
-  }
-  return bundle.toString();
-}
-
-async function loadClerkScript(source: string, configure?: (script: HTMLScriptElement) => void): Promise<void> {
-  const parsed = new URL(source);
-  if (parsed.origin !== clerkFrontendApiOrigin || !parsed.pathname.startsWith("/npm/@clerk/")) {
-    throw new Error("Sign-in could not start.");
-  }
-  const existing = [...document.scripts].find((script) => script.src === source);
-  if (existing?.dataset.loaded === "true") return;
-  await new Promise<void>((resolve, reject) => {
-    const script = existing || document.createElement("script");
-    const loaded = (): void => {
-      script.dataset.loaded = "true";
-      cleanup();
-      resolve();
-    };
-    const failed = (): void => {
-      cleanup();
-      if (!existing) script.remove();
-      reject(new Error("The sign-in form could not be loaded."));
-    };
-    const cleanup = (): void => {
-      script.removeEventListener("load", loaded);
-      script.removeEventListener("error", failed);
-    };
-    script.addEventListener("load", loaded, { once: true });
-    script.addEventListener("error", failed, { once: true });
-    if (!existing) {
-      script.src = source;
-      script.async = true;
-      script.crossOrigin = "anonymous";
-      configure?.(script);
-      document.head.appendChild(script);
+  if (accessContext === "auth") {
+    if (rootUrl) {
+      const destination = new URL("/", rootUrl);
+      if (authIntent?.mode === "add" || authIntent?.mode === "verify" && authIntent.action === "access-settings") destination.searchParams.set("cancel-access", "1");
+      window.location.assign(destination.toString());
     }
-  });
-}
-
-async function loadClerkRuntime(): Promise<ClerkBrowser> {
-  if (!clerkConfigured()) throw new Error("Sign-in is unavailable.");
-  const signature = [
-    clerkPublishableKey,
-    clerkFrontendApiOrigin,
-    clerkSurfaceRole,
-    clerkAuthSignInUrl,
-    clerkAuthSignUpUrl,
-    clerkFallbackRedirectUrl,
-    ...clerkAllowedRedirectOrigins
-  ].join("\n");
-  if (clerkRuntimePromise && clerkRuntimeSignature === signature) return clerkRuntimePromise;
-  if (clerkRuntimeSignature && clerkRuntimeSignature !== signature) {
-    throw new Error("Sign-in changed while this page was open. Reload and try again.");
+    return;
   }
-  clerkRuntimeSignature = signature;
-  clerkRuntimePromise = (async () => {
-    await loadClerkScript(clerkBundleUrl("@clerk/ui@1", "ui.browser.js"));
-    await loadClerkScript(clerkBundleUrl("@clerk/clerk-js@6", "clerk.browser.js"), (script) => {
-      script.dataset.clerkPublishableKey = clerkPublishableKey;
-    });
-    const clerk = window.Clerk;
-    if (!clerk) throw new Error("The sign-in form could not be loaded.");
-    await clerk.load({
-      ui: { ClerkUI: window.__internal_ClerkUICtor },
-      signInUrl: clerkAuthSignInUrl,
-      signUpUrl: clerkAuthSignUpUrl,
-      localization: {
-        formButtonPrimary: "Continue with email",
-        formFieldLabel__emailAddress: "Email address",
-        signIn: {
-          start: { title: "Sign in", titleCombined: "Sign in", subtitle: "", subtitleCombined: "" }
-        }
-      },
-      appearance: {
-        theme: "simple",
-        variables: {
-          colorPrimary: "var(--jk-color-focus)",
-          colorPrimaryForeground: "var(--jk-color-surface)",
-          colorNeutral: "var(--jk-color-text)",
-          colorForeground: "var(--jk-color-text)",
-          colorMutedForeground: "var(--jk-color-muted)",
-          colorBackground: "var(--jk-color-surface)",
-          colorInput: "var(--jk-color-surface)",
-          colorInputForeground: "var(--jk-color-text)",
-          colorBorder: "var(--jk-color-border)",
-          colorRing: "var(--jk-color-focus)",
-          colorDanger: "var(--jk-color-risk)",
-          borderRadius: "var(--jk-radius-control)",
-          fontFamily: "inherit"
-        },
-        elements: {
-          headerSubtitle: { display: "none" },
-          cardBox: {
-            borderColor: "var(--jk-color-border)",
-            borderRadius: "var(--jk-radius-panel)",
-            boxShadow: "none"
-          },
-          formFieldInput: { minHeight: "2.75rem" },
-          formButtonPrimary: {
-            minHeight: "2.75rem",
-            boxShadow: "none"
-          }
-        }
-      },
-      ...(clerkSurfaceRole === "auth" ? { allowedRedirectOrigins: clerkAllowedRedirectOrigins } : {})
-    });
-    return clerk;
-  })().catch((error) => {
-    clerkRuntimePromise = null;
-    throw error;
-  });
-  return clerkRuntimePromise;
-}
-
-function unmountClerkSignIn(): void {
-  if (!clerkSignInMount) return;
+  if (mode === "add" || action === "access-settings") window.sessionStorage.setItem("kanban.cards:open-access", "1");
+  setWorkspaceMutationsDisabled(true, "sign-in");
+  authNotice = null;
+  render();
   try {
-    window.Clerk?.unmountSignIn?.(clerkSignInMount);
-    window.Clerk?.unmountSignUp?.(clerkSignInMount);
-  } catch {
-    // The surrounding application view is authoritative even if Clerk already removed its node.
-  }
-  clerkSignInMount = null;
-}
-
-async function mountClerkSignIn(node: HTMLDivElement): Promise<void> {
-  try {
-    const clerk = await loadClerkRuntime();
-    if (!node.isConnected || session || (accessContext !== "auth" && accessContext !== "root")) return;
-    if (clerkSurfaceRole === "app") {
-      const signInUrl = safeBuiltClerkFlowUrl(
-        clerk.buildSignInUrl?.({ redirectUrl: rootUrl }),
-        clerkAuthSignInUrl,
-        rootUrl
-      );
-      if (!signInUrl) throw new Error("Sign-in could not start. Try again.");
-      window.location.replace(signInUrl);
+    const payload = objectValue(await api("/auth-start", { method: "POST", body: { mode, ...(action ? { action } : {}) } }));
+    const expectedOrigin = loginUrl ? new URL(loginUrl).origin : "";
+    const destination = expectedOrigin && safeAccessUrl(payload.destination, "/api/passkeys/start", expectedOrigin);
+    if (!destination || safeOrigin(payload.rootOrigin) !== rootUrl || typeof payload.intentToken !== "string" || !payload.intentToken || typeof payload.browserNonce !== "string" || !payload.browserNonce) throw new Error("Sign-in could not start. Try again.");
+    submitAuthForm(destination, { intentToken: payload.intentToken, browserNonce: payload.browserNonce, rootOrigin: rootUrl });
+  } catch (error) {
+    setWorkspaceMutationsDisabled(false);
+    if (mode === "add" && error instanceof ApiError && error.status === 403) {
+      window.sessionStorage.setItem("kanban.cards:add-passkey-after-verify", "1");
+      await beginPasskeyFlow("verify", "access-settings");
       return;
     }
-    node.replaceChildren();
-    clerk.mountSignIn(node, {
-      routing: "hash",
-      withSignUp: true,
-      transferable: true,
-      fallbackRedirectUrl: clerkFallbackRedirectUrl
-    });
-    clerkSignInMount = node;
-  } catch {
-    if (!node.isConnected) return;
-    clerkSignInBlocked = true;
-    authNotice = {
-      kind: "service-unavailable",
-      title: "Sign-in is unavailable",
-      message: "Try again later."
-    };
+    authNotice = { kind: "service-unavailable", title: "Sign-in could not start", message: error instanceof Error ? error.message : "Try again." };
+    accessStatus = { tone: "error", title: "Verification could not start", message: authNotice.message };
     render();
   }
 }
 
-async function navigateToClerkSignIn(): Promise<void> {
-  const clerk = await loadClerkRuntime();
-  const signInUrl = safeBuiltClerkFlowUrl(clerk.buildSignInUrl?.({ redirectUrl: rootUrl }), clerkAuthSignInUrl, rootUrl);
-  if (!signInUrl) throw new Error("Sign-in could not start. Try again.");
-  window.location.assign(signInUrl);
+async function performPasskeyCeremony(form: HTMLFormElement): Promise<void> {
+  if (!authIntent) return;
+  const data = new FormData(form);
+  passkeyDraft = { workspaceName: cleanValue(String(data.get("workspaceName") || "")), workspaceSlug: cleanValue(String(data.get("workspaceSlug") || "")).toLowerCase(), displayName: cleanValue(String(data.get("displayName") || "")) };
+  const body = { ...passkeyDraft, mode: authIntent.mode, setupToken: String(data.get("setupToken") || ""), recoveryCode: String(data.get("recoveryCode") || "") };
+  form.reset();
+  authNotice = null;
+  setWorkspaceMutationsDisabled(true, "sign-in");
+  render();
+  try {
+    const payload = objectValue(await api("/passkeys/options", { method: "POST", body }));
+    const response = payload.ceremony === "registration"
+      ? await startRegistration({ optionsJSON: payload.options as PublicKeyCredentialCreationOptionsJSON })
+      : await startAuthentication({ optionsJSON: payload.options as PublicKeyCredentialRequestOptionsJSON });
+    const verified = objectValue(await api("/passkeys/verify", { method: "POST", body: { challengeId: payload.challengeId, response } }));
+    const destination = safeAccessUrl(verified.destination, "/api/auth-handoff", authIntent.rootOrigin);
+    if (verified.authenticated !== true || !destination || typeof verified.handoffToken !== "string" || !verified.handoffToken) throw new Error("Passkey access could not be completed. Try again.");
+    pendingAuthHandoff = { destination, token: verified.handoffToken };
+    passkeyDraft = { workspaceName: "", workspaceSlug: "", displayName: "" };
+    if (typeof verified.recoveryCode === "string" && verified.recoveryCode) {
+      recoveryCode = verified.recoveryCode;
+      pendingFocusId = "recovery-title";
+    } else {
+      submitAuthForm(destination, { handoffToken: verified.handoffToken });
+    }
+  } catch (error) {
+    const cancelled = error instanceof Error && (error.name === "NotAllowedError" || error.name === "AbortError");
+    authNotice = { kind: "service-unavailable", title: cancelled ? "Passkey request cancelled" : "Passkey access did not complete", message: cancelled ? "Try again when you’re ready." : error instanceof Error ? error.message : "Try again." };
+  } finally {
+    setWorkspaceMutationsDisabled(false);
+    render();
+  }
 }
 
-function safeBuiltClerkFlowUrl(value: unknown, configuredUrl: string, requiredRedirectUrl: string): string | null {
-  if (typeof value !== "string" || !value.trim() || value !== value.trim() || value.includes("\\")) return null;
-  try {
-    const parsed = new URL(value);
-    const configured = new URL(configuredUrl);
-    const requiredRedirectOrigin = safeOrigin(requiredRedirectUrl);
-    if (!requiredRedirectOrigin || requiredRedirectOrigin !== requiredRedirectUrl) return null;
-    const fragment = parsed.hash.slice(1);
-    const querySeparator = fragment.indexOf("?");
-    if (querySeparator < 0 || fragment.slice(0, querySeparator) !== "/") return null;
-    const fragmentParams = new URLSearchParams(fragment.slice(querySeparator + 1));
-    const fragmentEntries = [...fragmentParams.entries()];
-    const redirectUrls = fragmentParams.getAll("redirect_url");
-    const redirectOrigin = redirectUrls.length === 1 ? safeOrigin(redirectUrls[0]) : null;
-    if (
-      parsed.origin !== configured.origin ||
-      parsed.pathname !== configured.pathname ||
-      parsed.username ||
-      parsed.password ||
-      parsed.search ||
-      fragmentEntries.length !== 1 ||
-      fragmentEntries[0][0] !== "redirect_url" ||
-      redirectUrls.length !== 1 ||
-      redirectOrigin !== requiredRedirectOrigin
-    ) return null;
-    return parsed.toString();
-  } catch {
-    return null;
-  }
+function renderRecoveryCode(): string {
+  return `<section class="access-card jk-panel" aria-labelledby="recovery-title"><p class="product-name">kanban.cards</p><h1 id="recovery-title" tabindex="-1">Save your recovery code</h1><p>Use this code if you lose your passkeys. Store it somewhere private, such as your password manager. It is shown once.</p><code class="recovery-code" id="recovery-code">${escapeHtml(recoveryCode)}</code><div class="jk-actions">${renderButton("Copy code", "copy-recovery-code")}${renderButton("Download code", "download-recovery-code")}</div>${renderButton("I saved my recovery code", "continue-after-recovery", { priority: "primary" })}</section>`;
 }
 
 function safeWorkspaceHandoffUrl(value: unknown, workspaceUrl: string): string | null {
@@ -1213,30 +894,21 @@ function renderSignIn(): string {
     : "";
   const errorId = authNotice?.kind === "invalid-key" ? "access-status" : undefined;
   if (accessContext !== "local") {
-    const retry = authNotice?.kind === "sign-out-incomplete" && logoutUrl
-      ? `<button class="jk-button" data-priority="primary" type="button" data-action="retry-global-sign-out"${disabledAttribute()}>Retry global sign-out</button>`
-      : "";
     if (accessContext === "auth") {
-      const clerkSurface = clerkConfigured() && !clerkSignInBlocked
-        ? `<div id="clerk-sign-in" role="region" aria-label="Sign in"><p class="quiet" role="status">Loading…</p></div>`
-        : `<div class="jk-actions"><button id="provider-sign-in" class="jk-button" data-priority="primary" type="button" data-action="provider-sign-in">Try again</button></div>`;
-      return `<main class="access-view clerk-access-view">${notice}${clerkSurface}</main>`;
+      if (recoveryCode) return `<main class="access-view">${renderRecoveryCode()}</main>`;
+      if (!authIntent) return `<main class="access-view"><section class="access-card jk-panel"><p class="product-name">kanban.cards</p><h1>Open kanban.cards to continue</h1><p>Start from your app to create a Workspace or sign in.</p>${renderButton("Continue", "passkey-sign-in", { priority: "primary", disabled: !rootUrl })}</section></main>`;
+      const mode = authIntent.mode;
+      const heading = mode === "signup" ? "Create your Workspace" : mode === "setup" ? "Set up your passkey" : mode === "recover" ? "Recover your account" : mode === "add" ? "Add a passkey" : mode === "verify" ? "Verify your identity" : "Sign in";
+      const workspaceFields = mode === "signup" ? renderField({ id: "signup-workspace-name", label: "Workspace name", control: renderTextInput({ id: "signup-workspace-name", name: "workspaceName", value: passkeyDraft.workspaceName, required: true, autofocus: true }) }) + renderField({ id: "signup-workspace-slug", label: "Workspace address", control: renderTextInput({ id: "signup-workspace-slug", name: "workspaceSlug", value: passkeyDraft.workspaceSlug, required: true, placeholder: "your-workspace" }), hint: "Lowercase letters, numbers, and hyphens." }) + renderField({ id: "signup-display-name", label: "Your name (optional)", control: renderTextInput({ id: "signup-display-name", name: "displayName", value: passkeyDraft.displayName, autocomplete: "name" }) }) : "";
+      const secretField = mode === "setup" || mode === "recover" ? renderField({ id: "passkey-access-code", label: mode === "setup" ? "Setup token" : "Recovery code", control: renderTextInput({ id: "passkey-access-code", name: mode === "setup" ? "setupToken" : "recoveryCode", type: "password", autocomplete: "off", required: true, autofocus: true }) }) : "";
+      const registering = ["signup", "setup", "recover", "add"].includes(mode);
+      return `<main class="access-view"><section class="access-card jk-panel" aria-labelledby="access-title"><p class="product-name">kanban.cards</p><h1 id="access-title">${heading}</h1><p>${registering ? "Use your device or password manager to save a passkey." : "Use your passkey to continue."}</p>${notice}<form data-form="passkey" class="access-form">${workspaceFields}${secretField}<button class="jk-button" data-priority="primary" type="submit"${disabledAttribute()}>${mutationInFlight ? "Waiting for your passkey…" : registering ? "Create passkey" : "Continue with passkey"}</button></form>${renderButton("Back", "passkey-sign-in")}</section></main>`;
     }
     if (accessContext === "root") {
-      if (authNotice?.kind === "signed-out") {
-        return `<main class="access-view"><section class="access-card jk-panel" aria-labelledby="access-title"><p class="product-name">kanban.cards</p><h1 id="access-title">Signed out</h1><div class="jk-actions"><button id="provider-sign-in" class="jk-button" data-priority="primary" type="button" data-action="provider-sign-in">Start free</button></div></section></main>`;
-      }
-      const clerkSignIn = retry
-        ? ""
-        : authNotice?.kind === "access-denied" && clerkConfigured()
-          ? `<div class="jk-actions"><button id="provider-sign-in" class="jk-button" data-priority="primary" type="button" data-action="clerk-change-account">Use another account</button></div>`
-          : `<div class="jk-actions"><button id="provider-sign-in" class="jk-button" data-priority="primary" type="button" data-action="provider-sign-in">Start free</button></div>`;
-      const configurationNotice = !clerkConfigured() && !authNotice
-        ? renderStatus({ tone: "error", title: "Sign-in is unavailable", message: "Try again later." }, "clerk-configuration-status")
-        : "";
-      return `<main class="access-view"><section class="access-card jk-panel" aria-labelledby="access-title"><p class="product-name">kanban.cards</p><h1 id="access-title">Sign in</h1>${notice}${configurationNotice}${retry}${clerkSignIn}</section></main>`;
+      if (authNotice?.kind === "signed-out") return `<main class="access-view"><section class="access-card jk-panel" aria-labelledby="access-title"><p class="product-name">kanban.cards</p><h1 id="access-title">Signed out</h1>${renderButton("Continue", "signed-out-continue", { priority: "primary" })}</section></main>`;
+      return `<main class="access-view"><section class="access-card jk-panel" aria-labelledby="access-title"><p class="product-name">kanban.cards</p><h1 id="access-title">Open your Workspace</h1>${notice}<div class="jk-actions">${renderButton("Start free", "start-signup", { priority: "primary", disabled: !loginUrl })}${renderButton("Sign in", "passkey-sign-in", { disabled: !loginUrl })}</div>${renderButton("Recover access", "start-recovery", { disabled: !loginUrl })}${setupAvailable ? renderButton("Set up existing account", "start-setup", { disabled: !loginUrl }) : ""}${authNotice?.kind === "sign-out-incomplete" ? renderButton("Retry sign out", "retry-global-sign-out") : ""}</section></main>`;
     }
-    return `<main class="access-view"><section class="access-card jk-panel" aria-labelledby="access-title"><p class="product-name">kanban.cards</p><h1 id="access-title">Sign in</h1>${notice}${retry}<button id="provider-sign-in" class="jk-button" data-priority="${retry ? "secondary" : "primary"}" type="button" data-action="provider-sign-in"${disabledAttribute(!rootUrl)}>Continue</button></section></main>`;
+    return `<main class="access-view"><section class="access-card jk-panel"><p class="product-name">kanban.cards</p><h1>Sign in</h1>${notice}${renderButton("Continue", "passkey-sign-in", { priority: "primary", disabled: !rootUrl })}${authNotice?.kind === "sign-out-incomplete" ? renderButton("Retry sign out", "retry-global-sign-out") : ""}</section></main>`;
   }
   return `<main class="access-view"><section class="access-card jk-panel" aria-labelledby="access-title"><p class="product-name">kanban.cards</p><div><p class="eyebrow">Local workspace</p><h1 id="access-title">Open your workspace</h1><p class="access-description">Use the local owner key to open this development workspace.</p></div>${notice}<form data-form="sign-in" class="access-form" novalidate>${renderField({
     id: "owner-key",
@@ -1273,13 +945,41 @@ function renderWorkspaceRoute(): string {
       control: renderTextInput({ id: "workspace-slug", name: "slug", required: true, placeholder: "example" }),
       hint: "Use lowercase letters, numbers, and hyphens."
     })}<button class="jk-button" data-priority="primary" type="submit"${disabledAttribute()}>${mutationKind === "workspace" ? "Creating…" : "Create Workspace"}</button></form>`;
-  return `<main class="access-view"><section class="access-card workspace-route-card jk-panel" aria-labelledby="workspace-route-title"><p class="product-name">kanban.cards</p>${chooser}${failure}<div class="workspace-route-footer"><span>${escapeHtml(ownerName())}</span>${renderButton("Sign out", "sign-out")}</div></section></main>`;
+  return `<main class="access-view"><section class="access-card workspace-route-card jk-panel" aria-labelledby="workspace-route-title"><p class="product-name">kanban.cards</p>${chooser}${failure}<div class="workspace-route-footer"><span>${escapeHtml(ownerName())}</span>${renderButton("Manage access", "manage-access")}${renderButton("Sign out", "sign-out")}</div></section></main>`;
 }
 
 function renderHeader(): string {
   const name = ownerName();
   const editingProject = projectEditorMode !== null || addColumnPreparing || addColumnCommitted || addColumnDraft !== null;
-  return `<header class="app-header"><div class="header-primary"><span class="product-name">kanban.cards</span>${renderProjectContext()}</div><div class="profile-menu"><button class="avatar-button" type="button" data-action="toggle-account-panel" aria-label="${accountPanelOpen ? "Close" : "Open"} account panel" aria-expanded="${accountPanelOpen ? "true" : "false"}" aria-controls="account-panel"${disabledAttribute(editingProject)}><span aria-hidden="true">${escapeHtml(ownerInitial())}</span></button>${accountPanelOpen ? `<section id="account-panel" class="menu-panel account-panel" aria-labelledby="account-name"><strong id="account-name">${escapeHtml(name)}</strong>${accessContext === "workspace" ? renderButton("Agent connections", "manage-agents", { disabled: editingProject }) : ""}${renderButton("Sign out", "sign-out", { disabled: editingProject })}</section>` : ""}</div></header>`;
+  return `<header class="app-header"><div class="header-primary"><span class="product-name">kanban.cards</span>${renderProjectContext()}</div><div class="profile-menu"><button class="avatar-button" type="button" data-action="toggle-account-panel" aria-label="${accountPanelOpen ? "Close" : "Open"} account panel" aria-expanded="${accountPanelOpen ? "true" : "false"}" aria-controls="account-panel"${disabledAttribute(editingProject)}><span aria-hidden="true">${escapeHtml(ownerInitial())}</span></button>${accountPanelOpen ? `<section id="account-panel" class="menu-panel account-panel" aria-labelledby="account-name"><strong id="account-name">${escapeHtml(name)}</strong>${accessContext === "workspace" ? renderButton("Agent connections", "manage-agents", { disabled: editingProject }) : ""}${accessContext !== "local" ? renderButton("Manage access", "manage-access", { disabled: editingProject }) : ""}${renderButton("Sign out", "sign-out", { disabled: editingProject })}</section>` : ""}</div></header>`;
+}
+
+function renderAccessSettings(): string {
+  const passkeys = accessSettings?.passkeys.map((key) => `<li><strong>Passkey</strong><p class="quiet">Added ${escapeHtml(formatDate(key.createdAt))}${key.lastUsedAt ? ` · Last used ${escapeHtml(formatDate(key.lastUsedAt))}` : ""}</p>${renderButton("Remove passkey", "remove-passkey", { disabled: (accessSettings?.passkeys.length || 0) < 2, data: `data-passkey-id="${escapeHtml(key.id)}"` })}</li>`).join("") || "<li>No passkeys found.</li>";
+  const sessions = accessSettings?.sessions.map((item) => `<li><strong>${item.current ? "This browser" : "Browser session"}</strong><p class="quiet">Expires ${escapeHtml(formatDate(item.expiresAt))}</p>${item.current ? "" : renderButton("End session", "end-session", { data: `data-session-id="${escapeHtml(item.id)}"` })}</li>`).join("") || "<li>No other browser sessions.</li>";
+  return `<main class="access-view">${recoveryCode ? renderRecoveryCode() : `<section class="access-card jk-panel"><p class="product-name">kanban.cards</p><h1>Manage access</h1>${renderStatus(accessStatus, "access-settings-status")}<h2>Passkeys</h2><ul class="workspace-choices">${passkeys}</ul>${renderButton("Add a passkey", "add-passkey", { priority: "primary" })}<h2>Recovery</h2><p>Replacing your recovery code makes the previous code unusable.</p>${renderButton("Replace recovery code", "replace-recovery-code")}<h2>Browser sessions</h2><ul class="workspace-choices">${sessions}</ul><div class="jk-actions">${renderButton("Sign out everywhere", "sign-out-everywhere")}${renderButton("Back to Workspaces", "close-access")}</div></section>`}</main>`;
+}
+
+async function loadAccessSettings(): Promise<void> {
+  const payload = objectValue(await api("/access-settings"));
+  accessSettings = {
+    passkeys: arrayValue(payload.passkeys).map((value) => { const key = objectValue(value); return { id: String(key.id || ""), createdAt: String(key.createdAt || ""), lastUsedAt: key.lastUsedAt ? String(key.lastUsedAt) : null }; }),
+    sessions: arrayValue(payload.sessions).map((value) => { const item = objectValue(value); return { id: String(item.id || ""), createdAt: String(item.createdAt || ""), expiresAt: String(item.expiresAt || ""), current: item.current === true }; })
+  };
+}
+
+async function changeAccessSetting(path: string, method: "POST" | "DELETE"): Promise<void> {
+  setWorkspaceMutationsDisabled(true, "sign-in");
+  accessStatus = null;
+  render();
+  try {
+    const payload = objectValue(await api(path, { method }));
+    if (typeof payload.recoveryCode === "string") recoveryCode = payload.recoveryCode;
+    await loadAccessSettings();
+  } catch (error) {
+    accessStatus = { tone: "error", title: "Access was not changed", message: error instanceof Error ? error.message : "Try again." };
+    if (error instanceof ApiError && error.status === 403) { setWorkspaceMutationsDisabled(false); await beginPasskeyFlow("verify", "access-settings"); return; }
+  } finally { setWorkspaceMutationsDisabled(false); render(); }
 }
 
 function renderAgentConnections(): string {
@@ -1289,7 +989,7 @@ function renderAgentConnections(): string {
   const labelField = renderField({ id: "agent-label", label: "Label", control: renderTextInput({ id: "agent-label", name: "label", required: true }) });
   const scopeField = renderField({ id: "agent-scopes", label: "Scopes", control: renderSelect({ id: "agent-scopes", name: "scopes", value: "read-write", choices: [{ value: "read", label: "Read only" }, { value: "write", label: "Write only" }, { value: "read-write", label: "Read and write" }] }) });
   const expiryField = renderField({ id: "agent-expires-at", label: "Expires (optional)", control: renderTextInput({ id: "agent-expires-at", name: "expiresAt", type: "datetime-local" }), hint: "Leave blank for no expiry." });
-  return `<section class="access-card jk-panel" aria-labelledby="agent-connections-title"><div><p class="eyebrow">${escapeHtml(session?.workspace?.name || "Workspace")}</p><h1 id="agent-connections-title">Agent connections</h1><p>Credentials are bound to this Workspace. Read allows reads; write allows bounded mutations.</p></div>${credential}<form data-form="agent-connection" class="access-form">${labelField}${scopeField}${expiryField}<button class="jk-button" data-priority="primary" type="submit"${disabledAttribute()}>${mutationKind === "agent" ? "Creating…" : "Create connection"}</button></form><ul class="workspace-choices">${rows || "<li>No agent connections yet.</li>"}</ul>${renderButton("Back to board", "close-agents")}</section>`;
+  return `<section class="access-card jk-panel" aria-labelledby="agent-connections-title"><div><p class="eyebrow">${escapeHtml(session?.workspace?.name || "Workspace")}</p><h1 id="agent-connections-title">Agent connections</h1><p>Credentials are bound to this Workspace. Read allows reads; write allows bounded mutations.</p></div>${credential}${agentNeedsVerification ? `<div class="jk-status" data-kind="warning" role="status"><div><strong>Verify your identity to create an API key</strong><p>Confirm with your passkey, then return here.</p>${renderButton("Verify identity", "verify-identity", { priority: "primary" })}</div></div>` : ""}<form data-form="agent-connection" class="access-form">${labelField}${scopeField}${expiryField}<button class="jk-button" data-priority="primary" type="submit"${disabledAttribute()}>${mutationKind === "agent" ? "Creating…" : "Create connection"}</button></form><ul class="workspace-choices">${rows || "<li>No agent connections yet.</li>"}</ul>${renderButton("Back to board", "close-agents")}</section>`;
 }
 
 function renderProjectContext(): string {
@@ -1748,16 +1448,13 @@ function render(): void {
     clearConfirmation();
   }
   document.body.dataset.state = currentUiState();
-  unmountClerkSignIn();
   root.innerHTML = initialLoading || workspaceHandoffPending
     ? renderLoading()
     : signOutPending
       ? renderSignOutProgress()
       : session
-        ? accessContext === "root" ? renderWorkspaceRoute() : renderWorkspace()
+        ? accessContext === "root" ? accessPanelOpen ? renderAccessSettings() : renderWorkspaceRoute() : renderWorkspace()
         : renderSignIn();
-  const clerkSignIn = root.querySelector<HTMLDivElement>("#clerk-sign-in");
-  if (clerkSignIn) void mountClerkSignIn(clerkSignIn);
   restoreDescriptionSelection();
   restorePendingContext();
 }
@@ -1855,6 +1552,12 @@ function clearPrivateState(notice: AuthNotice | null): void {
   agentConnections = [];
   agentPanelOpen = false;
   issuedAgentCredential = "";
+  agentNeedsVerification = false;
+  accessSettings = null;
+  accessPanelOpen = false;
+  accessStatus = null;
+  recoveryCode = "";
+  pendingAuthHandoff = null;
   projects = [];
   activeProject = null;
   selectedCardId = null;
@@ -1894,6 +1597,9 @@ function clearPrivateState(notice: AuthNotice | null): void {
   projectActionsOpen = false;
   setWorkspaceMutationsDisabled(false);
   window.localStorage.removeItem("kanban.cards:project-id");
+  window.sessionStorage.removeItem("kanban.cards:open-agents");
+  window.sessionStorage.removeItem("kanban.cards:open-access");
+  window.sessionStorage.removeItem("kanban.cards:add-passkey-after-verify");
   authNotice = notice;
 }
 
@@ -1902,63 +1608,14 @@ async function loadSession(): Promise<void> {
     const result = normalizeSession(await api("/session"));
     accessContext = result.context;
     rootUrl = result.rootUrl;
-    logoutUrl = result.logoutUrl;
-    clerkPublishableKey = result.clerkPublishableKey;
-    clerkFrontendApiOrigin = result.clerkFrontendApiOrigin;
-    clerkSurfaceRole = result.clerkSurfaceRole;
-    clerkAuthSignInUrl = result.clerkAuthSignInUrl;
-    clerkAuthSignUpUrl = result.clerkAuthSignUpUrl;
-    clerkAllowedRedirectOrigins = result.clerkAllowedRedirectOrigins;
-    clerkFallbackRedirectUrl = result.clerkFallbackRedirectUrl;
-    logoutRetryPending = result.logoutRetryPending;
-    logoutCompletion = result.logoutCompletion;
-    logoutCompletionSessionId = result.logoutCompletionSessionId;
+    loginUrl = result.loginUrl;
+    authIntent = result.authIntent;
+    setupAvailable = result.setupAvailable;
     session = result.session;
   } catch (error) {
     if (error instanceof ApiError && error.status === 401) session = null;
     else throw error;
   }
-}
-
-async function synchronizeClerkSession(): Promise<boolean> {
-  if (!clerkConfigured() || accessContext !== "root") return false;
-  const clerk = await loadClerkRuntime();
-  if (!clerk.isSignedIn) return false;
-  await api("/clerk-session", { method: "POST" });
-  await loadSession();
-  if (!session) throw new Error("Sign-in could not be completed. Try again.");
-  clerkSignInBlocked = false;
-  authNotice = null;
-  return true;
-}
-
-function clearSignOutState(): void {
-  const currentUrl = new URL(window.location.href);
-  if (!currentUrl.searchParams.has("signout")) return;
-  currentUrl.searchParams.delete("signout");
-  window.history.replaceState(null, "", `${currentUrl.pathname}${currentUrl.search}${currentUrl.hash}`);
-}
-
-async function completeClerkSignOut(sessionId: string): Promise<void> {
-  if (!clerkConfigured()) throw new Error("Sign-out is unavailable.");
-  if (!sessionId || sessionId !== sessionId.trim()) throw new Error("Sign-out could not be completed. Try again.");
-  const clerk = await loadClerkRuntime();
-  const browserSessions = clerk.client?.signedInSessions;
-  if (!Array.isArray(browserSessions)) throw new Error("Sign-out could not be completed. Try again.");
-  const targetSession = browserSessions.find((candidate) => candidate.id === sessionId);
-  if (targetSession) await targetSession.end();
-  const remainingSessions = clerk.client?.signedInSessions;
-  if (!Array.isArray(remainingSessions) || remainingSessions.some((candidate) => candidate.id === sessionId)) {
-    throw new Error("Sign-out could not be completed. Try again.");
-  }
-  await acknowledgeLogoutCompletion();
-}
-
-async function acknowledgeLogoutCompletion(): Promise<void> {
-  await api("/logout-completion", { method: "DELETE" });
-  logoutCompletion = false;
-  logoutCompletionSessionId = "";
-  clearSignOutState();
 }
 
 async function loadWorkspaceChoices(): Promise<void> {
@@ -2004,24 +1661,6 @@ function submitWorkspaceHandoff(destination: URL, token: string): void {
   input.type = "hidden";
   input.name = "token";
   input.value = token;
-  form.append(input);
-  document.body.append(form);
-  try {
-    form.submit();
-  } finally {
-    form.remove();
-  }
-}
-
-function submitLogoutCompletion(destination: URL, continuation: string): void {
-  const form = document.createElement("form");
-  form.method = "POST";
-  form.action = destination.toString();
-  form.hidden = true;
-  const input = document.createElement("input");
-  input.type = "hidden";
-  input.name = "continuation";
-  input.value = continuation;
   form.append(input);
   document.body.append(form);
   try {
@@ -2078,7 +1717,11 @@ async function createAgentConnection(form: HTMLFormElement): Promise<void> {
   try {
     const payload = objectValue(await api("/agent-connections", { method: "POST", body: { label: cleanValue(String(data.get("label") || "")), scopes, expiresAt } }));
     issuedAgentCredential = String(payload.credential || "");
+    agentNeedsVerification = false;
     await loadAgentConnections();
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 403) agentNeedsVerification = true;
+    else throw error;
   } finally {
     setWorkspaceMutationsDisabled(false);
     render();
@@ -2210,53 +1853,24 @@ async function signIn(form: HTMLFormElement): Promise<void> {
 }
 
 async function signOut(): Promise<void> {
-  let notice: AuthNotice | null = accessContext === "local"
-    ? {
-        kind: "signed-out",
-        title: "Signed out",
-        message: ""
-      }
-    : null;
-  let completionSubmitted = false;
   signOutPending = true;
   render();
   try {
     await flushCardAutosaves();
     clearPrivateState(null);
     const response = objectValue(await api("/session", { method: "DELETE" }));
-    const next = safeRootAccessUrl(response.logoutUrl, rootUrl, "/auth/logout") || "";
-    const continuation = typeof response.logoutContinuation === "string"
-      && response.logoutContinuation
-      && response.logoutContinuation === response.logoutContinuation.trim()
-      ? response.logoutContinuation
-      : "";
-    if (next && continuation) {
-      submitLogoutCompletion(new URL(next), continuation);
-      completionSubmitted = true;
+    if (accessContext !== "local" && (response.signedOutHere !== true || response.globalSignOutComplete !== true)) throw new Error("Sign-out could not be confirmed.");
+    if (accessContext !== "local" && rootUrl && rootUrl !== window.location.origin) {
+      window.location.replace(`${rootUrl}/?signedout=1`);
       return;
     }
-    if (accessContext !== "local") throw new Error("Global sign-out did not return a trusted completion route.");
-  } catch (error) {
-    const incompleteGlobalSignOut = error instanceof ApiError &&
-      error.status === 503 &&
-      error.message === "Global sign-out could not be completed.";
-    notice = incompleteGlobalSignOut
-      ? {
-          kind: "sign-out-incomplete",
-          title: "Sign-out incomplete",
-          message: "Private data left this screen and this Workspace session was cleared, but another Workspace session may still be active. Try signing out again when the service recovers."
-        }
-      : {
-          kind: "service-unavailable",
-          title: "Sign-out could not be confirmed",
-          message: "Private data left this screen, but the service did not confirm session revocation. Try signing out again before leaving this device."
-        };
+    clearPrivateState({ kind: "signed-out", title: "Signed out", message: "" });
+  } catch {
+    clearPrivateState({ kind: "sign-out-incomplete", title: "Sign-out could not be confirmed", message: "Private data left this screen. Retry sign out before leaving this device." });
   } finally {
-    if (completionSubmitted) return;
     signOutPending = false;
-    clearPrivateState(notice);
     render();
-    pendingFocusId = accessContext === "local" ? "owner-key" : "provider-sign-in";
+    pendingFocusId = accessContext === "local" ? "owner-key" : "access-title";
     restorePendingContext();
   }
 }
@@ -3343,80 +2957,53 @@ async function switchProject(projectId: string): Promise<void> {
 function handlePrivateError(error: unknown): boolean {
   if (!(error instanceof ApiError) || error.status !== 401) return false;
   clearPrivateState({ kind: "session-expired", title: "Your session ended", message: "Private Project and Card data left the screen. Sign in again to continue." });
-  pendingFocusId = accessContext === "local" ? "owner-key" : "provider-sign-in";
+  if (accessContext === "local") pendingFocusId = "owner-key";
+  else pendingFocusRestore = { action: "passkey-sign-in", occurrence: 0 };
   render();
   return true;
 }
 
 async function handleAction(button: HTMLElement): Promise<void> {
   const action = button.dataset.action || "";
-  if (action === "clerk-change-account") {
+  if (action === "passkey-sign-in") return beginPasskeyFlow("signin");
+  if (action === "start-signup") return beginPasskeyFlow("signup");
+  if (action === "start-recovery") return beginPasskeyFlow("recover");
+  if (action === "start-setup") return beginPasskeyFlow("setup");
+  if (action === "verify-identity") return beginPasskeyFlow("verify", "api-key");
+  if (action === "add-passkey") return beginPasskeyFlow("add");
+  if (action === "retry-global-sign-out") return signOut();
+  if (action === "sign-out-everywhere") {
     try {
-      const clerk = await loadClerkRuntime();
-      const sessionId = clerk.session?.id;
-      if (!sessionId) throw new Error("The account could not be changed. Try again.");
-      await clerk.signOut({ sessionId, redirectUrl: rootUrl });
-    } catch {
-      clerkSignInBlocked = true;
-      authNotice = {
-        kind: "service-unavailable",
-        title: "Account change is unavailable",
-        message: "Try again later."
-      };
-      render();
+      await api("/sessions/all", { method: "DELETE" });
+      clearPrivateState({ kind: "signed-out", title: "Signed out", message: "" });
+      if (rootUrl !== window.location.origin) window.location.replace(`${rootUrl}/?signedout=1`);
+      else render();
+    } catch (error) {
+      if (handlePrivateError(error)) return;
+      accessStatus = { tone: "error", title: "Sign-out could not be confirmed", message: "Try again before leaving this device." }; render();
     }
     return;
   }
-  if (action === "provider-sign-in") {
-    if (accessContext === "workspace" && rootUrl) {
-      window.location.assign(rootUrl);
-      return;
-    }
-    if (accessContext === "auth" || accessContext === "root") {
-      clerkSignInBlocked = false;
-      authNotice = null;
-      if (accessContext === "root") {
-        try {
-          await navigateToClerkSignIn();
-        } catch {
-          clerkSignInBlocked = true;
-          authNotice = { kind: "service-unavailable", title: "Sign-in is unavailable", message: "Try again later." };
-          render();
-        }
-      } else window.location.reload();
-    }
+  if (action === "signed-out-continue") { authNotice = null; render(); return; }
+  if (action === "copy-recovery-code") { await navigator.clipboard.writeText(recoveryCode); button.textContent = "Copied"; return; }
+  if (action === "download-recovery-code") {
+    const url = URL.createObjectURL(new Blob([`kanban.cards recovery code\n\n${recoveryCode}\n\nKeep this code private.\n`], { type: "text/plain" }));
+    const link = document.createElement("a"); link.href = url; link.download = "kanban-cards-recovery-code.txt"; link.click(); URL.revokeObjectURL(url); return;
+  }
+  if (action === "continue-after-recovery") {
+    recoveryCode = "";
+    if (pendingAuthHandoff) { const handoff = pendingAuthHandoff; pendingAuthHandoff = null; submitAuthForm(handoff.destination, { handoffToken: handoff.token }); }
+    else render();
     return;
   }
-  if (action === "retry-global-sign-out" && logoutUrl) {
-    if (
-      !session
-      && accessContext === "root"
-      && !logoutRetryPending
-      && logoutCompletion
-      && logoutCompletionSessionId
-    ) {
-      try {
-        await completeClerkSignOut(logoutCompletionSessionId);
-        clearPrivateState({
-          kind: "signed-out",
-          title: "Signed out",
-          message: ""
-        });
-        render();
-      } catch {
-        clerkSignInBlocked = true;
-        clearPrivateState({
-          kind: "sign-out-incomplete",
-          title: "Sign-out incomplete",
-          message: "Sign-out could not be completed. Try again."
-        });
-        render();
-      }
-      return;
-    }
-    await signOut();
-    return;
+  if (action === "manage-access") {
+    if (accessContext === "workspace") { window.location.assign(`${rootUrl}/?access=1`); return; }
+    accessPanelOpen = true; await loadAccessSettings(); render(); return;
   }
+  if (action === "close-access") { accessPanelOpen = false; accessStatus = null; render(); return; }
+  if (action === "remove-passkey") return changeAccessSetting(`/passkeys/${safeId(button.dataset.passkeyId || "")}`, "DELETE");
+  if (action === "end-session") return changeAccessSetting(`/sessions/${safeId(button.dataset.sessionId || "")}`, "DELETE");
+  if (action === "replace-recovery-code") return changeAccessSetting("/recovery-code", "POST");
   if (action === "show-description-write" || action === "show-description-preview") {
     showDescriptionView(action === "show-description-preview" ? "preview" : "write");
     return;
@@ -3578,7 +3165,9 @@ root.addEventListener("submit", (event) => {
     queueCardAutosave(form);
     return;
   }
-  const operation = form.dataset.form === "sign-in"
+  const operation = form.dataset.form === "passkey"
+    ? performPasskeyCeremony(form)
+    : form.dataset.form === "sign-in"
     ? signIn(form)
     : form.dataset.form === "workspace"
       ? createWorkspace(form)
@@ -3679,59 +3268,44 @@ cardOnlyQuery.addEventListener("change", () => {
 
 async function boot(): Promise<void> {
   const currentUrl = new URL(window.location.href);
-  const signOutState = currentUrl.searchParams.get("signout");
   render();
   try {
     await loadSession();
-    if (accessContext === "auth" && window.location.pathname === "/sign-up") {
-      window.history.replaceState(null, "", `/sign-in${window.location.search}${window.location.hash}`);
-    }
-    const retryGlobalSignOut = logoutRetryPending;
-    if (retryGlobalSignOut) {
-      if (signOutState) clearSignOutState();
-      clearPrivateState({
-        kind: "sign-out-incomplete",
-        title: "Sign-out incomplete",
-        message: "Private data left this screen and this browser session was cleared, but another Workspace session may still be active. Try signing out again when the service recovers."
-      });
-      return;
-    }
-    const trustedLogoutCompletion = logoutCompletion
-      && Boolean(logoutCompletionSessionId)
-      && !session
-      && accessContext === "root";
-    if (trustedLogoutCompletion) {
-      try {
-        await completeClerkSignOut(logoutCompletionSessionId);
-        clearPrivateState({
-          kind: "signed-out",
-          title: "Signed out",
-          message: ""
-        });
-      } catch {
-        clerkSignInBlocked = true;
-        clearPrivateState({
-          kind: "sign-out-incomplete",
-          title: "Sign-out incomplete",
-          message: "Sign-out could not be completed. Try again."
-        });
-      }
-      return;
-    }
-    if (signOutState) clearSignOutState();
-    if (!session && accessContext === "root" && !retryGlobalSignOut) {
-      try {
-        await synchronizeClerkSession();
-      } catch (error) {
-        clerkSignInBlocked = true;
-        throw error;
-      }
+    if (currentUrl.searchParams.has("signedout")) {
+      currentUrl.searchParams.delete("signedout");
+      window.history.replaceState(null, "", `${currentUrl.pathname}${currentUrl.search}`);
+      if (!session && accessContext === "root") authNotice = { kind: "signed-out", title: "Signed out", message: "" };
     }
     if (session && accessContext === "root") {
+      if (currentUrl.searchParams.get("cancel-access") === "1") {
+        window.sessionStorage.removeItem("kanban.cards:add-passkey-after-verify");
+        window.history.replaceState(null, "", "/");
+      }
+      const requestedMode = currentUrl.searchParams.get("access");
+      if (requestedMode === "verify" || requestedMode === "add") {
+        const action = currentUrl.searchParams.get("action") === "api-key" ? "api-key" : "access-settings";
+        window.history.replaceState(null, "", "/");
+        await beginPasskeyFlow(requestedMode, action);
+        return;
+      }
+      if (window.sessionStorage.getItem("kanban.cards:add-passkey-after-verify") === "1") {
+        window.sessionStorage.removeItem("kanban.cards:add-passkey-after-verify");
+        await beginPasskeyFlow("add");
+        return;
+      }
       await loadWorkspaceChoices();
-      if (workspaceChoices.length === 1) await openWorkspace(workspaceChoices[0].slug);
+      if (currentUrl.searchParams.get("access") === "1" || window.sessionStorage.getItem("kanban.cards:open-access") === "1") {
+        window.sessionStorage.removeItem("kanban.cards:open-access");
+        accessPanelOpen = true; await loadAccessSettings();
+        window.history.replaceState(null, "", "/");
+      } else if (workspaceChoices.length === 1) await openWorkspace(workspaceChoices[0].slug);
     } else if (session) {
       await loadProjects();
+      if (window.sessionStorage.getItem("kanban.cards:open-agents") === "1") {
+        window.sessionStorage.removeItem("kanban.cards:open-agents");
+        agentPanelOpen = true;
+        await loadAgentConnections();
+      }
     }
   } catch (error) {
     if (!handlePrivateError(error)) {
@@ -3739,7 +3313,7 @@ async function boot(): Promise<void> {
         ? {
             kind: "access-denied",
             title: "This account doesn’t have access",
-            message: "Try another email address."
+            message: "Sign in with a passkey that has access to this Workspace."
           }
         : {
             kind: "service-unavailable",

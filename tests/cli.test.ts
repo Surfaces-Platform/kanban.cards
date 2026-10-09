@@ -8,7 +8,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { createFileAccessStore } from "../src/access-store";
-import type { ClerkAuthConfig, ClerkAuthGateway } from "../src/clerk-auth";
+import type { PasskeyAuthConfig } from "../src/passkey-auth";
 import { createApp } from "../src/server";
 import { createWorkspaceStoreResolver } from "../src/state-store";
 
@@ -148,26 +148,17 @@ test("the skill helper verifies a tenant-bound AgentConnection, preserves stable
   });
   const port = (server.address() as AddressInfo).port;
   const rootHost = `localhost:${port}`;
-  const clerkAuthConfig: ClerkAuthConfig = {
-    publishableKey: `pk_test_${Buffer.from("clerk.localhost$", "utf8").toString("base64").replace(/=+$/, "")}`,
-    secretKey: "sk_test_cli_agent",
-    encryptionKey: "cli-agent-encryption-key-01234567890123456789",
+  const passkeyAuthConfig: PasskeyAuthConfig = {
     sessionSecret: "cli-agent-session-secret-01234567890123456789",
     authHost: `auth.localhost:${port}`,
-    allowedUserIds: [],
-    rootSessionTtlSeconds: 3_600,
-    tenantSessionTtlSeconds: 3_600
-  };
-  const clerkAuthGateway: ClerkAuthGateway = {
-    middleware() { return (_req, _res, next) => next(); },
-    requestAuth() { return { authenticated: false, clerkUserId: null, clerkSessionId: null }; },
-    async verifiedIdentity() { throw new Error("Not used by AgentConnection CLI proof."); },
-    async revokeSession() {}
+    authOrigin: `http://auth.localhost:${port}`,
+    rpId: "auth.localhost",
+    rootOrigins: [`http://${rootHost}`],
+    sessionTtlSeconds: 3_600
   };
   application = createApp({
     accessStore,
-    clerkAuthConfig,
-    clerkAuthGateway,
+    passkeyAuthConfig,
     requireDatabase: false,
     rootHost,
     store: workspaceStoreResolver.resolve("default"),

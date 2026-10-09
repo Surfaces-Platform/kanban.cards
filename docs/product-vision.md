@@ -6,7 +6,7 @@ kanban.cards is a durable, visible execution surface for a person and the agents
 
 Recommendations and plans are easy to generate and hard to carry through. A repository needs a small shared record of what was proposed, what is happening now, what changed, and what remains.
 
-The browser uses a Clerk-verified owner identity and an isolated Workspace session. A dedicated auth-only host owns the Clerk sign-up/sign-in experience. Canonical and release-candidate application roots share the same `kanban.cards` root domain and recognize the verified Clerk browser session after an exact-origin return; they are not Clerk satellites. Tenant hosts receive only kanban.cards Workspace sessions. Automated clients use neutral AgentConnections bound to one owner and one Workspace with explicit read/write scopes. The earlier compatibility credential remains only as a migration bridge for the legacy Workspace. Both clients operate on the same Projects, Cards, Comments, and Activity through the same API.
+Owners create private Workspaces through self-service signup and sign in with passkeys. Passkey ceremonies run on a dedicated auth host; browser-bound, single-use handoffs open the initiating root and selected Workspace. Agents use API keys scoped to one owner and one Workspace with explicit read/write permissions. Both clients operate on the same Projects, Cards, Comments, and Activity through the same API.
 
 ## Why Kanban
 
@@ -30,13 +30,15 @@ The skill is the primary operating client. The browser provides sign-in, project
 
 ## Trust boundary
 
-A server-verified Clerk user with a verified primary email may enumerate only Workspaces owned by that exact Clerk user ID. Email is profile data, never binding or authorization authority. Entering a Workspace uses a single-use, exact-destination handoff and a signed, expiring, host-only HttpOnly tenant cookie. Every data read and mutation selects its state store from the validated host and session. AgentConnections are scoped credentials, not vendor identities, users, roles, or per-Project grants.
+A verified passkey identifies an internal owner ID. The owner may enumerate only their private Workspaces. Signup creates the owner, first Workspace, and credentials together after verification; it cannot claim an existing account. Email is not required and never grants access.
 
-The skill stores a one-time AgentConnection credential in user-scoped configuration and sends it as a bearer token to the exact tenant API. The server stores only its strong hash and derives Workspace, scopes, and Activity attribution from the durable connection. A repository's `.kanban-cards.json` contains only a Project ID and cannot select tenant authority. The compatibility bearer remains separate and bounded to the legacy Workspace.
+Entering a Workspace uses a single-use, exact-destination, browser-bound handoff and a signed, expiring, host-only HttpOnly cookie. Every data read and mutation selects its store from the validated host and current owner membership. Durable session records support revocation. Cookie-authenticated writes require exact Origin checks and CSRF protection.
 
-Activity records whether a change came through the browser or API. Owner attribution comes from the verified owner session; automated attribution comes from the authenticated AgentConnection's durable ID and stored label. A request cannot relabel its actor. The compatibility bearer keeps its distinct migration attribution and is not presented as an AgentConnection.
+The skill stores a scoped API key in user configuration and sends it as a bearer token to the exact tenant API. The server stores only its hash and derives Workspace, scopes, and Activity attribution from the durable AgentConnection. A repository's `.kanban-cards.json` contains only a Project ID and cannot select tenant authority. Agents cannot manage owner credentials, create Workspaces, or issue other keys. Production rejects the retired global token.
 
-Owners can revoke an AgentConnection without deploying. Clerk and kanban.cards browser-session rotation is independent. Older immutable deployment URLs retain their original environment snapshot and must be protected or retired separately.
+Activity records whether a change came through the browser or API. Owner attribution comes from the verified owner session; automated attribution comes from the authenticated AgentConnection's durable ID and stored label. A request cannot relabel its actor.
+
+Owners can add passkeys, revoke keys, and end browser sessions without deploying. Credential changes and API-key creation require passkey verification within five minutes. A saved, single-use recovery code enrolls a replacement passkey, replaces the code, and revokes prior passkeys, sessions, handoffs, and agent keys. Losing all passkeys and the recovery code means losing access in this version.
 
 ## Agentic safety
 
