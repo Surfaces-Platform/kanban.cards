@@ -28,7 +28,7 @@ The browser and skill are two clients of the same system:
 - A Project is the board. Columns express state. Cards carry the work. Comments and Activity preserve useful context.
 - Neither client maintains a second workflow model.
 
-Owners choose Start free, enter an email address, open Clerk's emailed verification link, and return to the exact initiating application root for server-authorized Workspace routing. Zero Workspaces leads to creation, one opens directly, and many require an explicit choice. A server-verified Clerk identity with a verified primary email is admitted by durable Clerk user ID. Automated clients use neutral Workspace-bound AgentConnections with explicit scopes; the legacy compatibility bearer remains a migration bridge only.
+Owners choose Start free, name a private Workspace, create a passkey, and save a recovery code. Successful verification creates the owner, Workspace, and credentials together. Returning owners sign in with a passkey; one Workspace opens directly and two or more require a choice. Owner authority uses the internal owner ID. Agents use scoped API keys backed by Workspace-bound AgentConnections.
 
 The interface should feel like a focused work surface. It should not feel like an administration console for agents, permissions, or workflows.
 
@@ -57,9 +57,9 @@ The active Project and selected Card must be obvious. Changing Projects should n
 
 ### Authority stays simple and honest
 
-A verified owner session grants access only to Workspaces owned by its durable Clerk user ID. Email is profile data, never the authorization or binding key. Within a Workspace, authority remains Workspace-wide. AgentConnection credentials are neutral scoped principals, not vendors, users, roles, or per-Project grants.
+A verified owner session grants access only to Workspaces owned by its internal owner ID. Signup requires no email or password. Within a Workspace, authority remains Workspace-wide. Scoped API keys belong to one owner and one Workspace and grant explicit read or read/write access.
 
-Activity attribution comes from the authenticated principal. Owner writes use the verified owner session; AgentConnection writes use the connection's durable ID and stored owner-chosen label. Request headers may describe a client channel but can never select or relabel the actor. The compatibility bearer retains its documented migration attribution and is not presented as an AgentConnection.
+Activity attribution comes from the authenticated principal. Owner writes use the verified owner session; API-key writes use the AgentConnection's durable ID and stored owner-chosen label. Request headers cannot select or relabel the actor.
 
 ### Actions happen near their object
 
@@ -96,21 +96,21 @@ These qualities are outcomes, not inherited tokens. The new system must choose i
 
 ### Sign in
 
-When a signed-out person opens an application root, the client continues directly to the dedicated sign-in form while preserving the exact return destination. It does not insert a separate landing page or `Sign in` action. The sign-in page contains the form and nothing around it: no eyebrow, product explanation, nested app-owned panel, host description, provider description, or Workspace and Project architecture copy.
+The signed-out application root offers `Start free`, `Sign in`, and `Recover access`. Each action opens the corresponding passkey form on the dedicated auth host and preserves the exact initiating root. The form asks only for the fields needed for that task and a short instruction to use the device or password manager.
 
-After verified global sign-out, the application root instead keeps one bounded receipt until the person continues: the product name, the heading `Signed out`, and one `Continue` action. It does not label that receipt `Sign in`, render an email field, or explain private-data and session cleanup.
+Signup asks for the Workspace name and address, then offers `Create passkey`. After verification, show the recovery code once and ask the owner to save it before entering the board. Sign-in offers `Continue with passkey`. The forms require no email or password.
 
-The signed-out root offers `Start free`. The auth surface asks for `Email address`, offers `Continue with email`, and then tells the owner to open the emailed link. The link returns to the exact initiating application root. No profile field is required.
+Access is private to each owner and signup is self-service. Public signup creates a new owner and private Workspace. Mike's existing account uses a separate one-time setup form bound to his exact internal owner ID; signup cannot claim that account.
 
-Visible app-owned sign-in language uses the product name and the words people need to complete the task. It must not expose a provider name, generated provider-resource name, environment name, host role, routing detail, session-exchange detail, or internal access model. The product must never show generated labels such as a provider resource or school name.
+After sign-out, keep one bounded receipt until the person continues: the product name, the heading `Signed out`, and one `Continue` action. Failed server revocation offers a retry and clears private board content from the screen.
 
-The supported Clerk Hobby prebuilt form may retain its required small `Secured by Clerk` badge. The badge is the only provider reference allowed on the customer-facing surface, remains visually subordinate to the form, and receives no additional app-owned explanation. Removing it would require a different Clerk plan and is not part of this release.
+Access settings let owners add another passkey, manage scoped API keys, replace the recovery code, and end browser sessions. Require passkey verification within five minutes for credential changes and key creation. Show a new API-key secret once and explain its Workspace, scope, and optional expiry.
 
-Access is private to each owner, but signup is self-service. A server-verified Clerk identity with a verified primary email receives a root session keyed only by its Clerk user ID. An owner with zero Workspaces may create the first Workspace after sign-in. Email and display name remain profile data, never authorization keys.
+Recovery asks for the saved single-use code and enrolls a replacement passkey. It issues a new code and revokes previous passkeys, sessions, pending handoffs, and agent keys. Tell the owner to reconnect agents. Losing all passkeys and the recovery code means losing access in this version.
 
-Operator configuration, provider integration, exact identity verification, host isolation, session exchange, and tenant handoff remain implementation and release concerns in [`UI_CONTRACT.md`](UI_CONTRACT.md) and [`docs/runbook.md`](docs/runbook.md). They do not become sign-in copy. Local development may retain the owner-key form only when the production identity provider is deliberately absent.
+Visible sign-in language uses the product name and the words people need to complete the task. Host configuration, internal owner IDs, browser-bound handoffs, session cookies, and operator setup belong in [`UI_CONTRACT.md`](UI_CONTRACT.md) and [`docs/runbook.md`](docs/runbook.md). Local development may retain an owner-key form when passkey authentication is deliberately absent; production never uses that fallback.
 
-This design follows the NN/g guidance to [remove unnecessary steps](https://www.nngroup.com/articles/affordable_care_act_usability_issues/) (Jen Cardello and Susan Farrell, “9. Remove unnecessary steps”), [limit the first screen to essential information](https://www.nngroup.com/articles/defer-secondary-content-for-mobile/) (Jakob Nielsen, “Summary”), [avoid unnecessary choices and their instructional overhead](https://www.nngroup.com/articles/simplicity-vs-choice/) (Hoa Loranger, “Simplicity Usually Wins”), [show only what is relevant at each form step](https://www.nngroup.com/articles/4-principles-reduce-cognitive-load/) (Huei-Hsin Wang, “Utilize Progressive Disclosure”), and [keep labels and instructions in plain language](https://www.nngroup.com/articles/4-principles-reduce-cognitive-load/) (Huei-Hsin Wang, “Use Plain Language”). NN/g's [visual-hierarchy guidance](https://www.nngroup.com/articles/4-principles-reduce-cognitive-load/) (Huei-Hsin Wang, “Create Visual Hierarchy”) supports keeping required secondary text subordinate to the primary form; the Clerk plan, not the corpus, determines that the badge must remain. The denied state follows NN/g's [plain, concise, actionable error-message guidance](https://www.nngroup.com/articles/error-messages-scoring-rubric/) (Evan Sunwall and Tim Neusesser, “Communication Guidelines”); the product's privacy boundary limits the explanation to a generic result.
+This design follows the NN/g guidance to [remove unnecessary steps](https://www.nngroup.com/articles/affordable_care_act_usability_issues/) (Jen Cardello and Susan Farrell, “9. Remove unnecessary steps”), [limit the first screen to essential information](https://www.nngroup.com/articles/defer-secondary-content-for-mobile/) (Jakob Nielsen, “Summary”), [avoid unnecessary choices and their instructional overhead](https://www.nngroup.com/articles/simplicity-vs-choice/) (Hoa Loranger, “Simplicity Usually Wins”), [show only what is relevant at each form step](https://www.nngroup.com/articles/4-principles-reduce-cognitive-load/) (Huei-Hsin Wang, “Utilize Progressive Disclosure”), and [keep labels and instructions in plain language](https://www.nngroup.com/articles/4-principles-reduce-cognitive-load/) (Huei-Hsin Wang, “Use Plain Language”). NN/g's [visual-hierarchy guidance](https://www.nngroup.com/articles/4-principles-reduce-cognitive-load/) (Huei-Hsin Wang, “Create Visual Hierarchy”) supports keeping secondary instructions subordinate to the primary form. The denied state follows NN/g's [plain, concise, actionable error-message guidance](https://www.nngroup.com/articles/error-messages-scoring-rubric/) (Evan Sunwall and Tim Neusesser, “Communication Guidelines”); the product's privacy boundary limits the explanation to a generic result.
 
 ### Empty workspace
 
@@ -145,7 +145,7 @@ The design must account for the full workflow, including states that are easy to
 | State | What the experience must communicate |
 | --- | --- |
 | Opening | The application is loading without exposing stale private data. |
-| Signed out | The application offers one `Start free` action, continues to email-link authentication, and returns to the exact initiating root. |
+| Signed out | The application offers signup, passkey sign-in, and recovery and returns to the exact initiating root after verification. |
 | Invalid key | Access was refused; no Project names or content are revealed. |
 | Empty workspace | The owner can create a Project or ask the skill to create one. |
 | Empty Project | Columns are present and the next Card can be created. |
@@ -173,14 +173,17 @@ The design must account for the full workflow, including states that are easy to
 
 ## Access and context presentation
 
-The product has self-service Clerk-verified owners, isolated Workspaces, and one Workspace-wide authority boundary inside each Workspace.
+The product has self-service passkey owners, private Workspaces, and one Workspace-wide authority boundary inside each Workspace.
 
-- The account indicator may show the Clerk-verified display name, but it must not suggest a role system.
+- The account indicator may show the owner's display name, but it must not imply a verified email or a role system.
 - The canonical Workspace host and server-validated session select tenant context. A Project ID, request body, query, or header never selects it.
 - The active Project is navigation context, not an authorization scope.
 - Repository binding belongs to the skill workflow; the browser does not need to simulate repository permissions.
 - API actor labels still should not receive avatars, presence, or identity treatments that imply verification.
-- The Clerk secret key and compatibility bearer must never appear in client-readable storage, markup, URLs, logs, or screenshots. The Clerk publishable key and validated `clerkFrontendApiOrigin` may be returned only on the signed-out auth or application-root session contract, and ClerkJS connects to that single configured production FAPI custom domain without an app-owned proxy. A handoff token may exist only in the root response, an immediately removed hidden form control, and the exact-destination POST body; it never enters rendered content, persistent browser storage, a URL, a log, or a screenshot. kanban.cards browser sessions remain only in signed, expiring, host-only HttpOnly cookies. Global sign-out revokes the app session family and exact Clerk session before returning a signed, short-lived continuation that exists only in an immediately removed exact-origin hidden-form POST body. The root validates that continuation and preserves the exact Clerk session ID in a signed, short-lived, host-only completion marker. ClerkJS checks its documented signed-in session list, ends only the matching `Session` if it remains, confirms that exact ID is absent, and preserves every other browser account. A failure leaves the marker for retry; only successful exact-session cleanup may acknowledge and consume it before the persistent `Signed out` state renders. A bare URL query never authorizes or completes that cleanup.
+- API keys appear once to the owner who creates them and never enter URLs, logs, or persistent browser storage. Agents store their keys outside repositories; the server stores only hashes.
+- Setup and recovery codes enter through request bodies. Save the recovery code before leaving its one-time display. Neither secret belongs in a URL or log.
+- Passkey ceremonies run only at the configured auth host. Challenges and handoffs bind to their purpose, browser, exact origin, and expiry. A handoff token travels only in the response and an immediately removed hidden-form POST to its exact destination.
+- Browser sessions use signed, expiring, host-only HttpOnly cookies and durable server-side records. Sign-out revokes the session family; Sign out everywhere revokes all of the owner's browser sessions. Cookie-authenticated writes use exact Origin checks and CSRF protection.
 
 ## Responsive and accessible behavior
 

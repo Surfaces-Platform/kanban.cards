@@ -5,7 +5,7 @@ description: Keep project work visible and up to date in kanban.cards so you can
 
 # kanban.cards
 
-Use the API as the source of truth. The normal credential is a neutral AgentConnection bound server-side to exactly one owner and one Workspace with explicit `read` and/or `write` scopes. It cannot select a Workspace from a Project binding, payload, query, header, or caller label. The legacy compatibility bearer may still work for its documented migration bridge, but it is not an AgentConnection and must not be described as an agent identity.
+Use the API as the source of truth. Owners sign in to the browser with passkeys. Agents use a scoped API key backed by an AgentConnection bound server-side to exactly one owner and one Workspace with explicit `read` and/or `write` scopes. A Project binding, payload, query, header, or caller label cannot change the key's Workspace. Production does not accept the retired global bearer token.
 
 Resolve the absolute directory containing this `SKILL.md` from the active skill catalog. Run its bundled helper from the target repository root, replacing `{skill_dir}` with that directory:
 
@@ -21,7 +21,7 @@ Read [references/api.md](references/api.md) when exact payloads, headers, or res
 
 ## Connect
 
-Create the AgentConnection from the owner UI on the intended Workspace tenant host. Copy its one-time credential and store it only in `~/.kanban-cards/config.json`. Pipe it through standard input so it does not appear in the command line, shell history, or repository. Use that Workspace's tenant API URL, not the application root:
+Sign in with a passkey and create the API key from access settings on the intended Workspace tenant host. Creating a key requires passkey verification within five minutes. Copy the secret once and store it only in `~/.kanban-cards/config.json`. Pipe it through standard input so it does not appear in the command line, shell history, or repository. Use that Workspace's tenant API URL:
 
 ```bash
 node "{skill_dir}/scripts/kanban-cards-client.mjs" setup \
@@ -37,7 +37,7 @@ node "{skill_dir}/scripts/kanban-cards-client.mjs" bind --project <project-id>
 node "{skill_dir}/scripts/kanban-cards-client.mjs" project
 ```
 
-`setup` verifies that the credential resolves to a Workspace context before saving it. `bind` verifies that the Project exists in that same Workspace before writing the repository file. AgentConnection Activity attribution contains the verified connection's stable ID and stored label; `X-Kanban-Actor` is ignored for AgentConnection authority and attribution. The legacy compatibility bearer does not receive an AgentConnection ID.
+`setup` verifies that the key resolves to a Workspace context before saving it. `bind` verifies that the Project exists in that same Workspace before writing the repository file. Activity attribution contains the verified connection's stable ID and stored label; `X-Kanban-Actor` cannot change authority or attribution. Revoked or expired keys stop working immediately. Rotate a key by creating a replacement, updating and checking the client, then revoking the old key.
 
 Pass `--project <project-id>` to override the repository binding for one command.
 

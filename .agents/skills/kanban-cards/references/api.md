@@ -1,6 +1,6 @@
 # kanban.cards API
 
-The base URL defaults to `http://127.0.0.1:4317/api`. In production, configure the exact tenant URL such as `https://my-workspace.kanban.cards/api` and use a one-time AgentConnection credential bound to that Workspace. A client-supplied Workspace selector is never accepted. The legacy compatibility bearer remains a migration bridge only.
+In production, configure the exact tenant URL such as `https://my-workspace.kanban.cards/api` and use a scoped API key bound to that Workspace. Owners sign in with passkeys and create keys in access settings after fresh passkey verification. The key's secret appears once. A client-supplied Workspace selector cannot change its authority. Production rejects the retired global bearer token.
 
 ## Headers
 
@@ -10,7 +10,11 @@ Every helper request sends:
 Authorization: Bearer <agent-connection-credential>
 ```
 
-The helper may retain `X-Kanban-Actor` for compatibility-bearer context, but AgentConnection Activity attribution always uses the verified connection's stable ID and stored label. The legacy bearer never receives an AgentConnection ID. Resource POSTs also send `Idempotency-Key`. `create-card` derives a stable key from `projectId` plus `externalKey` unless the caller supplies `--idempotency-key`. Other resource POSTs generate a unique key unless one is supplied.
+Activity attribution uses the verified AgentConnection's stable ID and stored label. `X-Kanban-Actor` cannot override either field. Resource POSTs also send `Idempotency-Key`. `create-card` derives a stable key from `projectId` plus `externalKey` unless the caller supplies `--idempotency-key`. Other resource POSTs generate a unique key unless one is supplied.
+
+Each owner may have up to 50 unrevoked API keys per Workspace. Revoke an existing key to free a slot. Expired or revoked credentials cannot access the API.
+
+Each owner may create up to 100 API keys per hour across all Workspaces. Revoking a key does not reset that limit. Further creation requests receive `429` with the retry time; unsuccessful requests do not consume the allowance.
 
 Project and card patches accept:
 
@@ -50,11 +54,11 @@ Use `https://` for every non-loopback API URL. The helper permits plaintext `htt
 
 ### `GET /session`
 
-Return the authenticated local, root, or Workspace session. Provider-mode responses include exact `rootUrl`, `loginUrl`, and `logoutUrl` values for the request's configured host family; Workspace responses also include the exact routed Workspace URL. The browser accepts navigation only when those origins and paths agree. The helper expects a Workspace context; it cannot use root Workspace-enumeration routes.
+Return the authenticated owner browser session or scoped agent context. Browser responses include exact navigation origins; Workspace responses include the routed Workspace URL. The helper requires a Workspace context and cannot enumerate owner Workspaces or manage credentials.
 
 ### Root Workspace routing
 
-`GET /workspaces` returns only owned Workspaces that have a route in the current host family. `POST /workspaces` creates a routed Workspace. `POST /workspace-handoffs` returns an exact tenant `destination` and a single-use body-only `handoffToken`; `POST /workspace-handoff` consumes it only on that destination host and from the matching root origin. Candidate and canonical host-family sessions and handoffs cannot be replayed across origins.
+Owner browser sessions use `GET /workspaces` to list owned Workspaces and `POST /workspaces` to create one. Each owner may have up to 10 Workspaces. `POST /workspace-handoffs` returns an exact tenant `destination` and a single-use body-only `handoffToken`; `POST /workspace-handoff` accepts it only on that destination host with the matching browser nonce and root origin. Agents cannot issue these handoffs or create Workspaces.
 
 ### `GET /projects`
 
@@ -93,7 +97,7 @@ Replacing `columns` requires the complete desired column list. Preserve IDs for 
 ```json
 {
   "title": "Simplify authentication",
-  "body": "Replace delegated sessions with one owner credential.",
+  "body": "Use passkeys for owners and scoped API keys for agents.",
   "columnId": "next",
   "position": 0,
   "externalKey": "recommendation:simplify-auth"
@@ -122,7 +126,7 @@ Return `201 { "comment": Comment, "card": { "id": string, "version": number }, "
 
 ### `GET /projects/:projectId/activity?limit=25`
 
-Return `{ "activity": Activity[], "projectRevision": number }`. For AgentConnection calls, Activity actors contain `{ channel: "api", label, agentConnectionId }` from the verified durable connection; request labels cannot override either stored field. Older and compatibility-bearer Activity rows omit `agentConnectionId`.
+Return `{ "activity": Activity[], "projectRevision": number }`. Agent calls record `{ channel: "api", label, agentConnectionId }` from the verified durable connection; request labels cannot override the stored fields. Historical Activity rows may omit `agentConnectionId`.
 
 ## Helper command mapping
 

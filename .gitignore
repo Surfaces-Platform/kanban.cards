@@ -18,3 +18,5 @@ output/design-review-phone/
 .demo/
 npm-debug.log*
 .env*.local
+
+.local/

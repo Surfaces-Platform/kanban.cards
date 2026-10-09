@@ -9,8 +9,11 @@ import {
   AccessStoreError,
   createFileAccessStore,
   createPostgresAccessStore,
+  createWorkspaceInRegistry,
+  freshAccessRegistryState,
   normalizeAccessRegistry
 } from "../src/access-store";
+import type { AccessRegistryState, AccessStore } from "../src/access-store";
 import { createWorkspaceStoreResolver, freshWorkspaceState } from "../src/state-store";
 
 const MIKE_IDENTITY = {
@@ -64,6 +67,268 @@ test("access registry normalization rejects duplicate identity and broken owners
     ]
   }), /Duplicate revoked session/);
 });
+
+test("existing access registries default auth records without changing owners, Workspaces, or agent hashes", () => {
+  const timestamp = "2026-08-12T12:00:00.000Z";
+  const legacyState = {
+    schemaVersion: 1,
+    owners: [{ id: "owner-mike", ...MIKE_IDENTITY, createdAt: timestamp, updatedAt: timestamp }],
+    workspaces: [{ id: "workspace-mike", slug: "mike", name: "Mike", storageId: "default", ownerIds: ["owner-mike"], createdAt: timestamp, updatedAt: timestamp }],
+    handoffs: [],
+    agentConnections: [{
+      id: "agent-build", credentialHash: `sha256:${"1".repeat(64)}`, ownerId: "owner-mike", workspaceId: "workspace-mike",
+      label: "Build bot", scopes: ["read", "write"], createdAt: timestamp, lastUsedAt: null, expiresAt: null, revokedAt: null
+    }]
+  };
+  const normalized = normalizeAccessRegistry(legacyState);
+  assert.deepEqual(normalized.owners, legacyState.owners);
+  assert.deepEqual(normalized.workspaces, legacyState.workspaces);
+  assert.deepEqual(normalized.agentConnections, legacyState.agentConnections);
+  for (const field of ["passkeys", "authChallenges", "authSessions", "recoveryCodes", "authHandoffs", "authRateLimits"] as const) {
+    assert.deepEqual(normalized[field], []);
+  }
+  assert.equal(normalized.setupConsumed, false);
+  assert.deepEqual(normalizeAccessRegistry(freshAccessRegistryState()), freshAccessRegistryState());
+});
+
+test("auth registry validation rejects duplicate credentials, missing owners, and cross-owner session handoffs", () => {
+  const state = freshAccessRegistryState();
+  const workspace = createWorkspaceInRegistry(state, { ...MIKE_IDENTITY, slug: "mike", name: "Mike" }, "2026-08-12T12:00:00.000Z");
+  addAuthRecords(state, workspace.ownerIds[0]);
+  assert.deepEqual(normalizeAccessRegistry(state), state);
+
+  const duplicate = structuredClone(state);
+  duplicate.passkeys.push({ ...duplicate.passkeys[0] });
+  assert.throws(() => normalizeAccessRegistry(duplicate), /Duplicate passkey credential id/);
+
+  const unknownOwner = structuredClone(state);
+  unknownOwner.authChallenges[0].ownerId = "owner-missing";
+  assert.throws(() => normalizeAccessRegistry(unknownOwner), /Auth challenge.*missing owner/);
+
+  const crossedHandoff = structuredClone(state);
+  const other = createWorkspaceInRegistry(crossedHandoff, { providerSubject: "other", email: "", displayName: "Other", slug: "other", name: "Other" }, "2026-08-12T12:00:00.000Z");
+  crossedHandoff.authHandoffs[0].ownerId = other.ownerIds[0];
+  assert.throws(() => normalizeAccessRegistry(crossedHandoff), /not bound to its owner's session/);
+
+  const invalidOrigin = structuredClone(state);
+  invalidOrigin.authSessions[0].rootOrigin = "https://kanban.cards/board";
+  assert.throws(() => normalizeAccessRegistry(invalidOrigin), /exact secure origin/);
+
+  const unsafeCounter = structuredClone(state);
+  unsafeCounter.passkeys[0].counter = -1;
+  assert.throws(() => normalizeAccessRegistry(unsafeCounter), /nonnegative integer/);
+
+  const invalidSetup = { ...state, setupConsumed: "false" };
+  assert.throws(() => normalizeAccessRegistry(invalidSetup), /setupConsumed must be a boolean/);
+});
+
+test("internal owner IDs reuse the existing owner across Workspace, agent, and handoff operations", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-access-owner-id-"));
+  const store = createFileAccessStore(path.join(directory, "access.json"), { now: () => new Date("2026-08-12T12:00:00.000Z") });
+  try {
+    const legacy = await store.bindLegacyWorkspace({ ...MIKE_IDENTITY, slug: "mike", name: "Mike" });
+    const ownerId = legacy.ownerIds[0];
+    const workspace = await store.createWorkspace({ providerSubject: ownerId, email: "", displayName: "Mike", slug: "studio", name: "Studio" });
+    const resolved = await store.resolveOwner(ownerId);
+    assert.equal(resolved?.owner.providerSubject, MIKE_IDENTITY.providerSubject);
+    assert.equal(resolved?.owner.email, MIKE_IDENTITY.email);
+    assert.deepEqual(resolved, await store.resolveOwner(MIKE_IDENTITY.providerSubject));
+    assert.deepEqual(await store.getOwnerByProviderSubject(ownerId), resolved?.owner);
+    assert.deepEqual((await store.listWorkspacesForOwner(ownerId)).map((item) => item.id), [legacy.id, workspace.id]);
+    assert.equal((await store.read()).owners.length, 1);
+
+    const connection = await store.createAgentConnection({ providerSubject: ownerId, workspaceId: workspace.id, label: "ID-based bot", scopes: ["read"] });
+    assert.equal((await store.listAgentConnections(ownerId, workspace.id))[0].id, connection.connection.id);
+    assert.equal((await store.verifyAgentCredential(connection.credential)).owner.id, ownerId);
+    await store.revokeAgentConnection(ownerId, workspace.id, connection.connection.id);
+    await assert.rejects(store.verifyAgentCredential(connection.credential), (error: any) => error.code === "ACCESS_AGENT_REVOKED");
+
+    const handoff = await store.createHandoff({ providerSubject: ownerId, workspaceId: workspace.id, sessionId: "session-by-id", destinationHost: "studio.kanban.cards" });
+    assert.equal(handoff.ownerId, ownerId);
+    await store.revokeSession(ownerId, "session-by-id");
+    assert.equal(await store.isSessionRevoked(MIKE_IDENTITY.providerSubject, "session-by-id"), true);
+    assert.equal(await store.isSessionRevoked(ownerId, "session-by-id"), true);
+    await assert.rejects(store.consumeHandoff({ token: handoff.token, destinationHost: "studio.kanban.cards" }), (error: any) => error.code === "ACCESS_SESSION_REVOKED");
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("concurrent Workspace creation enforces each owner's quota inside the shared transaction", async () => {
+  const database = new FakePostgresPool();
+  const store = createPostgresAccessStore({ pool: database as unknown as Pool });
+  const results = await Promise.allSettled(Array.from({ length: 12 }, (_, index) => store.createWorkspace({
+    ...MIKE_IDENTITY, slug: `quota-${index}`, name: `Quota ${index}`
+  })));
+  assert.equal(results.filter((result) => result.status === "fulfilled").length, 10);
+  const rejections = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+  assert.equal(rejections.length, 2);
+  for (const result of rejections) {
+    assert.equal(result.reason.code, "ACCESS_FORBIDDEN");
+    assert.match(result.reason.message, /10 Workspaces/);
+  }
+  const resolved = await store.resolveOwner(MIKE_IDENTITY.providerSubject);
+  assert.equal(resolved?.workspaces.length, 10);
+  await assert.rejects(store.authTransaction((state) => createWorkspaceInRegistry(state, {
+    providerSubject: resolved!.owner.id, email: "", displayName: "Mike", slug: "quota-extra", name: "Extra"
+  })), (error: any) => error.code === "ACCESS_FORBIDDEN");
+  const anotherOwner = await store.createWorkspace({ providerSubject: "other-owner", email: "", displayName: "Other", slug: "other-quota", name: "Other" });
+  assert.notEqual(anotherOwner.ownerIds[0], resolved?.owner.id);
+});
+
+test("concurrent API-key creation caps unrevoked keys per owner and Workspace and revocation frees a slot", async () => {
+  const database = new FakePostgresPool();
+  const store = createPostgresAccessStore({ pool: database as unknown as Pool });
+  const workspace = await store.createWorkspace({ ...MIKE_IDENTITY, slug: "key-quota", name: "Keys" });
+  const input = { providerSubject: workspace.ownerIds[0], workspaceId: workspace.id, label: "Quota bot", scopes: ["read"] as const };
+  const results = await Promise.allSettled(Array.from({ length: 52 }, (_, index) => store.createAgentConnection({ ...input, label: `Quota bot ${index}`, scopes: [...input.scopes] })));
+  assert.equal(results.filter((result) => result.status === "fulfilled").length, 50);
+  const rejections = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+  assert.equal(rejections.length, 2);
+  for (const result of rejections) {
+    assert.equal(result.reason.code, "ACCESS_FORBIDDEN");
+    assert.match(result.reason.message, /50 unrevoked API keys/);
+  }
+  const keys = await store.listAgentConnections(workspace.ownerIds[0], workspace.id);
+  await store.revokeAgentConnection(workspace.ownerIds[0], workspace.id, keys[0].id);
+  await store.createAgentConnection({ ...input, scopes: [...input.scopes] });
+  assert.equal((await store.listAgentConnections(workspace.ownerIds[0], workspace.id)).filter((key) => !key.revokedAt).length, 50);
+
+  const secondWorkspace = await store.createWorkspace({ ...MIKE_IDENTITY, slug: "other-keys", name: "Other keys" });
+  await store.createAgentConnection({ ...input, workspaceId: secondWorkspace.id, scopes: [...input.scopes] });
+  assert.equal((await store.listAgentConnections(workspace.ownerIds[0], secondWorkspace.id)).length, 1);
+});
+
+test("API-key issuance atomically rejects revoked, expired, stale, and foreign browser sessions", async () => {
+  const database = new FakePostgresPool();
+  const current = "2026-08-12T12:10:00.000Z";
+  const store = createPostgresAccessStore({ pool: database as unknown as Pool, now: () => new Date(current) });
+  const workspace = await store.createWorkspace({ ...MIKE_IDENTITY, slug: "session-keys", name: "Keys" });
+  const other = await store.createWorkspace({ providerSubject: "other", email: "", displayName: "Other", slug: "other-session", name: "Other" });
+  await store.authTransaction((state) => {
+    const common = { rootOrigin: "https://kanban.cards", createdAt: "2026-08-12T12:00:00.000Z", verifiedAt: current, revokedAt: null, expiresAt: "2026-08-12T13:00:00.000Z" };
+    state.authSessions.push(
+      { ...common, id: "fresh", ownerId: workspace.ownerIds[0] },
+      { ...common, id: "expired", ownerId: workspace.ownerIds[0], expiresAt: current },
+      { ...common, id: "stale", ownerId: workspace.ownerIds[0], verifiedAt: "2026-08-12T12:04:59.999Z" },
+      { ...common, id: "foreign", ownerId: other.ownerIds[0] },
+      { ...common, id: "family-revoked", ownerId: workspace.ownerIds[0] },
+      { ...common, id: "id-family-revoked", ownerId: workspace.ownerIds[0] }
+    );
+  });
+  const issue = (authSessionId: string) => store.createAgentConnection({ providerSubject: workspace.ownerIds[0], workspaceId: workspace.id, label: "Browser-issued", scopes: ["read"], authSessionId });
+  await issue("fresh");
+  await store.revokeSession(MIKE_IDENTITY.providerSubject, "family-revoked");
+  await store.revokeSession(workspace.ownerIds[0], "id-family-revoked");
+  for (const id of ["expired", "stale", "foreign", "missing", "family-revoked", "id-family-revoked"]) {
+    await assert.rejects(issue(id), (error: any) => error.code === "ACCESS_FORBIDDEN");
+  }
+  const [revoked, issuance] = await Promise.allSettled([
+    store.authTransaction((state) => { state.authSessions.find((session) => session.id === "fresh")!.revokedAt = current; }),
+    issue("fresh")
+  ]);
+  assert.equal(revoked.status, "fulfilled");
+  assert.equal(issuance.status, "rejected");
+  if (issuance.status === "rejected") assert.equal(issuance.reason.code, "ACCESS_FORBIDDEN");
+  assert.equal((await store.listAgentConnections(workspace.ownerIds[0], workspace.id)).length, 1);
+  assert.equal((await store.read()).authRateLimits.find((limit) => limit.id.startsWith("agent-key-issuance:"))?.count, 1);
+});
+
+test("API-key create/revoke loops hit the durable owner-wide hourly rate limit and reset after expiry", async () => {
+  const database = new FakePostgresPool();
+  let current = new Date("2026-08-12T12:00:00.000Z");
+  const options = { pool: database as unknown as Pool, now: () => current };
+  const store = createPostgresAccessStore(options);
+  const workspace = await store.createWorkspace({ ...MIKE_IDENTITY, slug: "key-rate", name: "Keys" });
+  const ownerId = workspace.ownerIds[0];
+  const input = { providerSubject: ownerId, workspaceId: workspace.id, label: "Rotating bot", scopes: ["read"] as const };
+  for (let index = 0; index < 100; index += 1) {
+    const issued = await store.createAgentConnection({ ...input, scopes: [...input.scopes] });
+    await store.revokeAgentConnection(ownerId, workspace.id, issued.connection.id);
+  }
+  const reopened = createPostgresAccessStore(options);
+  const before = await reopened.read();
+  assert.equal(before.authRateLimits[0].count, 100);
+  assert.equal(before.authRateLimits[0].resetAt, "2026-08-12T13:00:00.000Z");
+  await assert.rejects(reopened.createAgentConnection({ ...input, scopes: [...input.scopes] }), (error: any) => {
+    assert.equal(error.code, "ACCESS_RATE_LIMITED");
+    assert.match(error.message, /Try again after 2026-08-12T13:00:00.000Z/);
+    return true;
+  });
+  const otherWorkspace = await store.createWorkspace({ ...MIKE_IDENTITY, slug: "key-rate-other", name: "Other" });
+  await assert.rejects(reopened.createAgentConnection({ ...input, workspaceId: otherWorkspace.id, scopes: [...input.scopes] }), (error: any) => error.code === "ACCESS_RATE_LIMITED");
+  assert.equal((await reopened.read()).authRateLimits[0].count, 100);
+  assert.equal((await reopened.read()).agentConnections.length, 100);
+
+  current = new Date("2026-08-12T13:00:00.000Z");
+  await reopened.createAgentConnection({ ...input, scopes: [...input.scopes] });
+  const reset = await store.read();
+  assert.equal(reset.authRateLimits.length, 1);
+  assert.equal(reset.authRateLimits[0].count, 1);
+  assert.equal(reset.authRateLimits[0].resetAt, "2026-08-12T14:00:00.000Z");
+});
+
+for (const kind of ["file", "postgres"] as const) {
+  test(`${kind} auth transactions persist new owners and credentials together and serialize setup consumption`, async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), `kanban-auth-transaction-${kind}-`));
+    const dataPath = path.join(directory, "access.json");
+    const database = new FakePostgresPool();
+    const open = (): AccessStore => kind === "file"
+      ? createFileAccessStore(dataPath)
+      : createPostgresAccessStore({ pool: database as unknown as Pool });
+    const store = open();
+    try {
+      const ownerId = await store.authTransaction((state) => {
+        const workspace = createWorkspaceInRegistry(state, { providerSubject: "passkey-owner", email: "", displayName: "New owner", slug: "private", name: "Private" }, "2026-08-12T12:00:00.000Z");
+        const id = workspace.ownerIds[0];
+        addAuthRecords(state, id);
+        return id;
+      });
+      const reopened = open();
+      const saved = await reopened.read();
+      assert.equal(saved.owners[0].id, ownerId);
+      assert.equal(saved.owners[0].email, "");
+      assert.equal(saved.workspaces[0].ownerIds[0], ownerId);
+      assert.equal(saved.passkeys[0].ownerId, ownerId);
+      assert.equal(saved.authChallenges[0].ownerId, ownerId);
+      assert.equal(saved.authSessions[0].ownerId, ownerId);
+      assert.equal(saved.authHandoffs[0].sessionId, saved.authSessions[0].id);
+      assert.equal(saved.recoveryCodes[0].ownerId, ownerId);
+      assert.deepEqual(saved.authRateLimits, [{ id: "signup:browser", count: 1, resetAt: "2026-08-12T12:05:00.000Z" }]);
+
+      const consumeSetup = () => store.authTransaction((state) => {
+        if (state.setupConsumed) throw new Error("Setup is already consumed.");
+        state.setupConsumed = true;
+        state.passkeys[0].counter += 1;
+        return state.passkeys[0].counter;
+      });
+      const results = await Promise.allSettled([consumeSetup(), consumeSetup()]);
+      assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+      assert.equal((await reopened.read()).setupConsumed, true);
+      assert.equal((await reopened.read()).passkeys[0].counter, 1);
+
+      const beforeFailedTransaction = await store.read();
+      await assert.rejects(store.authTransaction((state) => {
+        state.owners[0].displayName = "Discard this change";
+        state.passkeys[0].ownerId = "owner-missing";
+      }), /Passkey.*missing owner/);
+      assert.deepEqual(await reopened.read(), beforeFailedTransaction);
+
+      await assert.rejects(store.authTransaction((state) => {
+        state.recoveryCodes[0].consumedAt = "2026-08-12T12:01:00.000Z";
+        throw new Error("Abort recovery.");
+      }), /Abort recovery/);
+      assert.deepEqual(await reopened.read(), beforeFailedTransaction);
+
+      await assert.rejects(store.authTransaction(async (state) => {
+        state.passkeys[0].revokedAt = "2026-08-12T12:01:00.000Z";
+      }), /callbacks must be synchronous/);
+      assert.deepEqual(await reopened.read(), beforeFailedTransaction);
+    } finally {
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+}
 
 test("file access registry creates isolated Workspaces and binds legacy default exactly once", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-access-file-"));
@@ -480,4 +745,19 @@ class FakeWorkspacePostgresClient {
 function parseJsonParam(value: unknown): unknown {
   if (typeof value !== "string") throw new Error("Expected a JSON state parameter.");
   return JSON.parse(value);
+}
+
+function addAuthRecords(state: AccessRegistryState, ownerId: string): void {
+  const createdAt = "2026-08-12T12:00:00.000Z";
+  const expiresAt = "2026-08-12T12:05:00.000Z";
+  const browserHash = `sha256:${"2".repeat(64)}`;
+  state.passkeys.push({ id: "credential-test", ownerId, publicKey: "AQID", counter: 0, transports: ["internal"], createdAt, lastUsedAt: null, revokedAt: null });
+  state.authChallenges.push({
+    id: "challenge-test", challenge: "test-challenge", browserHash, purpose: "register", ownerId,
+    rootOrigin: "https://kanban.cards", expiresAt, data: { action: "register", nested: { attempt: 1 }, options: ["passkey", null] }
+  });
+  state.authSessions.push({ id: "session-test", ownerId, rootOrigin: "https://kanban.cards", createdAt, expiresAt, revokedAt: null, verifiedAt: createdAt });
+  state.recoveryCodes.push({ ownerId, codeHash: `sha256:${"3".repeat(64)}`, createdAt, consumedAt: null });
+  state.authHandoffs.push({ id: "handoff-test", tokenHash: `sha256:${"4".repeat(64)}`, browserHash, ownerId, sessionId: "session-test", destinationOrigin: "https://kanban.cards", expiresAt, consumedAt: null });
+  state.authRateLimits.push({ id: "signup:browser", count: 1, resetAt: expiresAt });
 }

@@ -8,6 +8,8 @@ import test from "node:test";
 import type { Express } from "express";
 
 import defaultApp, { createApp } from "../src/server";
+import { createFileAccessStore } from "../src/access-store";
+import type { PasskeyAuthConfig } from "../src/passkey-auth";
 
 test("the server entry exports an Express app for Vercel framework discovery", () => {
   assert.equal(typeof defaultApp, "function");
@@ -27,7 +29,7 @@ test("missing owner and external-bind configuration fail closed", async () => {
     assert.equal(shell.status, 200);
     const localHealth = await fetchJsonAllowError(`${baseUrl}/api/health`);
     assert.equal(localHealth.status, 503);
-    assert.ok(localHealth.data.missingConfiguration.includes("KANBAN_CARDS_API_TOKEN"));
+    assert.ok(localHealth.data.missingConfiguration.includes("KANBAN_CARDS_API_TOKEN (local development only)"));
     assert.equal((await fetch(`${baseUrl}/api/projects`)).status, 503);
 
     await close(server);
@@ -40,8 +42,47 @@ test("missing owner and external-bind configuration fail closed", async () => {
     const externalHealth = await fetchJsonAllowError(`${baseUrl}/api/health`);
     assert.equal(externalHealth.status, 503);
     assert.ok(externalHealth.data.missingConfiguration.some((item: string) => item.includes("DATABASE_URL")));
+    assert.ok(externalHealth.data.missingConfiguration.some((item: string) => item.includes("SESSION_SECRET")));
+    assert.equal((await fetch(`${baseUrl}/api/projects`, { headers: { Authorization: "Bearer configured-api-credential" } })).status, 503);
+    assert.equal((await fetch(`${baseUrl}/api/session`, {
+      method: "POST", headers: { "Content-Type": "application/json", Origin: baseUrl },
+      body: JSON.stringify({ token: "configured-api-credential" })
+    })).status, 503);
   } finally {
     if (server) await close(server).catch(() => undefined);
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("production cannot enroll owners or mutate access through a file fallback when its database is missing", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-passkey-db-required-"));
+  const accessStore = createFileAccessStore(path.join(directory, "access.json"));
+  const config: PasskeyAuthConfig = {
+    authHost: "auth.kanban.cards", authOrigin: "https://auth.kanban.cards", rpId: "auth.kanban.cards",
+    rootOrigins: ["https://kanban.cards"], sessionSecret: "test-secret-with-at-least-32-characters", sessionTtlSeconds: 3600
+  };
+  let server: Server | undefined;
+  try {
+    server = await listenApp(createApp({ host: "0.0.0.0", rootHost: "kanban.cards", passkeyAuthConfig: config,
+      dataPath: path.join(directory, "state.json"), accessStore, requireDatabase: true }));
+    const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    for (const [endpoint, host, origin] of [
+      ["/api/auth-start", "kanban.cards", "https://kanban.cards"],
+      ["/api/passkeys/start", "auth.kanban.cards", "https://kanban.cards"],
+      ["/api/passkeys/options", "auth.kanban.cards", "https://auth.kanban.cards"],
+      ["/api/workspaces", "kanban.cards", "https://kanban.cards"]
+    ]) {
+      const response = await fetch(`${baseUrl}${endpoint}`, { method: "POST", headers: {
+        Host: host, Origin: origin, "Content-Type": "application/json"
+      }, body: JSON.stringify({ mode: "signup" }) });
+      assert.equal(response.status, 503, endpoint);
+    }
+    const state = await accessStore.read();
+    assert.equal(state.owners.length, 0);
+    assert.equal(state.authChallenges.length, 0);
+    assert.equal(state.authSessions.length, 0);
+  } finally {
+    if (server) await close(server);
     await fs.rm(directory, { recursive: true, force: true });
   }
 });
