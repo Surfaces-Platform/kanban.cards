@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import express, { type ErrorRequestHandler, type Request } from "express";
@@ -43,7 +44,7 @@ function fakeAuthenticator(): NonNullable<PasskeyRouterOptions["webauthn"]> {
 }
 
 async function harness(overrides: Partial<PasskeyAuthConfig> = {}) {
-  const directory = await fs.mkdtemp("/private/tmp/kanban-passkey-");
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-passkey-"));
   const dataPath = path.join(directory, "access.json");
   let clock = new Date("2026-10-09T12:00:00.000Z");
   const store = createFileAccessStore(dataPath, { now: () => clock });

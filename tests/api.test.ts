@@ -55,7 +55,7 @@ test("missing owner and external-bind configuration fail closed", async () => {
 });
 
 test("production cannot enroll owners or mutate access through a file fallback when its database is missing", async () => {
-  const directory = await fs.mkdtemp("/private/tmp/kanban-passkey-db-required-");
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-passkey-db-required-"));
   const accessStore = createFileAccessStore(path.join(directory, "access.json"));
   const config: PasskeyAuthConfig = {
     authHost: "auth.kanban.cards", authOrigin: "https://auth.kanban.cards", rpId: "auth.kanban.cards",

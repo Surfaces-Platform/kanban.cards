@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
@@ -9,7 +10,7 @@ import { hashSecret } from "../src/passkey-auth";
 const script = path.resolve("dist/scripts/create-owner-setup.js");
 
 test("owner setup writes its one-hour secret only to a private local file and never overwrites it", async () => {
-  const directory = await fs.mkdtemp("/private/tmp/kanban-owner-setup-");
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-owner-setup-"));
   const output = path.join(directory, "private", "setup.json");
   try {
     const before = Date.now();
