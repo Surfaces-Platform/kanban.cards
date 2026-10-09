@@ -77,6 +77,20 @@ test("root and tenant sessions are signed, audience-separated, host-only, and ex
   assert.match(clearTenantSessionCookie(true), /^__Host-kanban_tenant_session=; .*Max-Age=0/);
 });
 
+test("default root and tenant cookies and signed tokens last 365 days", async () => {
+  const { decodeJwt } = await import("jose");
+  const cookies = [
+    await createRootSessionCookie(ROOT_SESSION, SESSION_SECRET, true),
+    await createTenantSessionCookie(TENANT_SESSION, SESSION_SECRET, true)
+  ];
+  for (const cookie of cookies) {
+    assert.match(cookie, /; Max-Age=31536000(?:;|$)/);
+    const token = cookie.split(";", 1)[0].split("=")[1];
+    const payload = decodeJwt(token);
+    assert.equal(payload.exp! - payload.iat!, 31_536_000);
+  }
+});
+
 test("session creation validates scalar identity, exact secure origins, TTL, and secret", async () => {
   await assert.rejects(() => createRootSessionCookie({
     ...ROOT_SESSION,

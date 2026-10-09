@@ -7,6 +7,7 @@ import express, { type ErrorRequestHandler, type NextFunction, type Request, typ
 
 import { AccessStoreError, createAccessStore, type AccessStore, type AccessWorkspace, type AccessRegistryState } from "./access-store";
 import {
+  BROWSER_SESSION_TTL_SECONDS,
   clearRootSessionCookie, clearTenantSessionCookie,
   createRootSessionCookie, createTenantSessionCookie,
   isProductionRequest, verifyRootSession, verifyTenantSession, type RootSession
@@ -124,7 +125,6 @@ const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 4317;
 const SESSION_COOKIE = "kanban_cards_session";
 const RESERVED_WORKSPACE_SLUGS = new Set(["api", "app", "auth", "admin", "www"]);
-const DEFAULT_SESSION_TTL_SECONDS = 60 * 60 * 24 * 7;
 const MAX_ACTIVITY = 1_000;
 const MAX_IDEMPOTENCY_RECORDS = 1_000;
 const DEFAULT_COLUMNS = ["Next", "Doing", "Done"];
@@ -178,7 +178,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       throw new Error("Passkey root origins must exactly match the configured application roots.");
     }
   }
-  const sessionTtlSeconds = passkeyAuthConfig?.sessionTtlSeconds || positiveInteger(options.sessionTtlSeconds ?? process.env.KANBAN_CARDS_SESSION_TTL_SECONDS, DEFAULT_SESSION_TTL_SECONDS);
+  const sessionTtlSeconds = passkeyAuthConfig?.sessionTtlSeconds || positiveInteger(options.sessionTtlSeconds ?? process.env.KANBAN_CARDS_SESSION_TTL_SECONDS, BROWSER_SESSION_TTL_SECONDS);
   const missingConfiguration = [
     ...(!passkeyAuthConfig && !apiToken ? ["KANBAN_CARDS_API_TOKEN (local development only)"] : []),
     ...(production && !passkeyAuthConfig ? ["SESSION_SECRET and KANBAN_CARDS_AUTH_HOST"] : []),
@@ -490,7 +490,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
         tenantSession,
         passkeyAuthConfig.sessionSecret,
         isProductionRequest(webRequest(req, trustForwardedHost)),
-        passkeyAuthConfig.sessionTtlSeconds
+        Math.max(1, Math.floor((Date.parse(active.session.expiresAt) - Date.now()) / 1000))
       ));
       if (req.is("application/x-www-form-urlencoded")) {
         res.redirect(303, "/");

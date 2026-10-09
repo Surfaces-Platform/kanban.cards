@@ -9,7 +9,7 @@ import express, { type ErrorRequestHandler, type Request } from "express";
 import { createFileAccessStore } from "../src/access-store";
 import { activeOwnerSession, authenticationClientIp, createPasskeyRouter, getPasskeyConfig, hashSecret, readAuthIntent, validatePasskeyAuthConfig, type PasskeyAuthConfig, type PasskeyMode, type PasskeyRouterOptions } from "../src/passkey-auth";
 
-const config: PasskeyAuthConfig = { authHost: "auth.kanban.cards", authOrigin: "https://auth.kanban.cards", rpId: "auth.kanban.cards", sessionSecret: "a-development-secret-with-at-least-32-bytes", rootOrigins: ["https://kanban.cards"], sessionTtlSeconds: 604800 };
+const config = getPasskeyConfig({ SESSION_SECRET: "a-development-secret-with-at-least-32-bytes" });
 const AUTH_ORIGIN = config.authOrigin;
 const ROOT_ORIGIN = config.rootOrigins[0];
 
@@ -105,6 +105,39 @@ test("client rate limits trust only a single Vercel client IP when running on Ve
   assert.equal(authenticationClientIp(request({ "x-vercel-forwarded-for": "198.51.100.12, 198.51.100.13" }), true), "127.0.0.1");
   assert.equal(authenticationClientIp(request({ "x-vercel-forwarded-for": "198.51.100.12" }), false), "127.0.0.1");
   assert.equal(authenticationClientIp(request({ "x-forwarded-for": "198.51.100.12" }), true), "127.0.0.1");
+});
+
+test("browser sessions default to 365 days and reject lifetimes outside one minute to one year", () => {
+  assert.equal(config.sessionTtlSeconds, 31_536_000);
+  assert.doesNotThrow(() => validatePasskeyAuthConfig({ ...config, sessionTtlSeconds: 60 }));
+  assert.doesNotThrow(() => validatePasskeyAuthConfig({ ...config, sessionTtlSeconds: 31_536_000 }));
+  for (const sessionTtlSeconds of [59, 31_536_001, 60.5, NaN, Infinity]) {
+    assert.throws(() => validatePasskeyAuthConfig({ ...config, sessionTtlSeconds }), /between one minute and 365 days/);
+  }
+});
+
+test("a one-year session survives day 364, keeps its original expiry after verification, and ends at day 365", async () => {
+  const h = await harness();
+  try {
+    const signup = await h.enroll("signup", { workspaceName: "Studio", workspaceSlug: "studio" });
+    assert.equal(signup.verified.status, 200);
+    const session = (await h.store.read()).authSessions[0];
+    assert.equal(Date.parse(session.expiresAt) - Date.parse(session.createdAt), 31_536_000_000);
+    h.setTime(new Date(Date.parse(session.createdAt) + 364 * 24 * 60 * 60 * 1000));
+    assert.ok(await activeOwnerSession(h.store, session.id, h.time()));
+    const verification = await h.begin("verify", { ownerId: session.ownerId, sessionId: session.id });
+    const options = await h.request("options", {}, verification.jar);
+    assert.equal(options.status, 200);
+    const verified = await h.request("verify", { challengeId: options.body.challengeId, response: { id: signup.keyId, testChallenge: options.body.options.challenge } }, verification.jar);
+    assert.equal(verified.status, 200);
+    const refreshed = (await h.store.read()).authSessions.find(entry => entry.id === session.id)!;
+    assert.equal(refreshed.verifiedAt, h.time().toISOString());
+    assert.equal(refreshed.expiresAt, session.expiresAt);
+    h.setTime(new Date(Date.parse(session.expiresAt) - 1));
+    assert.ok(await activeOwnerSession(h.store, session.id, h.time()));
+    h.setTime(new Date(session.expiresAt));
+    assert.equal(await activeOwnerSession(h.store, session.id, h.time()), null);
+  } finally { await h.close(); }
 });
 
 test("signup creates an isolated owner only after verification and persists only recovery/handoff hashes", async () => {

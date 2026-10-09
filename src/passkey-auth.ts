@@ -2,6 +2,8 @@ import crypto from "node:crypto";
 import { isIP } from "node:net";
 import express, { type Request } from "express";
 
+import { BROWSER_SESSION_TTL_SECONDS } from "./app-sessions";
+
 import {
   type AccessOwner,
   type AccessRegistryState,
@@ -69,7 +71,7 @@ export function getPasskeyConfig(env: NodeJS.ProcessEnv = process.env): PasskeyA
     rpId: String(env.KANBAN_CARDS_PASSKEY_RP_ID || new URL(authOrigin).hostname).trim().toLowerCase(),
     sessionSecret: String(env.SESSION_SECRET || env.KANBAN_CARDS_SESSION_SECRET || ""),
     rootOrigins: [originForHost(rootHost), ...(env.KANBAN_CARDS_CANDIDATE_ROOT_HOST?.trim() ? [originForHost(env.KANBAN_CARDS_CANDIDATE_ROOT_HOST.trim().toLowerCase())] : [])],
-    sessionTtlSeconds: 7 * 24 * 60 * 60,
+    sessionTtlSeconds: BROWSER_SESSION_TTL_SECONDS,
     setupOwnerId: env.KANBAN_CARDS_SETUP_OWNER_ID?.trim(),
     setupTokenHash: env.KANBAN_CARDS_SETUP_TOKEN_HASH?.trim(),
     setupExpiresAt: env.KANBAN_CARDS_SETUP_EXPIRES_AT?.trim()
@@ -86,7 +88,7 @@ export function validatePasskeyAuthConfig(config: PasskeyAuthConfig): void {
   for (const origin of config.rootOrigins) {
     if (checkedOrigin(origin).origin === auth.origin) throw new Error("The passkey auth host must be separate from the board root host.");
   }
-  if (!Number.isSafeInteger(config.sessionTtlSeconds) || config.sessionTtlSeconds < 60 || config.sessionTtlSeconds > 30 * 24 * 60 * 60) throw new Error("Passkey session lifetime must be between one minute and thirty days.");
+  if (!Number.isSafeInteger(config.sessionTtlSeconds) || config.sessionTtlSeconds < 60 || config.sessionTtlSeconds > BROWSER_SESSION_TTL_SECONDS) throw new Error("Passkey session lifetime must be between one minute and 365 days.");
   const setup = [config.setupOwnerId, config.setupTokenHash, config.setupExpiresAt];
   if (setup.some(Boolean) && !setup.every(Boolean)) throw new Error("One-time owner setup requires owner ID, token hash, and expiry together.");
   if (config.setupTokenHash && !/^sha256:[a-f0-9]{64}$/.test(config.setupTokenHash)) throw new Error("Setup token must be configured as a SHA-256 hash.");
