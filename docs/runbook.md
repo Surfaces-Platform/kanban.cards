@@ -27,6 +27,8 @@ Use Mike's existing internal owner ID from the access registry. Keep that owner 
 4. Open Mike's existing Workspace and verify the Projects, Cards, comments, and Activity.
 5. Remove the setup environment values after enrollment. Setup is permanently consumed in the registry.
 
+If the one-hour token expires before enrollment, generate a replacement using a new local output filename and update the three setup environment values. Release a fresh Git build before using the replacement: changing environment values in Vercel does not update the running deployment.
+
 Public signup creates a new owner and private Workspace after passkey verification. It cannot claim an existing owner by email or receive Mike's board. The replacement uses one release; no coexistence deployment is required.
 
 ## Fast lane: ordinary product changes
