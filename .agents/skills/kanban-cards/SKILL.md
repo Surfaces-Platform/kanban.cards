@@ -60,22 +60,56 @@ node "{skill_dir}/scripts/kanban-cards-client.mjs" create-project \
 node "{skill_dir}/scripts/kanban-cards-client.mjs" create-card \
   --title "Simplify authentication" \
   --body "Connect the bounded Workspace agent." \
+  --next-actor agent \
+  --next-action "Implement the scoped API key setup path" \
+  --priority High \
   --external-key "recommendation:simplify-auth"
 ```
 
 When `--column` is omitted, the server places the card in the first column. Read the project and use its returned column IDs for later moves. To choose stable IDs at project creation, pass JSON to `--columns`, for example `[{"id":"next","name":"Next"}]`.
 
+## Record the next handoff
+
+Cards have four structured work fields:
+
+| Field | Helper option | Values |
+| --- | --- | --- |
+| Next actor | `--next-actor` | `human` (You in the browser), `agent`, or `unassigned` |
+| Next action | `--next-action` | A concrete instruction; `""` clears it |
+| Priority | `--priority` | `High`, `Medium`, `Low`, or `unset` |
+| Blocker | `--blocked-reason` | What prevents progress; `""` clears it |
+
+Use these options on `create-card` or `update-card`. Existing cards start unassigned, with no priority, next action, or blocker. Set fields from the user's instructions and verified work state. Handoff fields do not assign an agent identity, start execution, grant access, or authorize publication. Columns still describe the workflow stage.
+
+Filter cards to find the next work:
+
+```bash
+node "{skill_dir}/scripts/kanban-cards-client.mjs" cards \
+  --next-actor agent \
+  --priority High \
+  --blocked false
+```
+
+Filters combine with AND: this example returns active High-priority cards whose next actor is Agent and whose blocker is empty. Use `--next-actor unassigned`, `--priority unset`, or `--blocked true` to find missing handoffs or blocked work. Omit a filter to include every value for that field. Archived cards are excluded unless `--include-archived true` is supplied. Supply each option once. Repeated options and invalid or missing filter values fail instead of returning a broader list.
+
 ## Execute and reconcile
 
 Before work, read `project` or `cards` and note the card version. After substantive work:
 
-1. Update the card body when its scope or outcome changed.
+1. Update the card body when its scope or outcome changed. Update the next actor, next action, priority, and blocker when the handoff changes.
 2. Add a concise comment stating what changed and what remains.
 3. Move the card only when the destination column truthfully describes its state.
 4. Pass `--version` on every project or card patch; the helper requires it. A comment returns the compact reference `card: { id, version }`; use that version or re-read before a later update, move, or archive.
 5. Re-read the project to verify the mutation. If the server reports a version conflict, inspect current state and reconcile instead of overwriting it.
 
 ```bash
+node "{skill_dir}/scripts/kanban-cards-client.mjs" update-card \
+  --card <card-id> \
+  --next-actor human \
+  --next-action "Review the setup path" \
+  --blocked-reason "" \
+  --version <card-version>
+
 node "{skill_dir}/scripts/kanban-cards-client.mjs" comment \
   --card <card-id> \
   --text "Implemented and verified the tenant-bound AgentConnection setup path."

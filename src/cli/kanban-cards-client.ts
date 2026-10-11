@@ -98,21 +98,23 @@ async function run(action: string | undefined, opts: CliOptions, context: Runtim
   }
 
   if (action === "cards") {
-    const result = await request(projectPath, {}, context);
-    if (!isRecord(result)) return result;
-    const project = isRecord(result.project) ? result.project : result;
-    return {
-      cards: Array.isArray(project.cards) ? project.cards : [],
-      projectRevision: project.revision
-    };
+    assertKnownOptions(opts, ["project", "repo", "next-actor", "priority", "blocked", "include-archived"]);
+    const query = new URLSearchParams();
+    if (opts["next-actor"] !== undefined) query.set("nextActor", enumOption(opts, "next-actor", ["human", "agent", "unassigned"]));
+    if (opts.priority !== undefined) query.set("priority", enumOption(opts, "priority", ["High", "Medium", "Low", "unset"]));
+    if (opts.blocked !== undefined) query.set("blocked", enumOption(opts, "blocked", ["true", "false"]));
+    if (opts["include-archived"] !== undefined) query.set("includeArchived", enumOption(opts, "include-archived", ["true", "false"]));
+    return request(`${projectPath}/cards${query.size ? `?${query}` : ""}`, {}, context);
   }
 
   if (action === "create-card") {
+    assertKnownOptions(opts, ["project", "repo", "title", "body", "column", "position", "external-key", "idempotency-key", "next-actor", "next-action", "priority", "blocked-reason"]);
     requireOption(opts, "title");
     const body: Record<string, unknown> = { title: stringOption(opts, "title") };
     copyTextOption(opts, body, "body");
     copyStringOption(opts, body, "column", "columnId");
     copyStringOption(opts, body, "external-key", "externalKey");
+    copyCardMetadataOptions(opts, body);
     if (opts.position !== undefined) body.position = numberOption(opts, "position");
     const externalKey = optionalStringOption(opts, "external-key");
     return request(`${projectPath}/cards`, {
@@ -123,10 +125,12 @@ async function run(action: string | undefined, opts: CliOptions, context: Runtim
   }
 
   if (action === "update-card") {
+    assertKnownOptions(opts, ["project", "repo", "card", "title", "body", "version", "next-actor", "next-action", "priority", "blocked-reason"]);
     const cardId = stringOption(opts, "card");
     const body: Record<string, unknown> = {};
     copyStringOption(opts, body, "title");
     copyTextOption(opts, body, "body");
+    copyCardMetadataOptions(opts, body);
     requireNonEmptyBody(body, action);
     return request(`${projectPath}/cards/${encodeURIComponent(cardId)}`, {
       method: "PATCH",
@@ -377,6 +381,30 @@ function copyTextOption(opts: CliOptions, body: Record<string, unknown>, option:
   body[field] = opts[option];
 }
 
+function copyCardMetadataOptions(opts: CliOptions, body: Record<string, unknown>): void {
+  if (opts["next-actor"] !== undefined) {
+    const value = enumOption(opts, "next-actor", ["human", "agent", "unassigned"]);
+    body.nextActor = value === "unassigned" ? null : value;
+  }
+  copyTextOption(opts, body, "next-action", "nextAction");
+  if (opts.priority !== undefined) {
+    const value = enumOption(opts, "priority", ["High", "Medium", "Low", "unset"]);
+    body.priority = value === "unset" ? null : value;
+  }
+  copyTextOption(opts, body, "blocked-reason", "blockedReason");
+}
+
+function enumOption<T extends string>(opts: CliOptions, key: string, allowed: readonly T[]): T {
+  const value = stringOption(opts, key);
+  if (!allowed.includes(value as T)) throw new Error(`--${key} must be one of: ${allowed.join(", ")}.`);
+  return value as T;
+}
+
+function assertKnownOptions(opts: CliOptions, allowed: readonly string[]): void {
+  const unexpected = Object.keys(opts).filter((key) => !allowed.includes(key));
+  if (unexpected.length) throw new Error(`Unsupported option(s): ${unexpected.map((key) => `--${key}`).join(", ")}`);
+}
+
 function optionalStringOption(opts: CliOptions, key: string): string | undefined {
   const value = opts[key];
   if (value === undefined) return undefined;
@@ -458,13 +486,14 @@ function parseArgs(values: string[]): CliOptions {
     const value = values[index];
     if (!value.startsWith("--")) throw new Error(`Unexpected argument: ${value}`);
     const equalsIndex = value.indexOf("=");
+    const key = equalsIndex > 2 ? value.slice(2, equalsIndex) : value.slice(2);
+    if (Object.hasOwn(parsed, key)) throw new Error(`Repeated option: --${key}. Supply each option once.`);
     if (equalsIndex > 2) {
-      parsed[value.slice(2, equalsIndex)] = value.slice(equalsIndex + 1);
+      parsed[key] = value.slice(equalsIndex + 1);
       continue;
     }
-    const key = value.slice(2);
     const next = values[index + 1];
-    if (!next || next.startsWith("--")) {
+    if (next === undefined || next.startsWith("--")) {
       parsed[key] = true;
     } else {
       parsed[key] = next;
@@ -486,9 +515,9 @@ function usage(): Record<string, unknown> {
       "bind --project <project-id> [--repo <path>]",
       "project [--project <project-id>] [--repo <path>]",
       "update-project [--project <project-id>] [--name <name>] [--description <text>] [--columns <comma-list-or-json>] --version <version>",
-      "cards [--project <project-id>]",
-      "create-card [--project <project-id>] --title <title> [--body <text>] [--column <column-id>] [--position <number>] [--external-key <key>] [--idempotency-key <key>]",
-      "update-card [--project <project-id>] --card <card-id> [--title <title>] [--body <text>] --version <version>",
+      "cards [--project <project-id>] [--next-actor human|agent|unassigned] [--priority High|Medium|Low|unset] [--blocked true|false] [--include-archived true|false]",
+      "create-card [--project <project-id>] --title <title> [--body <text>] [--column <column-id>] [--position <number>] [--external-key <key>] [--idempotency-key <key>] [--next-actor human|agent|unassigned] [--next-action <text>] [--priority High|Medium|Low|unset] [--blocked-reason <text>]",
+      "update-card [--project <project-id>] --card <card-id> [--title <title>] [--body <text>] [--next-actor human|agent|unassigned] [--next-action <text>] [--priority High|Medium|Low|unset] [--blocked-reason <text>] --version <version>",
       "move-card [--project <project-id>] --card <card-id> --column <column-id> [--position <number>] --version <version>",
       "archive-card [--project <project-id>] --card <card-id> --version <version>",
       "comment [--project <project-id>] --card <card-id> --text <text> [--idempotency-key <key>]",

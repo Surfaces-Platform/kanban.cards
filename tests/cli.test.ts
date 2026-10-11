@@ -195,6 +195,112 @@ test("the skill helper verifies a tenant-bound AgentConnection, preserves stable
   }
 });
 
+test("the skill helper creates, clears, and filters card handoff fields without broadening invalid filters", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-cards-handoff-cli-"));
+  const home = path.join(directory, "home");
+  const repository = path.join(directory, "repo");
+  await fs.mkdir(path.join(repository, ".git"), { recursive: true });
+  await fs.mkdir(home, { recursive: true });
+  const app = createApp({ dataPath: path.join(directory, "workspace.json"), apiToken: "handoff-cli-secret", requireDatabase: false });
+  const observedRequests: string[] = [];
+  const server = createServer((req, res) => {
+    observedRequests.push(`${req.method} ${req.url}`);
+    app(req, res);
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api`;
+  const options = { cwd: repository, env: cleanEnv({ HOME: home }) };
+  const run = async (args: string[]) => JSON.parse((await runCli(args, options)).stdout);
+
+  try {
+    await runCli(["setup", "--url", baseUrl, "--token-stdin"], { ...options, input: "handoff-cli-secret\n" });
+    const project = unwrap(await run(["create-project", "--name", "Card handoffs"]), "project");
+    await run(["bind", "--project", project.id]);
+    const agentCard = unwrap(await run([
+      "create-card", "--title", "Draft the resume", "--next-actor", "agent",
+      "--next-action", "Draft the two-page resume", "--priority", "High", "--blocked-reason", ""
+    ]), "card");
+    assert.equal(agentCard.nextActor, "agent");
+    assert.equal(agentCard.nextAction, "Draft the two-page resume");
+    assert.equal(agentCard.priority, "High");
+    assert.equal(agentCard.blockedReason, "");
+    const humanCard = unwrap(await run([
+      "create-card", "--title", "Review responsibilities", "--next-actor", "human",
+      "--next-action", "Confirm current responsibilities", "--priority", "High", "--blocked-reason", "Missing owner facts"
+    ]), "card");
+    const unassignedCard = unwrap(await run([
+      "create-card", "--title", "Choose later", "--next-actor", "unassigned", "--priority", "unset"
+    ]), "card");
+    assert.equal(unassignedCard.nextActor, null);
+    assert.equal(unassignedCard.priority, null);
+    assert.equal(unassignedCard.nextAction, "");
+    assert.equal(unassignedCard.blockedReason, "");
+
+    const filtered = await run(["cards", "--next-actor", "agent", "--priority", "High", "--blocked", "false"]);
+    assert.deepEqual(filtered.cards.map((card: any) => card.id), [agentCard.id]);
+    assert.equal(typeof filtered.projectRevision, "number");
+    assert.ok(observedRequests.includes(`GET /api/projects/${project.id}/cards?nextActor=agent&priority=High&blocked=false`));
+    assert.deepEqual((await run(["cards", "--priority", "High", "--blocked", "true"])).cards.map((card: any) => card.id), [humanCard.id]);
+    assert.deepEqual((await run(["cards", "--next-actor", "unassigned", "--priority", "unset"])).cards.map((card: any) => card.id), [unassignedCard.id]);
+    assert.equal((await run(["cards", "--next-actor", "human", "--priority", "High", "--blocked", "false"])).cards.length, 0);
+
+    const handedOff = unwrap(await run([
+      "update-card", "--card", agentCard.id, "--version", String(agentCard.version),
+      "--next-actor", "human", "--next-action", "Review the resume", "--priority", "Medium", "--blocked-reason", "Waiting for review"
+    ]), "card");
+    assert.equal(handedOff.nextActor, "human");
+    assert.equal(handedOff.nextAction, "Review the resume");
+    assert.equal(handedOff.priority, "Medium");
+    assert.equal(handedOff.blockedReason, "Waiting for review");
+    const cleared = unwrap(await run([
+      "update-card", "--card", agentCard.id, "--version", String(handedOff.version),
+      "--next-actor", "unassigned", "--next-action", "", "--priority", "unset", "--blocked-reason", ""
+    ]), "card");
+    assert.equal(cleared.nextActor, null);
+    assert.equal(cleared.nextAction, "");
+    assert.equal(cleared.priority, null);
+    assert.equal(cleared.blockedReason, "");
+
+    await run(["archive-card", "--card", unassignedCard.id, "--version", String(unassignedCard.version)]);
+    assert.equal((await run(["cards"])).cards.length, 2);
+    assert.equal((await run(["cards", "--include-archived", "false"])).cards.length, 2);
+    assert.equal((await run(["cards", "--include-archived", "true"])).cards.length, 3);
+
+    const otherProject = unwrap(await run(["create-project", "--name", "Other project"]), "project");
+    await run(["create-card", "--project", otherProject.id, "--title", "Other agent task", "--next-actor", "agent"]);
+    assert.equal((await run(["cards", "--project", otherProject.id, "--next-actor", "agent"])).cards.length, 1);
+    assert.equal((await run(["cards", "--next-actor", "agent"])).cards.length, 0);
+
+    const requestsBeforeInvalidOptions = observedRequests.length;
+    for (const [args, error] of [
+      [["cards", "--next-actor"], /Missing --next-actor/],
+      [["cards", "--next-actor", "you"], /--next-actor must be one of/],
+      [["cards", "--priority", "high"], /--priority must be one of/],
+      [["cards", "--priority"], /Missing --priority/],
+      [["cards", "--blocked", "yes"], /--blocked must be one of/],
+      [["cards", "--blocked"], /Missing --blocked/],
+      [["cards", "--blocked", "true", "--blocked", "false"], /Repeated option.*--blocked/],
+      [["cards", "--include-archived"], /Missing --include-archived/],
+      [["cards", "--include-archived", "yes"], /--include-archived must be one of/],
+      [["cards", "--next-actr", "agent"], /Unsupported option.*--next-actr/],
+      [["create-card", "--title", "Invalid", "--next-action"], /Missing --next-action/],
+      [["create-card", "--title", "Invalid", "--next-actor", "codex"], /--next-actor must be one of/],
+      [["update-card", "--card", agentCard.id, "--version", String(cleared.version), "--priority", "urgent"], /--priority must be one of/],
+      [["update-card", "--card", agentCard.id, "--version", String(cleared.version), "--priority", "High", "--priority=Low"], /Repeated option.*--priority/],
+      [["update-card", "--card", agentCard.id, "--version", String(cleared.version), "--blocked-reason"], /Missing --blocked-reason/]
+    ] as Array<[string[], RegExp]>) {
+      await assert.rejects(runCli(args, options), error);
+    }
+    assert.equal(observedRequests.length, requestsBeforeInvalidOptions, "invalid options must fail before requesting an unfiltered list or writing a card");
+  } finally {
+    if (server.listening) await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
 function runCli(
   args: string[],
   options: { cwd: string; env: NodeJS.ProcessEnv; input?: string }

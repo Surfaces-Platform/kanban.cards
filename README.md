@@ -85,6 +85,38 @@ Invoke `$kanban-cards` from a bound repository to create cards, read current sta
 
 Rotate a key by creating its replacement, updating the client, checking access, and revoking the old key. A revoked or expired key stops working immediately.
 
+## Card handoffs and filters
+
+Cards have four optional fields for coordinating work:
+
+| Field | API value | Browser label |
+| --- | --- | --- |
+| `nextActor` | `human`, `agent`, or `null` | You, Agent, or Unassigned |
+| `nextAction` | Plain text; empty by default | Next action |
+| `priority` | `High`, `Medium`, `Low`, or `null` | Priority |
+| `blockedReason` | Plain text; empty by default | Blocker |
+
+Set the fields when creating a Card or edit them in Card detail. Existing Cards start unassigned, with no priority, next action, or blocker. A nonempty blocker means the Card is blocked. Column still describes progress; next actor describes who should act next. These fields do not run agents or grant permission to take an action.
+
+The board combines Next actor, Priority, and Blocked filters. For example, choose Agent, High, and Unblocked to find work an agent can pick up next. Counts show matching Cards out of all active Cards. Clear filters restores the full board. Filtering keeps an open Card available while you edit, even if your changes remove it from the matching results.
+
+Agents can use the same fields and filters:
+
+```bash
+node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs \
+  create-card --title "Draft release notes" --next-actor agent \
+  --next-action "Write a draft from the merged changes" --priority High
+
+node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs \
+  cards --next-actor agent --priority High --blocked false
+
+node .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs \
+  update-card --card <card-id> --version <card-version> \
+  --next-actor human --next-action "Review the draft" --blocked-reason ""
+```
+
+Use `--next-actor unassigned`, `--priority unset`, or an empty string for either text field to clear a value. The filtered `GET /api/projects/:projectId/cards` endpoint returns active Cards by default and accepts `nextActor`, `priority`, `blocked`, and `includeArchived` query parameters. The Project endpoint continues to return its complete snapshot. See [the API reference](.agents/skills/kanban-cards/references/api.md) for values and response shapes.
+
 ## Runtime and storage
 
 | Source | Responsibility |
@@ -120,7 +152,7 @@ POST            /api/workspace-handoffs
 POST            /api/workspace-handoff
 GET/POST        /api/projects
 GET/PATCH       /api/projects/:projectId
-POST            /api/projects/:projectId/cards
+GET/POST        /api/projects/:projectId/cards
 PATCH           /api/projects/:projectId/cards/:cardId
 POST            /api/projects/:projectId/cards/:cardId/comments
 GET             /api/projects/:projectId/activity

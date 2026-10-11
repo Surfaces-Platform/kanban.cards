@@ -33,6 +33,76 @@ test("Activity normalization preserves an optional stable AgentConnection ID wit
   assert.deepEqual(normalized.projects[0].activity[1].actor, { channel: "api", label: "Legacy bridge" });
 });
 
+test("existing Cards receive handoff defaults without interpreting or changing their body", () => {
+  const now = new Date().toISOString();
+  const workspace = workspaceWithProject(now) as any;
+  const body = "  Next actor: agent\nPriority: High\nBlocked: waiting for approval  \n";
+  workspace.projects[0].cards.push(storedCard(now, { body }));
+
+  const card = normalizeWorkspace(workspace).projects[0].cards[0];
+  assert.deepEqual(cardMetadata(card), { nextActor: null, nextAction: "", priority: null, blockedReason: "" });
+  assert.equal(card.body, body);
+  assert.equal(card.version, 1);
+});
+
+test("handoff metadata persists normalized values and can be cleared without losing other Card data", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-card-handoff-store-"));
+  const dataPath = path.join(directory, "workspace.json");
+  const store = createFileStateStore(dataPath);
+  const now = new Date().toISOString();
+  const workspace = workspaceWithProject(now) as any;
+  workspace.projects[0].cards.push(storedCard(now, {
+    nextActor: "agent", nextAction: "  Run the focused check\n", priority: "High", blockedReason: "  Waiting for access  "
+  }));
+  try {
+    await store.write(workspace);
+    const reopened = createFileStateStore(dataPath);
+    let card = (await reopened.read()).projects[0].cards[0];
+    assert.deepEqual(cardMetadata(card), { nextActor: "agent", nextAction: "Run the focused check", priority: "High", blockedReason: "Waiting for access" });
+
+    const cleared = JSON.parse(await fs.readFile(dataPath, "utf8"));
+    Object.assign(cleared.projects[0].cards[0], { nextActor: null, nextAction: null, priority: null, blockedReason: null });
+    await reopened.write(cleared);
+    card = (await store.read()).projects[0].cards[0];
+    assert.deepEqual(cardMetadata(card), { nextActor: null, nextAction: "", priority: null, blockedReason: "" });
+    assert.equal(card.title, "Existing Card");
+    assert.equal(card.body, "Existing description");
+    assert.equal(card.version, 1);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("invalid persisted handoff metadata fails closed and cannot overwrite valid state", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-card-handoff-invalid-"));
+  const dataPath = path.join(directory, "workspace.json");
+  const store = createFileStateStore(dataPath);
+  const now = new Date().toISOString();
+  const workspace = workspaceWithProject(now) as any;
+  workspace.projects[0].cards.push(storedCard(now));
+  try {
+    await store.write(workspace);
+    const before = await fs.readFile(dataPath, "utf8");
+    for (const invalid of [
+      { nextActor: "robot" }, { nextActor: ["human"] }, { priority: "high" }, { priority: 1 },
+      { nextAction: { text: "Act" } }, { blockedReason: false }
+    ]) {
+      const attempted = JSON.parse(before);
+      Object.assign(attempted.projects[0].cards[0], invalid);
+      await assert.rejects(() => store.write(attempted), /Card (nextActor|priority|nextAction|blockedReason) must/);
+      assert.equal(await fs.readFile(dataPath, "utf8"), before);
+    }
+    const invalidStored = JSON.parse(before);
+    invalidStored.projects[0].cards[0].nextActor = " Agent ";
+    const rawInvalid = JSON.stringify(invalidStored);
+    await fs.writeFile(dataPath, rawInvalid);
+    await assert.rejects(() => store.readExisting(), /Card nextActor must/);
+    assert.equal(await fs.readFile(dataPath, "utf8"), rawInvalid);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("file storage persists only normalized V2 state", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-cards-v2-store-"));
   const dataPath = path.join(directory, "workspace.json");
@@ -153,6 +223,17 @@ function workspaceWithProject(now: string): unknown {
     }],
     idempotencyRecords: []
   };
+}
+
+function storedCard(now: string, metadata: Record<string, unknown> = {}) {
+  return {
+    id: "card-existing", title: "Existing Card", body: "Existing description", columnId: "inbox", position: 0,
+    version: 1, archivedAt: null, createdAt: now, updatedAt: now, comments: [], ...metadata
+  };
+}
+
+function cardMetadata(card: { nextActor: unknown; nextAction: unknown; priority: unknown; blockedReason: unknown }) {
+  return { nextActor: card.nextActor, nextAction: card.nextAction, priority: card.priority, blockedReason: card.blockedReason };
 }
 
 class FakePostgresPool {

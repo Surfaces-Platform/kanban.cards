@@ -607,6 +607,27 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     res.json({ project });
   }));
 
+  app.get("/api/projects/:projectId/cards", asyncHandler(async (req, res) => {
+    noStore(res);
+    const supportedFilters = new Set(["nextActor", "priority", "blocked", "includeArchived"]);
+    if (Object.keys(req.query).some((key) => !supportedFilters.has(key))) {
+      throw httpError(400, "Supported Card filters are nextActor, priority, blocked, and includeArchived.");
+    }
+    const nextActor = queryEnum(req.query.nextActor, ["human", "agent", "unassigned"], "nextActor");
+    const priority = queryEnum(req.query.priority, ["High", "Medium", "Low", "unset"], "priority");
+    const blocked = queryEnum(req.query.blocked, ["true", "false"], "blocked");
+    const includeArchived = queryEnum(req.query.includeArchived, ["true", "false"], "includeArchived") === "true";
+    const project = findProject(await requestStore(req).read(), routeParam(req, "projectId"));
+    const cards = project.cards.filter((card) => {
+      if (!includeArchived && card.archivedAt) return false;
+      if (nextActor !== undefined && card.nextActor !== (nextActor === "unassigned" ? null : nextActor)) return false;
+      if (priority !== undefined && card.priority !== (priority === "unset" ? null : priority)) return false;
+      if (blocked !== undefined && Boolean(card.blockedReason.trim()) !== (blocked === "true")) return false;
+      return true;
+    });
+    res.json({ cards, projectRevision: project.revision });
+  }));
+
   app.patch("/api/projects/:projectId", asyncHandler(async (req, res) => {
     const projectId = routeParam(req, "projectId");
     const actor = requireActor(req);
@@ -670,6 +691,10 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
         ...(externalKey ? { externalKey } : {}),
         title: requiredString(body.title, "Card title"),
         body: cardBodyText(body.body),
+        nextActor: nullableEnum(body.nextActor, ["human", "agent"], "Card nextActor"),
+        nextAction: cardMetadataText(body.nextAction, "Card nextAction"),
+        priority: nullableEnum(body.priority, ["High", "Medium", "Low"], "Card priority"),
+        blockedReason: cardMetadataText(body.blockedReason, "Card blockedReason"),
         columnId,
         position: optionalPosition(body.position, nextCardPosition(project, columnId)),
         version: 1,
@@ -705,6 +730,22 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       }
       if (hasOwn(body, "body")) {
         card.body = cardBodyText(body.body);
+        changed = true;
+      }
+      if (hasOwn(body, "nextActor")) {
+        card.nextActor = nullableEnum(body.nextActor, ["human", "agent"], "Card nextActor");
+        changed = true;
+      }
+      if (hasOwn(body, "nextAction")) {
+        card.nextAction = cardMetadataText(body.nextAction, "Card nextAction");
+        changed = true;
+      }
+      if (hasOwn(body, "priority")) {
+        card.priority = nullableEnum(body.priority, ["High", "Medium", "Low"], "Card priority");
+        changed = true;
+      }
+      if (hasOwn(body, "blockedReason")) {
+        card.blockedReason = cardMetadataText(body.blockedReason, "Card blockedReason");
         changed = true;
       }
       if (hasOwn(body, "columnId")) {
@@ -1432,6 +1473,28 @@ function optionalText(value: unknown): string {
 
 function cardBodyText(value: unknown): string {
   return value === undefined || value === null ? "" : String(value).replace(/\r\n?/g, "\n");
+}
+
+function nullableEnum<T extends string>(value: unknown, values: readonly T[], label: string): T | null {
+  if (value == null) return null;
+  if (typeof value !== "string" || !values.includes(value as T)) {
+    throw httpError(400, `${label} must be ${values.join(", ")}, or null.`);
+  }
+  return value as T;
+}
+
+function cardMetadataText(value: unknown, label: string): string {
+  if (value == null) return "";
+  if (typeof value !== "string") throw httpError(400, `${label} must be a string or null.`);
+  return value.trim();
+}
+
+function queryEnum<T extends string>(value: unknown, values: readonly T[], label: string): T | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !values.includes(value as T)) {
+    throw httpError(400, `${label} must be one of ${values.join(", ")} and supplied once.`);
+  }
+  return value as T;
 }
 
 function cleanLabel(value: unknown, fallback: string): string {

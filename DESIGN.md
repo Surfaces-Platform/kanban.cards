@@ -130,7 +130,11 @@ The design may use horizontal lanes, a responsive grid, or another tested constr
 
 ### Card detail and editing
 
-Card detail must support title, body, Column, Comments, Activity context, and archive behavior without losing Project context.
+Card detail must support title, body, Column, next actor, next action, priority, blocker, Comments, Activity context, and archive behavior without losing Project context.
+
+Next actor is You, Agent, or Unassigned. Priority is High, Medium, Low, or unset. Next action and blocker are plain text. All four fields are optional. A nonempty blocker marks the Card as blocked. These fields describe the work; they do not change authority or execute actions. Columns remain the sole progress model.
+
+Card tiles show compact actor, priority, blocked, and next-action context when present. The Project offers combined next-actor, priority, and blocked filters, matching counts, and one clear-filters action. A filtered Column with no matches must be distinguishable from an empty Column. Filtering must preserve a selected Card and any unsaved draft, including when an edit causes the Card to stop matching.
 
 The detail surface may be inline, adjacent, overlaid, or navigated. A drawer, inspector, modal, or dedicated view is a decision to make from current workflows and rendered prototypes. No previous implementation decides it automatically.
 
@@ -242,14 +246,14 @@ The alternative **Focus Workspace** remains comparison evidence, not a second pr
 
 ### Columns, Cards, and creation
 
-- Desktop uses an ordered Column grid with compact, consistently structured Card summaries: title, a short body-derived summary when present, Comment count, and recency.
+- Desktop uses an ordered Column grid with compact, consistently structured Card summaries: title, optional next actor, priority, blocked cue and next action, a short body-derived summary when present, Comment count, and recency.
 - Column placement communicates Card state; do not repeat state decoration without a separate need.
 - The board-local Add Column action preserves every existing Column id, order, and Card placement, then makes the new final Column visible on desktop and narrow screens.
 - New Project and New Card actions remain near their resource context and stay reachable in empty, populated, desktop, and narrow-screen states.
 - An existing Card has one canonical browser movement path: a visible `Move…` command in the selected-Card toolbar. It opens a named `Move Card` disclosure that states the current Column and presents every other Column as an explicit `Move to <Column>` action.
 - The Move disclosure uses ordinary buttons, not menu semantics. It remains the same command on desktop and narrow screens and is the keyboard, touch, and assistive-technology path. This slice does not add drag-and-drop, a board-Card overflow action, or a persistent selected-Card Column field.
 - New Card creation shows a labeled `Create in` choice before the Create action. Desktop defaults to the first ordered Column; narrow and Column-local entry default to the visible or launch Column. The choice is creation context, not an editable state field on an existing Card.
-- Movement waits for pending title and Body saves, locks conflicting mutations, changes only the destination against the latest Card version, and keeps the Card open. The board, Card Activity, narrow-screen Column, close label, and completion receipt then agree on the destination.
+- Movement waits for pending Card field saves, locks conflicting mutations, changes only the destination against the latest Card version, and keeps the Card open. The board, Card Activity, narrow-screen Column, close label, and completion receipt then agree on the destination.
 - A move-time version conflict retains only the requested destination. The latest stored Card remains authoritative, and recovery offers an explicit destination-specific Retry or Cancel without replaying title or Body changes.
 - A successful create, edit, move, or Comment updates the visible resource and its Card-specific Activity before showing one secondary transient confirmation. The latest confirmation replaces the prior one and leaves without moving focus. Retaining an unsaved Card draft uses the same transient acknowledgement while the affected board Card and reopened editor carry the durable recovery cue instead of a workspace banner.
 
@@ -257,6 +261,7 @@ The alternative **Focus Workspace** remains comparison evidence, not a second pr
 
 - Card detail is absent until a Card is selected. It opens from the right as a full-height, wide, nonmodal surface with an X close control; no empty inspector, context eyebrow, detail heading, or inspector Refresh is rendered.
 - Title and Description are surface-integrated controls. Description is the dominant object and stores its Markdown source unchanged apart from browser newline normalization in the existing Card `body` field. Existing Cards save title and Description on field blur, without a Save action or an inspector Column selector; new Card creation retains an explicit Create action.
+- Next actor and Priority save on selection. Next action and Blocker save on blur. The optional fields follow Description and share its draft retention, conflict review, retry, and discard behavior.
 - Description has one local Write/Preview switch inside the Card tab. Write is the default and keeps the native textarea authoritative; Preview renders the current draft without becoming a save action. Switching views preserves the draft, lifecycle, and editing focus. Activity remains the only other top-level Card view.
 - The first Markdown slice supports paragraphs, scoped headings, emphasis, ordered and unordered lists, blockquotes, links, inline code, fenced code, and horizontal rules. Raw HTML is shown as text. Images, tables, embeds, interactive task controls, and syntax highlighting do not render. Preview links accept only absolute `http:`, `https:`, and `mailto:` destinations, open separately from the work surface, and identify that behavior accessibly.
 - Preview is semantic, passive, and derived at display time; rendered HTML is never stored. The same safe representation supplies plain-text board summaries so Markdown punctuation does not become summary chrome. An empty or failed preview never loses or rewrites the source.

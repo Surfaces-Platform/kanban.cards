@@ -2108,3 +2108,84 @@ body[data-state="empty-workspace"] .workbench {
   font-weight: 800;
   letter-spacing: -0.025em;
 }
+
+.card-filters {
+  display: grid;
+  gap: var(--jk-space-2);
+  margin-block-end: var(--jk-space-4);
+  min-inline-size: 0;
+}
+
+.card-filter-controls {
+  align-items: end;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--jk-space-3);
+}
+
+.card-filter-controls > .jk-field {
+  flex: 1 1 8rem;
+  min-inline-size: 0;
+}
+
+.card-filter-controls .form-control {
+  inline-size: 100%;
+  min-inline-size: 0;
+}
+
+.card-filter-count,
+.card-filter-note {
+  margin: 0;
+}
+
+.card-filter-note:empty {
+  display: none;
+}
+
+.card-filter-empty {
+  margin-block: var(--jk-space-3);
+}
+
+.card-work-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--jk-space-2) var(--jk-space-3);
+}
+
+.card-work-meta > span {
+  border: 1px solid var(--jk-color-border);
+  border-radius: var(--jk-radius-control);
+  padding: 0 var(--jk-space-2);
+}
+
+.card-next-action {
+  display: -webkit-box;
+  font-size: 0.85rem;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.card-work-fields {
+  display: grid;
+  gap: var(--jk-space-4);
+  min-inline-size: 0;
+}
+
+.card-work-choices {
+  display: grid;
+  gap: var(--jk-space-3);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.card-work-fields .jk-field,
+.card-work-fields .form-control {
+  min-inline-size: 0;
+}
+
+@media (max-width: 24rem) {
+  .card-work-choices {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
