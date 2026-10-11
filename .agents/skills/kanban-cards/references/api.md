@@ -136,6 +136,8 @@ For example, `GET /projects/:projectId/cards?nextActor=agent&priority=High&block
 
 Only `title` is required. Return `201 { "card": Card, "projectRevision": 2 }`. Reusing an existing `externalKey` in the project returns that card with `200` and `"deduplicated": true`.
 
+An idempotent retry returns the recorded status and Card snapshot, even if the live card has changed. Cached snapshots from before the structured work fields were added receive the defaults above. Existing snapshot content, versions, timestamps, project revision, and deduplication flag are preserved; the retry creates no additional card or activity. Comment responses retain their compact `card: { id, version }` reference.
+
 Use `null` to clear `nextActor` or `priority`. `nextAction` and `blockedReason` accept text, `""`, or `null`. Text is trimmed; empty strings, whitespace-only text, and `null` clear the field to `""`. Invalid enum values or non-text actions and blockers return `400`.
 
 ### `PATCH /projects/:projectId/cards/:cardId`

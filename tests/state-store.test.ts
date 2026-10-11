@@ -45,6 +45,80 @@ test("existing Cards receive handoff defaults without interpreting or changing t
   assert.equal(card.version, 1);
 });
 
+test("cached full Card responses receive defaults while preserving their original snapshots and other response shapes", () => {
+  const workspace = workspaceWithCachedCards();
+  const before = structuredClone(workspace);
+  const normalized = normalizeWorkspace(workspace);
+  const defaults = { nextActor: null, nextAction: "", priority: null, blockedReason: "" };
+
+  for (const index of [0, 1]) {
+    const original = before.idempotencyRecords[index];
+    assert.deepEqual(normalized.idempotencyRecords[index], {
+      ...original,
+      response: { ...original.response, card: { ...original.response.card, ...defaults } }
+    });
+  }
+  assert.deepEqual(normalized.idempotencyRecords.slice(2), before.idempotencyRecords.slice(2));
+  assert.deepEqual(workspace, before, "normalization must not mutate the stored input");
+  assert.deepEqual(normalizeWorkspace(normalized), normalized, "normalization must be repeatable");
+});
+
+test("cached Card handoff fields use the same validation and clearing rules as live Cards", () => {
+  const workspace = workspaceWithCachedCards();
+  Object.assign(workspace.idempotencyRecords[0].response.card, {
+    nextActor: "agent", nextAction: "  Check the result\n", priority: "Medium", blockedReason: null
+  });
+  const card = (normalizeWorkspace(workspace).idempotencyRecords[0].response as any).card;
+  assert.deepEqual(cardMetadata(card), {
+    nextActor: "agent", nextAction: "Check the result", priority: "Medium", blockedReason: ""
+  });
+
+  for (const invalid of [
+    { nextActor: "robot" }, { priority: "high" }, { nextAction: 1 }, { blockedReason: false }
+  ]) {
+    const attempted = structuredClone(workspace);
+    Object.assign(attempted.idempotencyRecords[0].response.card, invalid);
+    assert.throws(() => normalizeWorkspace(attempted), /Card (nextActor|priority|nextAction|blockedReason) must/);
+  }
+});
+
+test("file and Postgres storage normalize legacy cached Cards on read and persist them on the next update", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-cached-cards-"));
+  const dataPath = path.join(directory, "workspace.json");
+  const legacy = workspaceWithCachedCards();
+  const raw = JSON.stringify(legacy);
+  const database = new FakePostgresPool();
+  database.state = structuredClone(legacy);
+
+  try {
+    await fs.writeFile(dataPath, raw);
+    const stores = [
+      createFileStateStore(dataPath),
+      createPostgresStateStore({ pool: database as unknown as Pool, workspaceId: "test-workspace" })
+    ];
+    const expected = normalizeWorkspace(legacy);
+    for (const store of stores) {
+      const read = await store.readExisting();
+      assert.deepEqual(read, expected);
+      assert.deepEqual(cardMetadata((read!.idempotencyRecords[0].response as any).card), {
+        nextActor: null, nextAction: "", priority: null, blockedReason: ""
+      });
+    }
+    assert.equal(await fs.readFile(dataPath, "utf8"), raw, "readExisting must not rewrite the file");
+    assert.deepEqual(database.state, legacy, "readExisting must not rewrite the database row");
+
+    for (const store of stores) await store.update(() => undefined);
+    assert.deepEqual(JSON.parse(await fs.readFile(dataPath, "utf8")), expected);
+    assert.deepEqual(database.state, expected);
+    assert.deepEqual(await createFileStateStore(dataPath).readExisting(), expected);
+    assert.deepEqual(await createPostgresStateStore({
+      pool: database as unknown as Pool, workspaceId: "test-workspace"
+    }).readExisting(), expected);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("handoff metadata persists normalized values and can be cleared without losing other Card data", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-card-handoff-store-"));
   const dataPath = path.join(directory, "workspace.json");
@@ -230,6 +304,33 @@ function storedCard(now: string, metadata: Record<string, unknown> = {}) {
     id: "card-existing", title: "Existing Card", body: "Existing description", columnId: "inbox", position: 0,
     version: 1, archivedAt: null, createdAt: now, updatedAt: now, comments: [], ...metadata
   };
+}
+
+function workspaceWithCachedCards(): any {
+  const now = "2026-10-01T12:00:00.000Z";
+  const workspace = workspaceWithProject(now) as any;
+  const card = storedCard(now, {
+    body: "  Original Markdown  \n", externalKey: "cached:one", responseExtension: { preserved: true }
+  });
+  workspace.projects[0].cards = [storedCard(now, { title: "Changed live Card", nextActor: "human", priority: "High" })];
+  const record = (key: string, requestPath: string, response: unknown, statusCode = 201) => ({
+    key, method: "POST", path: requestPath, requestHash: `hash:${key}`, statusCode, response, createdAt: now
+  });
+  workspace.idempotencyRecords = [
+    record("create", "/api/projects/project-one/cards", { card, projectRevision: 2 }),
+    record("deduplicate", "/API/PROJECTS/project-one/CARDS/", { card: structuredClone(card), projectRevision: 4, deduplicated: true }, 200),
+    record("modern", "/api/projects/project-one/cards", {
+      card: { ...card, nextActor: "agent", nextAction: "Run the check", priority: "Low", blockedReason: "Access" }, projectRevision: 5
+    }),
+    record("comment", "/api/projects/project-one/cards/card-existing/comments", {
+      comment: { id: "comment-one", body: "Original comment", author: "Agent", createdAt: now },
+      card: { id: card.id, version: 2 }, projectRevision: 3
+    }),
+    record("project", "/api/projects", { project: { id: "project-one", cards: [] } }),
+    record("partial", "/api/projects/project-one/cards", { card: { id: card.id, version: 1 } }),
+    record("unrelated", "/api/projects/project-one/cards/card-existing/other", { card: structuredClone(card) })
+  ];
+  return workspace;
 }
 
 function cardMetadata(card: { nextActor: unknown; nextAction: unknown; priority: unknown; blockedReason: unknown }) {
