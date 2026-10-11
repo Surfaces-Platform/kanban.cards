@@ -320,10 +320,7 @@ function normalizeCard(value: unknown): Card {
     ...(externalKey ? { externalKey } : {}),
     title: requiredString(card.title, "Card title"),
     body: stringValue(card.body),
-    nextActor: nullableEnum(card.nextActor, ["human", "agent"], "Card nextActor"),
-    nextAction: cardMetadataText(card.nextAction, "Card nextAction"),
-    priority: nullableEnum(card.priority, ["High", "Medium", "Low"], "Card priority"),
-    blockedReason: cardMetadataText(card.blockedReason, "Card blockedReason"),
+    ...normalizeCardWorkFields(card),
     columnId: requiredString(card.columnId, "Card columnId"),
     position: nonNegativeInteger(card.position, "Card position"),
     version: positiveInteger(card.version, "Card version"),
@@ -331,6 +328,15 @@ function normalizeCard(value: unknown): Card {
     createdAt: timestamp(card.createdAt, "Card createdAt"),
     updatedAt: timestamp(card.updatedAt, "Card updatedAt"),
     comments: requireArray(card.comments, "Card comments").map(normalizeComment)
+  };
+}
+
+function normalizeCardWorkFields(card: Record<string, unknown>): Pick<Card, "nextActor" | "nextAction" | "priority" | "blockedReason"> {
+  return {
+    nextActor: nullableEnum(card.nextActor, ["human", "agent"], "Card nextActor"),
+    nextAction: cardMetadataText(card.nextAction, "Card nextAction"),
+    priority: nullableEnum(card.priority, ["High", "Medium", "Low"], "Card priority"),
+    blockedReason: cardMetadataText(card.blockedReason, "Card blockedReason")
   };
 }
 
@@ -370,15 +376,28 @@ function normalizeIdempotencyRecord(value: unknown): IdempotencyRecord {
   const record = requireRecord(value, "Idempotency record");
   if (record.method !== "POST") throw new Error("Idempotency record method must be POST.");
   if (!isJsonValue(record.response)) throw new Error("Idempotency response must be JSON serializable.");
+  const requestPath = requiredString(record.path, "Idempotency path");
   return {
     key: requiredString(record.key, "Idempotency key"),
     method: "POST",
-    path: requiredString(record.path, "Idempotency path"),
+    path: requestPath,
     requestHash: requiredString(record.requestHash, "Idempotency requestHash"),
     statusCode: positiveInteger(record.statusCode, "Idempotency statusCode"),
-    response: record.response,
+    response: normalizeCachedCardResponse(requestPath, record.response),
     createdAt: timestamp(record.createdAt, "Idempotency createdAt")
   };
+}
+
+function normalizeCachedCardResponse(requestPath: string, response: JsonValue): JsonValue {
+  if (!/^\/api\/projects\/[^/]+\/cards\/?$/i.test(requestPath)) return response;
+  if (!response || typeof response !== "object" || Array.isArray(response)) return response;
+  const card = response.card;
+  if (!card || typeof card !== "object" || Array.isArray(card)
+    || typeof card.id !== "string" || typeof card.title !== "string"
+    || typeof card.columnId !== "string" || typeof card.version !== "number") return response;
+
+  // Replay the recorded snapshot, never the live Card or a comment's compact reference.
+  return { ...response, card: { ...card, ...normalizeCardWorkFields(card) } };
 }
 
 function validateTableName(value: string): string {

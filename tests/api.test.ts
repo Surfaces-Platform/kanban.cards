@@ -463,6 +463,106 @@ test("Card handoffs round-trip, clear, and survive other mutations without weake
   });
 });
 
+test("legacy cached card creation and deduplication responses replay their historical snapshots with handoff defaults", async () => {
+  await withServer(async ({ baseUrl, token, dataPath, restart }) => {
+    const headers = { ...ownerHeaders(token, "legacy-replay-test"), "Content-Type": "application/json" };
+    const project = unwrap(await fetchJson(`${baseUrl}/api/projects`, {
+      method: "POST", headers, body: JSON.stringify({ name: "Historical card responses" })
+    }), "project");
+    const cardsPath = `/api/projects/${project.id}/cards`;
+    const cardBody = {
+      title: "Original card", body: "  Original Markdown source  \n", externalKey: "legacy:historical-card"
+    };
+    const creation = await fetch(`${baseUrl}${cardsPath}`, {
+      method: "POST", headers: { ...headers, "Idempotency-Key": "legacy:create" }, body: JSON.stringify(cardBody)
+    });
+    assert.equal(creation.status, 201);
+    const creationPayload = await creation.json() as any;
+    let card = creationPayload.card;
+    const commentBody = { body: "Keep the original comment snapshot." };
+    const commentPath = `${cardsPath}/${card.id}/comments`;
+    const commentPayload = await fetchJson(`${baseUrl}${commentPath}`, {
+      method: "POST", headers: { ...headers, "Idempotency-Key": "legacy:comment" }, body: JSON.stringify(commentBody)
+    });
+    assert.deepEqual(commentPayload.card, { id: card.id, version: 2 });
+    const moved = await fetchJson(`${baseUrl}${cardsPath}/${card.id}`, {
+      method: "PATCH", headers: { ...headers, "X-Kanban-Version": "2" },
+      body: JSON.stringify({ title: "Snapshot at deduplication", columnId: project.columns[1].id, position: 7 })
+    });
+    card = moved.card;
+    const deduplicated = await fetch(`${baseUrl}${cardsPath}`, {
+      method: "POST", headers: { ...headers, "Idempotency-Key": "legacy:deduplicated" }, body: JSON.stringify(cardBody)
+    });
+    assert.equal(deduplicated.status, 200);
+    const deduplicatedPayload = await deduplicated.json() as any;
+    assert.equal(deduplicatedPayload.deduplicated, true);
+    assert.equal(deduplicatedPayload.card.version, 3);
+    assert.equal(deduplicatedPayload.card.comments.length, 1);
+
+    const modernBody = {
+      title: "Existing metadata", externalKey: "modern:historical-card", nextActor: "agent",
+      nextAction: "Keep the original next action", priority: "High", blockedReason: "Original blocker"
+    };
+    const modernPayload = await fetchJson(`${baseUrl}${cardsPath}`, {
+      method: "POST", headers: { ...headers, "Idempotency-Key": "modern:create" }, body: JSON.stringify(modernBody)
+    });
+    const archived = await fetchJson(`${baseUrl}${cardsPath}/${card.id}`, {
+      method: "PATCH", headers: { ...headers, "X-Kanban-Version": String(card.version) },
+      body: JSON.stringify({
+        title: "Changed live card", body: "Changed body", columnId: project.columns[2].id, position: 12,
+        nextActor: "human", nextAction: "Review the live card", priority: "Low", blockedReason: "Live blocker",
+        archivedAt: new Date().toISOString()
+      })
+    });
+    assert.equal(archived.card.version, 4);
+    await fetchJson(`${baseUrl}${cardsPath}/${modernPayload.card.id}`, {
+      method: "PATCH", headers: { ...headers, "X-Kanban-Version": String(modernPayload.card.version) },
+      body: JSON.stringify({ nextActor: "human", nextAction: "Changed next action", priority: "Low", blockedReason: "" })
+    });
+
+    const beforeRestart = await fetchJson(`${baseUrl}/api/projects/${project.id}`, { headers });
+    const storedState = JSON.parse(await fs.readFile(dataPath, "utf8"));
+    const originalRecords = structuredClone(storedState.idempotencyRecords);
+    for (const key of ["legacy:create", "legacy:deduplicated"]) {
+      const record = storedState.idempotencyRecords.find((candidate: any) => candidate.key === key);
+      assert.ok(record);
+      for (const field of Object.keys(emptyCardMetadata())) delete record.response.card[field];
+    }
+    await fs.writeFile(dataPath, JSON.stringify(storedState), { mode: 0o600 });
+    const restartedBaseUrl = await restart();
+    assert.deepEqual(await fetchJson(`${restartedBaseUrl}/api/projects/${project.id}`, { headers }), beforeRestart);
+
+    for (const [key, status, expected] of [
+      ["legacy:create", 201, creationPayload],
+      ["legacy:deduplicated", 200, deduplicatedPayload],
+      ["modern:create", 201, modernPayload]
+    ] as Array<[string, number, any]>) {
+      const replay = await fetch(`${restartedBaseUrl}${cardsPath}`, {
+        method: "POST", headers: { ...headers, "Idempotency-Key": key },
+        body: JSON.stringify(key === "modern:create" ? modernBody : cardBody)
+      });
+      assert.equal(replay.status, status, key);
+      assert.equal(replay.headers.get("idempotency-replayed"), "true", key);
+      assert.deepEqual(await replay.json(), expected, key);
+      const conflict = await fetch(`${restartedBaseUrl}${cardsPath}`, {
+        method: "POST", headers: { ...headers, "Idempotency-Key": key },
+        body: JSON.stringify({ ...(key === "modern:create" ? modernBody : cardBody), title: "A different request" })
+      });
+      assert.equal(conflict.status, 409, key);
+    }
+    const commentReplay = await fetch(`${restartedBaseUrl}${commentPath}`, {
+      method: "POST", headers: { ...headers, "Idempotency-Key": "legacy:comment" }, body: JSON.stringify(commentBody)
+    });
+    assert.equal(commentReplay.status, 201);
+    assert.equal(commentReplay.headers.get("idempotency-replayed"), "true");
+    assert.deepEqual(await commentReplay.json(), commentPayload);
+    assert.deepEqual(await fetchJson(`${restartedBaseUrl}/api/projects/${project.id}`, { headers }), beforeRestart);
+    const afterReplay = JSON.parse(await fs.readFile(dataPath, "utf8"));
+    assert.deepEqual(afterReplay.projects, storedState.projects);
+    assert.deepEqual(afterReplay.idempotencyRecords, originalRecords);
+  });
+});
+
 test("the Card list combines validated filters and archive visibility without filtering the full Project snapshot", async () => {
   await withServer(async ({ baseUrl, token }) => {
     const headers = { ...ownerHeaders(token, "filter-test"), "Content-Type": "application/json" };
