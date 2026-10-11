@@ -32,6 +32,10 @@ export interface BrowserCard {
   columnId: string;
   version: number;
   archivedAt: string | null;
+  nextActor: "human" | "agent" | null;
+  nextAction: string;
+  priority: "High" | "Medium" | "Low" | null;
+  blockedReason: string;
 }
 
 export interface BrowserProject {

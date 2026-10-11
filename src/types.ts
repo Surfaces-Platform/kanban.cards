@@ -21,11 +21,18 @@ export interface Comment {
   createdAt: string;
 }
 
+export type CardNextActor = "human" | "agent";
+export type CardPriority = "High" | "Medium" | "Low";
+
 export interface Card {
   id: string;
   externalKey?: string;
   title: string;
   body: string;
+  nextActor: CardNextActor | null;
+  nextAction: string;
+  priority: CardPriority | null;
+  blockedReason: string;
   columnId: string;
   position: number;
   version: number;

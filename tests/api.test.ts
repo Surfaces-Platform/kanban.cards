@@ -10,6 +10,7 @@ import type { Express } from "express";
 import defaultApp, { createApp } from "../src/server";
 import { createFileAccessStore } from "../src/access-store";
 import type { PasskeyAuthConfig } from "../src/passkey-auth";
+import { createWorkspaceStoreResolver } from "../src/state-store";
 
 test("the server entry exports an Express app for Vercel framework discovery", () => {
   assert.equal(typeof defaultApp, "function");
@@ -369,6 +370,196 @@ test("one resource API supports idempotent plans, concurrency, comments, activit
     assert.equal(path.basename(dataPath), "workspace.json");
   });
 });
+
+test("Card handoffs round-trip, clear, and survive other mutations without weakening concurrency or idempotency", async () => {
+  await withServer(async ({ baseUrl, token, restart }) => {
+    const headers = { ...ownerHeaders(token, "handoff-test"), "Content-Type": "application/json" };
+    const project = unwrap(await fetchJson(`${baseUrl}/api/projects`, {
+      method: "POST", headers, body: JSON.stringify({ name: "Card handoffs" })
+    }), "project");
+    const projectUrl = `${baseUrl}/api/projects/${project.id}`;
+    const cardsUrl = `${projectUrl}/cards`;
+    const existingBody = "Next actor: human\nPriority: Low\nKeep this description intact.  \n";
+    const defaults = unwrap(await fetchJson(cardsUrl, {
+      method: "POST", headers, body: JSON.stringify({ title: "No metadata", body: existingBody })
+    }), "card");
+    assert.deepEqual(cardMetadata(defaults), emptyCardMetadata());
+    assert.equal(defaults.body, existingBody);
+
+    const createBody = {
+      title: "Structured handoff", body: "  Markdown source  \n", externalKey: "handoff:one",
+      nextActor: "agent", nextAction: "  Run the check\n", priority: "High", blockedReason: "  Waiting for access  "
+    };
+    const creationHeaders = { ...headers, "Idempotency-Key": "handoff:create" };
+    const created = await fetchJson(cardsUrl, { method: "POST", headers: creationHeaders, body: JSON.stringify(createBody) });
+    let card = created.card;
+    const metadata = { nextActor: "agent", nextAction: "Run the check", priority: "High", blockedReason: "Waiting for access" };
+    assert.deepEqual(cardMetadata(card), metadata);
+    const replay = await fetch(cardsUrl, { method: "POST", headers: creationHeaders, body: JSON.stringify(createBody) });
+    assert.equal(replay.headers.get("idempotency-replayed"), "true");
+    assert.deepEqual(await replay.json(), created);
+    assert.equal((await fetch(cardsUrl, {
+      method: "POST", headers: creationHeaders, body: JSON.stringify({ ...createBody, priority: "Low" })
+    })).status, 409);
+    const duplicate = await fetchJson(cardsUrl, {
+      method: "POST", headers, body: JSON.stringify({ ...createBody, priority: "Low", nextActor: "human" })
+    });
+    assert.equal(duplicate.deduplicated, true);
+    assert.equal(duplicate.card.id, card.id);
+    assert.deepEqual(cardMetadata(duplicate.card), metadata);
+
+    const beforeInvalid = await fetchJson(projectUrl, { headers });
+    for (const invalid of [
+      { nextActor: "robot" }, { nextActor: " agent " }, { priority: "high" }, { priority: true },
+      { nextAction: ["Act"] }, { blockedReason: { text: "Blocked" } }
+    ]) {
+      assert.equal((await fetch(cardsUrl, {
+        method: "POST", headers, body: JSON.stringify({ title: "Must not exist", ...invalid })
+      })).status, 400);
+      assert.equal((await fetch(`${cardsUrl}/${card.id}`, {
+        method: "PATCH", headers: { ...headers, "X-Kanban-Version": String(card.version) },
+        body: JSON.stringify({ title: "Must not overwrite", ...invalid })
+      })).status, 400);
+    }
+    assert.deepEqual(await fetchJson(projectUrl, { headers }), beforeInvalid);
+    assert.equal((await fetch(`${cardsUrl}/${card.id}`, {
+      method: "PATCH", headers, body: JSON.stringify({ priority: "Medium" })
+    })).status, 428);
+
+    const patch = async (body: Record<string, unknown>) => {
+      const result = await fetchJson(`${cardsUrl}/${card.id}`, {
+        method: "PATCH", headers: { ...headers, "X-Kanban-Version": String(card.version) }, body: JSON.stringify(body)
+      });
+      card = result.card;
+      return result;
+    };
+    await patch({ nextActor: "human", nextAction: "  Review the result ", priority: "Medium", blockedReason: null });
+    const updatedMetadata = { nextActor: "human", nextAction: "Review the result", priority: "Medium", blockedReason: "" };
+    assert.deepEqual(cardMetadata(card), updatedMetadata);
+    assert.equal((await fetch(`${cardsUrl}/${card.id}`, {
+      method: "PATCH", headers: { ...headers, "X-Kanban-Version": "1" }, body: JSON.stringify({ priority: "Low" })
+    })).status, 409);
+    await patch({ columnId: project.columns[1].id });
+    assert.deepEqual(cardMetadata(card), updatedMetadata);
+    const comment = await fetchJson(`${cardsUrl}/${card.id}/comments`, {
+      method: "POST", headers, body: JSON.stringify({ body: "Ready for review." })
+    });
+    assert.equal(comment.card.version, card.version + 1);
+    card = (await fetchJson(projectUrl, { headers })).project.cards.find((candidate: any) => candidate.id === card.id);
+    assert.deepEqual(cardMetadata(card), updatedMetadata);
+    await patch({ archivedAt: new Date().toISOString() });
+    assert.deepEqual(cardMetadata(card), updatedMetadata);
+    await patch({ archivedAt: null });
+    assert.deepEqual(cardMetadata(card), updatedMetadata);
+    await patch({ nextActor: null, nextAction: null, priority: null, blockedReason: " \n " });
+    assert.deepEqual(cardMetadata(card), emptyCardMetadata());
+    assert.equal(card.body, createBody.body);
+    assert.equal(card.comments.length, 1);
+
+    const restarted = await restart();
+    const persisted = (await fetchJson(`${restarted}/api/projects/${project.id}`, { headers })).project.cards.find((candidate: any) => candidate.id === card.id);
+    assert.deepEqual(cardMetadata(persisted), emptyCardMetadata());
+    assert.equal(persisted.version, card.version);
+  });
+});
+
+test("the Card list combines validated filters and archive visibility without filtering the full Project snapshot", async () => {
+  await withServer(async ({ baseUrl, token }) => {
+    const headers = { ...ownerHeaders(token, "filter-test"), "Content-Type": "application/json" };
+    const project = unwrap(await fetchJson(`${baseUrl}/api/projects`, {
+      method: "POST", headers, body: JSON.stringify({ name: "Filtered cards" })
+    }), "project");
+    const projectUrl = `${baseUrl}/api/projects/${project.id}`;
+    const cardsUrl = `${projectUrl}/cards`;
+    const inputs = [
+      { title: "Blocked agent", nextActor: "agent", priority: "High", blockedReason: "  Access needed  ", position: 3 },
+      { title: "Human review", nextActor: "human", priority: "High", blockedReason: "  \n ", position: 1 },
+      { title: "Agent follow-up", nextActor: "agent", priority: "Low", position: 2 },
+      { title: "Unassigned", position: 0 },
+      { title: "Archived agent", nextActor: "agent", priority: "High", blockedReason: "Old blocker", position: 4 }
+    ];
+    const created: Array<{ id: string; version: number }> = [];
+    for (const input of inputs) created.push(unwrap(await fetchJson(cardsUrl, { method: "POST", headers, body: JSON.stringify(input) }), "card"));
+    const archived = created[4];
+    await fetchJson(`${cardsUrl}/${archived.id}`, {
+      method: "PATCH", headers: { ...headers, "X-Kanban-Version": String(archived.version) },
+      body: JSON.stringify({ archivedAt: new Date().toISOString() })
+    });
+    const snapshot = await fetchJson(projectUrl, { headers });
+    const expected = (indices: number[]) => snapshot.project.cards.filter((card: any) => indices.some(index => card.id === created[index].id)).map((card: any) => card.id);
+    for (const [query, indices] of [
+      ["", [0, 1, 2, 3]], ["?includeArchived=false", [0, 1, 2, 3]], ["?includeArchived=true", [0, 1, 2, 3, 4]],
+      ["?nextActor=agent", [0, 2]], ["?nextActor=human", [1]], ["?priority=Low", [2]],
+      ["?priority=Medium", []], ["?blocked=true", [0]], ["?blocked=false", [1, 2, 3]],
+      ["?nextActor=unassigned&priority=unset&blocked=false", [3]],
+      ["?nextActor=agent&priority=High&blocked=true", [0]],
+      ["?nextActor=agent&priority=High&blocked=false", []],
+      ["?includeArchived=true&nextActor=agent&priority=High&blocked=true", [0, 4]]
+    ] as Array<[string, number[]]>) {
+      const listed = await fetchJson(`${cardsUrl}${query}`, { headers });
+      assert.deepEqual(listed.cards.map((card: any) => card.id), expected(indices), query);
+      assert.equal(listed.projectRevision, snapshot.project.revision);
+    }
+    for (const query of [
+      "nextActor=robot", "nextActor=", "priority=high", "priority=", "blocked=1", "includeArchived=yes",
+      "nextActor=agent&nextActor=human", "priority=High&priority=Low", "blocked=true&blocked=false",
+      "includeArchived=true&includeArchived=false", "nextActr=agent", "nextActor[]=agent", "priority[level]=High"
+    ]) {
+      assert.equal((await fetch(`${cardsUrl}?${query}`, { headers })).status, 400, query);
+    }
+    assert.deepEqual(await fetchJson(`${projectUrl}?nextActor=agent&priority=High&blocked=true`, { headers }), snapshot);
+    assert.equal((await fetch(`${baseUrl}/api/projects/missing/cards`, { headers })).status, 404);
+    assert.equal((await fetch(cardsUrl)).status, 401);
+  });
+});
+
+test("filtered Card reads require the scoped read permission and cannot grant writes or cross Workspaces", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-card-filter-scopes-"));
+  const accessStore = createFileAccessStore(path.join(directory, "access.json"));
+  const workspace = await accessStore.createWorkspace({ providerSubject: "filter-test-owner", email: "", displayName: "Test owner", slug: "cards", name: "Cards" });
+  await accessStore.createWorkspace({ providerSubject: "other-filter-owner", email: "", displayName: "Other test owner", slug: "other", name: "Other" });
+  const reader = await accessStore.createAgentConnection({ providerSubject: "filter-test-owner", workspaceId: workspace.id, label: "Reader", scopes: ["read"] });
+  const writer = await accessStore.createAgentConnection({ providerSubject: "filter-test-owner", workspaceId: workspace.id, label: "Writer", scopes: ["write"] });
+  const resolver = createWorkspaceStoreResolver({ dataPath: path.join(directory, "default.json"), workspaceDirectory: path.join(directory, "workspaces") });
+  const config: PasskeyAuthConfig = {
+    authHost: "auth.kanban.cards", authOrigin: "https://auth.kanban.cards", rpId: "auth.kanban.cards",
+    rootOrigins: ["https://kanban.cards"], sessionSecret: "card-scopes-test-secret-at-least-32-characters", sessionTtlSeconds: 3600
+  };
+  const server = await listenApp(createApp({ host: "kanban.cards", rootHost: "kanban.cards", passkeyAuthConfig: config,
+    accessStore, workspaceStoreResolver: resolver, dataPath: path.join(directory, "default.json"), requireDatabase: false, trustForwardedHost: true }));
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const tenantHeaders = (credential: string, host = "cards.kanban.cards") => ({
+    Host: host, "X-Forwarded-Host": host, "X-Forwarded-Proto": "https", Authorization: `Bearer ${credential}`, "Content-Type": "application/json"
+  });
+  try {
+    const project = unwrap(await fetchJson(`${baseUrl}/api/projects`, {
+      method: "POST", headers: tenantHeaders(writer.credential), body: JSON.stringify({ name: "Scoped cards" })
+    }), "project");
+    const cardsUrl = `${baseUrl}/api/projects/${project.id}/cards`;
+    const card = unwrap(await fetchJson(cardsUrl, {
+      method: "POST", headers: tenantHeaders(writer.credential), body: JSON.stringify({ title: "Read me", nextActor: "agent", priority: "High" })
+    }), "card");
+    const listed = await fetchJson(`${cardsUrl}?nextActor=agent&priority=High&blocked=false`, { headers: tenantHeaders(reader.credential) });
+    assert.deepEqual(listed.cards.map((entry: any) => entry.id), [card.id]);
+    assert.equal((await fetch(cardsUrl, { headers: tenantHeaders(writer.credential) })).status, 403);
+    assert.equal((await fetch(`${cardsUrl}/${card.id}`, { method: "PATCH", headers: { ...tenantHeaders(reader.credential), "X-Kanban-Version": "1" }, body: JSON.stringify({ nextActor: "human" }) })).status, 403);
+    assert.equal((await fetch(cardsUrl, { headers: tenantHeaders(reader.credential, "other.kanban.cards") })).status, 401);
+    const snapshot = await fetchJson(`${baseUrl}/api/projects/${project.id}`, { headers: tenantHeaders(reader.credential) });
+    assert.equal(snapshot.project.cards[0].nextActor, "agent");
+    assert.equal(snapshot.project.cards[0].version, 1);
+  } finally {
+    await close(server);
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+function cardMetadata(card: { nextActor: unknown; nextAction: unknown; priority: unknown; blockedReason: unknown }) {
+  return { nextActor: card.nextActor, nextAction: card.nextAction, priority: card.priority, blockedReason: card.blockedReason };
+}
+
+function emptyCardMetadata() {
+  return { nextActor: null, nextAction: "", priority: null, blockedReason: "" };
+}
 
 async function withServer(
   operation: (context: {

@@ -270,7 +270,7 @@ async function startHarness(options: { setup?: boolean } = {}): Promise<Harness>
     setupOwnerId = (await accessStore.read()).owners[0].id;
     const now = new Date().toISOString();
     await workspaceStoreResolver.resolve("default").update(state => {
-      state.projects.push({ id: "existing-project", name: "Existing project", description: "Saved before passkeys", columns: [{ id: "next", name: "Next", position: 0 }], cards: [{ id: "existing-card", title: "Existing card", body: "Preserve this work", columnId: "next", position: 0, version: 1, archivedAt: null, createdAt: now, updatedAt: now, comments: [] }], activity: [], revision: 1, archivedAt: null, createdAt: now, updatedAt: now });
+      state.projects.push({ id: "existing-project", name: "Existing project", description: "Saved before passkeys", columns: [{ id: "next", name: "Next", position: 0 }], cards: [{ id: "existing-card", title: "Existing card", body: "Preserve this work", nextActor: null, nextAction: "", priority: null, blockedReason: "", columnId: "next", position: 0, version: 1, archivedAt: null, createdAt: now, updatedAt: now, comments: [] }], activity: [], revision: 1, archivedAt: null, createdAt: now, updatedAt: now });
     });
   }
   const server = createServer(createApp({

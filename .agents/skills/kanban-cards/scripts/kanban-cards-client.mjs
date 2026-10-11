@@ -66,20 +66,22 @@ async function run(action, opts, context) {
     }, context);
   }
   if (action === "cards") {
-    const result = await request(projectPath, {}, context);
-    if (!isRecord(result)) return result;
-    const project = isRecord(result.project) ? result.project : result;
-    return {
-      cards: Array.isArray(project.cards) ? project.cards : [],
-      projectRevision: project.revision
-    };
+    assertKnownOptions(opts, ["project", "repo", "next-actor", "priority", "blocked", "include-archived"]);
+    const query = new URLSearchParams();
+    if (opts["next-actor"] !== void 0) query.set("nextActor", enumOption(opts, "next-actor", ["human", "agent", "unassigned"]));
+    if (opts.priority !== void 0) query.set("priority", enumOption(opts, "priority", ["High", "Medium", "Low", "unset"]));
+    if (opts.blocked !== void 0) query.set("blocked", enumOption(opts, "blocked", ["true", "false"]));
+    if (opts["include-archived"] !== void 0) query.set("includeArchived", enumOption(opts, "include-archived", ["true", "false"]));
+    return request(`${projectPath}/cards${query.size ? `?${query}` : ""}`, {}, context);
   }
   if (action === "create-card") {
+    assertKnownOptions(opts, ["project", "repo", "title", "body", "column", "position", "external-key", "idempotency-key", "next-actor", "next-action", "priority", "blocked-reason"]);
     requireOption(opts, "title");
     const body = { title: stringOption(opts, "title") };
     copyTextOption(opts, body, "body");
     copyStringOption(opts, body, "column", "columnId");
     copyStringOption(opts, body, "external-key", "externalKey");
+    copyCardMetadataOptions(opts, body);
     if (opts.position !== void 0) body.position = numberOption(opts, "position");
     const externalKey = optionalStringOption(opts, "external-key");
     return request(`${projectPath}/cards`, {
@@ -89,10 +91,12 @@ async function run(action, opts, context) {
     }, context);
   }
   if (action === "update-card") {
+    assertKnownOptions(opts, ["project", "repo", "card", "title", "body", "version", "next-actor", "next-action", "priority", "blocked-reason"]);
     const cardId = stringOption(opts, "card");
     const body = {};
     copyStringOption(opts, body, "title");
     copyTextOption(opts, body, "body");
+    copyCardMetadataOptions(opts, body);
     requireNonEmptyBody(body, action);
     return request(`${projectPath}/cards/${encodeURIComponent(cardId)}`, {
       method: "PATCH",
@@ -312,6 +316,27 @@ function copyTextOption(opts, body, option, field = option) {
   if (typeof opts[option] !== "string") throw new Error(`Missing --${option}`);
   body[field] = opts[option];
 }
+function copyCardMetadataOptions(opts, body) {
+  if (opts["next-actor"] !== void 0) {
+    const value = enumOption(opts, "next-actor", ["human", "agent", "unassigned"]);
+    body.nextActor = value === "unassigned" ? null : value;
+  }
+  copyTextOption(opts, body, "next-action", "nextAction");
+  if (opts.priority !== void 0) {
+    const value = enumOption(opts, "priority", ["High", "Medium", "Low", "unset"]);
+    body.priority = value === "unset" ? null : value;
+  }
+  copyTextOption(opts, body, "blocked-reason", "blockedReason");
+}
+function enumOption(opts, key, allowed) {
+  const value = stringOption(opts, key);
+  if (!allowed.includes(value)) throw new Error(`--${key} must be one of: ${allowed.join(", ")}.`);
+  return value;
+}
+function assertKnownOptions(opts, allowed) {
+  const unexpected = Object.keys(opts).filter((key) => !allowed.includes(key));
+  if (unexpected.length) throw new Error(`Unsupported option(s): ${unexpected.map((key) => `--${key}`).join(", ")}`);
+}
 function optionalStringOption(opts, key) {
   const value = opts[key];
   if (value === void 0) return void 0;
@@ -379,13 +404,14 @@ function parseArgs(values) {
     const value = values[index];
     if (!value.startsWith("--")) throw new Error(`Unexpected argument: ${value}`);
     const equalsIndex = value.indexOf("=");
+    const key = equalsIndex > 2 ? value.slice(2, equalsIndex) : value.slice(2);
+    if (Object.hasOwn(parsed, key)) throw new Error(`Repeated option: --${key}. Supply each option once.`);
     if (equalsIndex > 2) {
-      parsed[value.slice(2, equalsIndex)] = value.slice(equalsIndex + 1);
+      parsed[key] = value.slice(equalsIndex + 1);
       continue;
     }
-    const key = value.slice(2);
     const next = values[index + 1];
-    if (!next || next.startsWith("--")) {
+    if (next === void 0 || next.startsWith("--")) {
       parsed[key] = true;
     } else {
       parsed[key] = next;
@@ -406,9 +432,9 @@ function usage() {
       "bind --project <project-id> [--repo <path>]",
       "project [--project <project-id>] [--repo <path>]",
       "update-project [--project <project-id>] [--name <name>] [--description <text>] [--columns <comma-list-or-json>] --version <version>",
-      "cards [--project <project-id>]",
-      "create-card [--project <project-id>] --title <title> [--body <text>] [--column <column-id>] [--position <number>] [--external-key <key>] [--idempotency-key <key>]",
-      "update-card [--project <project-id>] --card <card-id> [--title <title>] [--body <text>] --version <version>",
+      "cards [--project <project-id>] [--next-actor human|agent|unassigned] [--priority High|Medium|Low|unset] [--blocked true|false] [--include-archived true|false]",
+      "create-card [--project <project-id>] --title <title> [--body <text>] [--column <column-id>] [--position <number>] [--external-key <key>] [--idempotency-key <key>] [--next-actor human|agent|unassigned] [--next-action <text>] [--priority High|Medium|Low|unset] [--blocked-reason <text>]",
+      "update-card [--project <project-id>] --card <card-id> [--title <title>] [--body <text>] [--next-actor human|agent|unassigned] [--next-action <text>] [--priority High|Medium|Low|unset] [--blocked-reason <text>] --version <version>",
       "move-card [--project <project-id>] --card <card-id> --column <column-id> [--position <number>] --version <version>",
       "archive-card [--project <project-id>] --card <card-id> --version <version>",
       "comment [--project <project-id>] --card <card-id> --text <text> [--idempotency-key <key>]",

@@ -320,6 +320,10 @@ function normalizeCard(value: unknown): Card {
     ...(externalKey ? { externalKey } : {}),
     title: requiredString(card.title, "Card title"),
     body: stringValue(card.body),
+    nextActor: nullableEnum(card.nextActor, ["human", "agent"], "Card nextActor"),
+    nextAction: cardMetadataText(card.nextAction, "Card nextAction"),
+    priority: nullableEnum(card.priority, ["High", "Medium", "Low"], "Card priority"),
+    blockedReason: cardMetadataText(card.blockedReason, "Card blockedReason"),
     columnId: requiredString(card.columnId, "Card columnId"),
     position: nonNegativeInteger(card.position, "Card position"),
     version: positiveInteger(card.version, "Card version"),
@@ -418,6 +422,20 @@ function optionalString(value: unknown): string | undefined {
 
 function stringValue(value: unknown): string {
   return value == null ? "" : String(value);
+}
+
+function nullableEnum<T extends string>(value: unknown, values: readonly T[], label: string): T | null {
+  if (value == null) return null;
+  if (typeof value !== "string" || !values.includes(value as T)) {
+    throw new Error(`${label} must be ${values.join(", ")}, or null.`);
+  }
+  return value as T;
+}
+
+function cardMetadataText(value: unknown, label: string): string {
+  if (value == null) return "";
+  if (typeof value !== "string") throw new Error(`${label} must be a string or null.`);
+  return value.trim();
 }
 
 function positiveInteger(value: unknown, label: string): number {

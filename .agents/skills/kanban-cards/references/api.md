@@ -92,6 +92,32 @@ Replacing `columns` requires the complete desired column list. Preserve IDs for 
 
 ## Cards
 
+Every Card includes these structured work fields:
+
+| Field | Stored value | Default |
+| --- | --- | --- |
+| `nextActor` | `"human"`, `"agent"`, or `null` | `null` (unassigned) |
+| `nextAction` | Plain text | `""` |
+| `priority` | `"High"`, `"Medium"`, `"Low"`, or `null` | `null` (unset) |
+| `blockedReason` | Plain text describing what prevents progress | `""` (unblocked) |
+
+The browser labels `"human"` as You. These fields describe the next handoff; they do not identify a credential holder, grant authority, or trigger agent execution. Column remains the workflow stage. Existing cards receive the same defaults without inferring values from their descriptions.
+
+### `GET /projects/:projectId/cards`
+
+Return `{ "cards": Card[], "projectRevision": number }`. Active cards are returned by default. Optional query parameters:
+
+| Parameter | Accepted values |
+| --- | --- |
+| `nextActor` | `human`, `agent`, `unassigned` |
+| `priority` | `High`, `Medium`, `Low`, `unset` |
+| `blocked` | `true`, `false` |
+| `includeArchived` | `true`, `false` |
+
+All supplied filters must match. `unassigned` matches `nextActor: null`; `unset` matches `priority: null`. `blocked=true` matches a nonempty blocker; `blocked=false` matches an empty blocker. Omitted filters include every value for that field. Supply each parameter once. Unknown names, repeated parameters, and invalid values return `400`.
+
+For example, `GET /projects/:projectId/cards?nextActor=agent&priority=High&blocked=false` returns active High-priority cards ready for agent work.
+
 ### `POST /projects/:projectId/cards`
 
 ```json
@@ -100,15 +126,21 @@ Replacing `columns` requires the complete desired column list. Preserve IDs for 
   "body": "Use passkeys for owners and scoped API keys for agents.",
   "columnId": "next",
   "position": 0,
+  "nextActor": "agent",
+  "nextAction": "Implement the scoped API key setup path",
+  "priority": "High",
+  "blockedReason": "",
   "externalKey": "recommendation:simplify-auth"
 }
 ```
 
 Only `title` is required. Return `201 { "card": Card, "projectRevision": 2 }`. Reusing an existing `externalKey` in the project returns that card with `200` and `"deduplicated": true`.
 
+Use `null` to clear `nextActor` or `priority`. `nextAction` and `blockedReason` accept text, `""`, or `null`. Text is trimmed; empty strings, whitespace-only text, and `null` clear the field to `""`. Invalid enum values or non-text actions and blockers return `400`.
+
 ### `PATCH /projects/:projectId/cards/:cardId`
 
-Accept any of `title`, `body`, `columnId`, `position`, or `archivedAt`. Moving a card is a patch with `columnId` and optional `position`. Archiving is a patch with an ISO timestamp in `archivedAt`. Return `{ "card": Card, "projectRevision": number }`.
+Accept any of `title`, `body`, `columnId`, `position`, `archivedAt`, `nextActor`, `nextAction`, `priority`, or `blockedReason`. Omitted fields remain unchanged. Enum and clearing rules match card creation. Moving a card is a patch with `columnId` and optional `position`. Archiving is a patch with an ISO timestamp in `archivedAt`. Return `{ "card": Card, "projectRevision": number }`.
 
 Supply the card's current `version` through required `X-Kanban-Version`; omission returns `428`. Adding a comment increments the Card version returned in the comment response's compact `card` reference.
 
@@ -137,8 +169,10 @@ Return `{ "activity": Activity[], "projectRevision": number }`. Agent calls reco
 | `create-project` | `POST /projects` |
 | `project` | `GET /projects/:projectId` |
 | `update-project` | `PATCH /projects/:projectId` |
-| `cards` | Read cards from `GET /projects/:projectId` |
+| `cards` | `GET /projects/:projectId/cards` with optional `--next-actor`, `--priority`, `--blocked`, and `--include-archived` filters |
 | `create-card` | `POST /projects/:projectId/cards` |
 | `update-card`, `move-card`, `archive-card` | `PATCH /projects/:projectId/cards/:cardId` |
 | `comment` | `POST /projects/:projectId/cards/:cardId/comments` |
 | `activity` | `GET /projects/:projectId/activity` |
+
+`create-card` and `update-card` accept `--next-actor human|agent|unassigned`, `--next-action <text>`, `--priority High|Medium|Low|unset`, and `--blocked-reason <text>`. The helper maps `unassigned` and `unset` to API `null`. Pass `""` for an action or blocker to clear it. `update-card` still requires `--version` for metadata-only changes.

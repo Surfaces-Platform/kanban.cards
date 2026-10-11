@@ -12,6 +12,19 @@ type AccessContext = "auth" | "local" | "root" | "workspace";
 type ProjectEditorMode = "create" | "edit" | null;
 type InspectorTab = "card" | "activity";
 type DescriptionView = "write" | "preview";
+type NextActor = "human" | "agent" | null;
+type CardPriority = "High" | "Medium" | "Low" | null;
+interface CardFields {
+  nextActor: NextActor;
+  nextAction: string;
+  priority: CardPriority;
+  blockedReason: string;
+}
+interface CardFilters {
+  nextActor: "all" | "human" | "agent" | "unassigned";
+  priority: "all" | "High" | "Medium" | "Low" | "unset";
+  blocked: "all" | "blocked" | "unblocked";
+}
 type MutationKind = "sign-in" | "workspace" | "agent" | "refresh" | "project" | "column" | "card" | "move" | "comment" | "archive" | "undo" | null;
 type StatusTone = "neutral" | "success" | "warning" | "error" | "receipt";
 
@@ -73,7 +86,7 @@ interface CardComment {
   actorLabel: string;
 }
 
-interface ProjectCard {
+interface ProjectCard extends CardFields {
   id: string;
   title: string;
   body: string;
@@ -119,7 +132,7 @@ interface AuthNotice {
   message: string;
 }
 
-interface CardDraft {
+interface CardDraft extends CardFields {
   projectId: string;
   cardId: string | null;
   title: string;
@@ -130,6 +143,10 @@ interface CardDraft {
   baseBody: string;
   baseColumnId: string;
   baseArchivedAt: string | null;
+  baseNextActor: NextActor;
+  baseNextAction: string;
+  basePriority: CardPriority;
+  baseBlockedReason: string;
 }
 
 interface ProjectEditorDraft {
@@ -301,6 +318,7 @@ const displayedAt = new Map<string, string>();
 const archiveReceipts = new Map<string, ArchiveReceipt[]>();
 const mobileColumns = new Map<string, string>();
 const boardScrollPositions = new Map<string, number>();
+const projectCardFilters = new Map<string, CardFilters>();
 const pendingIdempotencyKeys = new Map<string, { fingerprint: string; key: string }>();
 const pendingAutosaves = new Set<string>();
 const repeatedAutosaves = new Set<string>();
@@ -399,7 +417,17 @@ function normalizeCard(value: unknown): ProjectCard {
     createdAt: String(card.createdAt || ""),
     updatedAt: String(card.updatedAt || ""),
     archivedAt: card.archivedAt ? String(card.archivedAt) : null,
-    comments: arrayValue(card.comments).map(normalizeComment)
+    comments: arrayValue(card.comments).map(normalizeComment),
+    ...normalizeCardFields(card)
+  };
+}
+
+function normalizeCardFields(value: Record<string, any>): CardFields {
+  return {
+    nextActor: value.nextActor === "human" || value.nextActor === "agent" ? value.nextActor : null,
+    nextAction: String(value.nextAction ?? ""),
+    priority: value.priority === "High" || value.priority === "Medium" || value.priority === "Low" ? value.priority : null,
+    blockedReason: String(value.blockedReason ?? "")
   };
 }
 
@@ -677,6 +705,36 @@ function bodySummary(value: string): string {
 
 function activeCards(project: Project): ProjectCard[] {
   return project.cards.filter((card) => !card.archivedAt);
+}
+
+function cardFilters(project: Project): CardFilters {
+  return projectCardFilters.get(project.id) || { nextActor: "all", priority: "all", blocked: "all" };
+}
+
+function hasCardFilters(project: Project): boolean {
+  const filters = cardFilters(project);
+  return filters.nextActor !== "all" || filters.priority !== "all" || filters.blocked !== "all";
+}
+
+function cardMatchesFilters(card: ProjectCard, project: Project): boolean {
+  const filters = cardFilters(project);
+  return (filters.nextActor === "all" || (filters.nextActor === "unassigned" ? card.nextActor === null : card.nextActor === filters.nextActor))
+    && (filters.priority === "all" || (filters.priority === "unset" ? card.priority === null : card.priority === filters.priority))
+    && (filters.blocked === "all" || (filters.blocked === "blocked" ? Boolean(card.blockedReason.trim()) : !card.blockedReason.trim()));
+}
+
+function visibleCards(project: Project): ProjectCard[] {
+  return activeCards(project).filter((card) => cardMatchesFilters(card, project));
+}
+
+function renderCardFilters(project: Project): string {
+  const filters = cardFilters(project);
+  const filterField = (id: string, label: string, value: string, choices: Array<{ value: string; label: string }>): string => renderField({
+    id: `board-filter-${id}`,
+    label,
+    control: renderSelect({ id: `board-filter-${id}`, name: id, value, choices, ariaLabel: `Filter by ${label.toLowerCase()}`, disabled: workspaceLocked() })
+  });
+  return `<section class="card-filters" aria-label="Filter Cards"><div class="card-filter-controls">${filterField("next-actor", "Next actor", filters.nextActor, [{ value: "all", label: "All" }, { value: "human", label: "You" }, { value: "agent", label: "Agent" }, { value: "unassigned", label: "Unassigned" }])}${filterField("priority", "Priority", filters.priority, [{ value: "all", label: "All" }, { value: "High", label: "High" }, { value: "Medium", label: "Medium" }, { value: "Low", label: "Low" }, { value: "unset", label: "Unset" }])}${filterField("blocked", "Blocked", filters.blocked, [{ value: "all", label: "All" }, { value: "blocked", label: "Blocked" }, { value: "unblocked", label: "Unblocked" }])}${hasCardFilters(project) ? renderButton("Clear filters", "clear-card-filters", { disabled: workspaceLocked() }) : ""}</div><p class="card-filter-count jk-meta" role="status" aria-live="polite" aria-atomic="true">Showing ${visibleCards(project).length} of ${activeCards(project).length} Cards</p></section>`;
 }
 
 function syncProjectSummary(project: Project): void {
@@ -1152,8 +1210,9 @@ function newCardColumn(project: Project): string {
 function renderMobileColumnSelector(project: Project): string {
   const selected = selectedMobileColumn(project);
   const choices = project.columns.map((column) => {
-    const count = activeCards(project).filter((card) => card.columnId === column.id).length;
-    return { value: column.id, label: `${column.name} · ${count} ${count === 1 ? "Card" : "Cards"}` };
+    const total = activeCards(project).filter((card) => card.columnId === column.id).length;
+    const count = visibleCards(project).filter((card) => card.columnId === column.id).length;
+    return { value: column.id, label: `${column.name} · ${hasCardFilters(project) ? `${count} of ${total} Cards` : `${count} ${count === 1 ? "Card" : "Cards"}`}` };
   });
   return `<div class="mobile-column-control jk-field"><label for="mobile-column">Column</label>${renderSelect({ id: "mobile-column", name: "mobile-column", value: selected, choices, ariaLabel: "Visible Column", disabled: workspaceLocked() })}</div>`;
 }
@@ -1161,7 +1220,8 @@ function renderMobileColumnSelector(project: Project): string {
 function renderBoardCard(card: ProjectCard): string {
   const summary = bodySummary(card.body);
   const hasRetainedDraft = Boolean(activeProject && retainedDrafts.has(draftKey(activeProject.id, card.id)));
-  return `<button class="board-card jk-card" type="button" data-action="open-card" data-card-id="${escapeHtml(card.id)}" aria-current="${card.id === selectedCardId ? "true" : "false"}"${disabledAttribute(workspaceLocked())}><span class="card-title">${escapeHtml(card.title)}</span>${summary ? `<span class="card-summary">${escapeHtml(summary)}</span>` : ""}<span class="card-meta">${hasRetainedDraft ? `<span class="card-draft-state jk-meta">Draft retained</span>` : ""}<span>${card.comments.length} ${card.comments.length === 1 ? "Comment" : "Comments"}</span><span>${escapeHtml(formatRecency(card.updatedAt || card.createdAt))}</span></span></button>`;
+  const metadata = [card.nextActor ? `<span>Next: ${card.nextActor === "human" ? "You" : "Agent"}</span>` : "", card.priority ? `<span>${card.priority} priority</span>` : "", card.blockedReason.trim() ? `<span>Blocked</span>` : ""].filter(Boolean).join("");
+  return `<button class="board-card jk-card" type="button" data-action="open-card" data-card-id="${escapeHtml(card.id)}" aria-current="${card.id === selectedCardId ? "true" : "false"}"${disabledAttribute(workspaceLocked())}><span class="card-title">${escapeHtml(card.title)}</span>${metadata ? `<span class="card-work-meta jk-meta">${metadata}</span>` : ""}${card.nextAction ? `<span class="card-next-action">${escapeHtml(card.nextAction)}</span>` : ""}${summary ? `<span class="card-summary">${escapeHtml(summary)}</span>` : ""}<span class="card-meta">${hasRetainedDraft ? `<span class="card-draft-state jk-meta">Draft retained</span>` : ""}<span>${card.comments.length} ${card.comments.length === 1 ? "Comment" : "Comments"}</span><span>${escapeHtml(formatRecency(card.updatedAt || card.createdAt))}</span></span></button>`;
 }
 
 function renderColumnGrid(project: Project): string {
@@ -1170,10 +1230,12 @@ function renderColumnGrid(project: Project): string {
     ? renderAddColumnControl("desktop")
     : "";
   return `<div class="columns" aria-label="Project Columns">${project.columns.map((column) => {
-    const cards = activeCards(project).filter((card) => card.columnId === column.id).sort((left, right) => left.position - right.position);
+    const allCards = activeCards(project).filter((card) => card.columnId === column.id);
+    const cards = allCards.filter((card) => cardMatchesFilters(card, project)).sort((left, right) => left.position - right.position);
     const headingId = `column-${safeId(column.id)}`;
-    const cardCountLabel = `${cards.length} ${cards.length === 1 ? "Card" : "Cards"}`;
-    return `<section class="column jk-panel" data-column-id="${escapeHtml(column.id)}" data-mobile-active="${column.id === mobileColumnId ? "true" : "false"}" aria-labelledby="${escapeHtml(headingId)}"><header class="column-header"><h3 id="${escapeHtml(headingId)}" tabindex="-1">${escapeHtml(column.name)}</h3><span class="jk-count" aria-label="${cardCountLabel}">${cards.length}</span></header><div class="card-list">${cards.length ? cards.map(renderBoardCard).join("") : `<div class="column-empty"><p>No Cards in ${escapeHtml(column.name)}.</p>${renderButton("Create Card", "new-card", { disabled: workspaceLocked(), data: `data-column-id="${escapeHtml(column.id)}"` })}</div>`}</div></section>`;
+    const cardCountLabel = hasCardFilters(project) ? `${cards.length} of ${allCards.length} Cards match filters` : `${cards.length} ${cards.length === 1 ? "Card" : "Cards"}`;
+    const empty = allCards.length ? `<div class="column-empty"><p>No matching Cards.</p></div>` : `<div class="column-empty"><p>No Cards in ${escapeHtml(column.name)}.</p>${renderButton("Create Card", "new-card", { disabled: workspaceLocked(), data: `data-column-id="${escapeHtml(column.id)}"` })}</div>`;
+    return `<section class="column jk-panel" data-column-id="${escapeHtml(column.id)}" data-mobile-active="${column.id === mobileColumnId ? "true" : "false"}" aria-labelledby="${escapeHtml(headingId)}"><header class="column-header"><h3 id="${escapeHtml(headingId)}" tabindex="-1">${escapeHtml(column.name)}</h3><span class="jk-count" aria-label="${cardCountLabel}">${hasCardFilters(project) ? `${cards.length}/${allCards.length}` : cards.length}</span></header><div class="card-list">${cards.length ? cards.map(renderBoardCard).join("") : empty}</div></section>`;
   }).join("")}${desktopAddColumn}</div>`;
 }
 
@@ -1181,7 +1243,8 @@ function renderBoardPane(project: Project): string {
   const narrowAddColumn = addColumnPreparing || addColumnCommitted || addColumnDraft
     ? narrowBoardQuery.matches ? renderAddColumnControl("narrow") : ""
     : renderAddColumnControl("narrow");
-  return `<section class="board-pane" aria-labelledby="cards-heading"><header class="board-toolbar"><h1 id="cards-heading" class="jk-visually-hidden">${escapeHtml(project.name)}</h1>${renderMobileColumnSelector(project)}${renderProjectActions(project)}</header>${narrowAddColumn}${projectLoading ? `<div class="jk-status" data-kind="neutral" role="status"><span class="jk-status-marker" aria-hidden="true">…</span><p>Refreshing Project…</p></div>` : renderColumnGrid(project)}</section>`;
+  const emptyResults = hasCardFilters(project) && activeCards(project).length && !visibleCards(project).length ? `<p class="card-filter-empty">No Cards match these filters.</p>` : "";
+  return `<section class="board-pane" aria-labelledby="cards-heading"><header class="board-toolbar"><h1 id="cards-heading" class="jk-visually-hidden">${escapeHtml(project.name)}</h1>${renderMobileColumnSelector(project)}${renderProjectActions(project)}</header>${renderCardFilters(project)}${emptyResults}${narrowAddColumn}${projectLoading ? `<div class="jk-status" data-kind="neutral" role="status"><span class="jk-status-marker" aria-hidden="true">…</span><p>Refreshing Project…</p></div>` : renderColumnGrid(project)}</section>`;
 }
 
 function draftKey(projectId: string, cardId: string | null): string {
@@ -1194,12 +1257,17 @@ function storedCardDraft(project: Project, card: ProjectCard | null): CardDraft 
     cardId: card?.id || null,
     title: card?.title || "",
     body: card?.body || "",
+    ...normalizeCardFields(card || {}),
     columnId: card?.columnId || creatingColumnId || project.columns[0]?.id || "",
     baseVersion: card?.version ?? null,
     baseTitle: card?.title || "",
     baseBody: card?.body || "",
     baseColumnId: card?.columnId || creatingColumnId || project.columns[0]?.id || "",
-    baseArchivedAt: card?.archivedAt || null
+    baseArchivedAt: card?.archivedAt || null,
+    baseNextActor: card?.nextActor ?? null,
+    baseNextAction: card?.nextAction || "",
+    basePriority: card?.priority ?? null,
+    baseBlockedReason: card?.blockedReason || ""
   };
 }
 
@@ -1249,6 +1317,14 @@ function renderCreateDestination(project: Project, draft: CardDraft): string {
     }),
     hint: "Choose the Column where this new Card will begin."
   }).replace('<p class="jk-help">', '<p class="jk-help" id="card-create-column-help">');
+}
+
+function renderCardWorkFields(draft: CardDraft): string {
+  return `<div class="card-work-fields"><div class="card-work-choices">${renderField({ id: "card-next-actor", label: "Next actor", control: renderSelect({ id: "card-next-actor", name: "nextActor", value: draft.nextActor || "", choices: [{ value: "", label: "Unassigned" }, { value: "human", label: "You" }, { value: "agent", label: "Agent" }] }) })}${renderField({ id: "card-priority", label: "Priority", control: renderSelect({ id: "card-priority", name: "priority", value: draft.priority || "", choices: [{ value: "", label: "Unset" }, { value: "High", label: "High" }, { value: "Medium", label: "Medium" }, { value: "Low", label: "Low" }] }) })}</div>${renderField({ id: "card-next-action", label: "Next action", control: renderTextArea({ id: "card-next-action", name: "nextAction", value: draft.nextAction, rows: 2, placeholder: "What should happen next?" }) })}${renderField({ id: "card-blocked-reason", label: "Blocker", control: renderTextArea({ id: "card-blocked-reason", name: "blockedReason", value: draft.blockedReason, rows: 2, placeholder: "Leave empty when work can proceed" }) })}</div>`;
+}
+
+function selectedCardFilterMessage(project: Project, card: ProjectCard | null): string {
+  return card && !cardMatchesFilters(card, project) ? "This Card is outside the current board filters." : "";
 }
 
 function renderMoveDisclosure(project: Project, card: ProjectCard, conflict: boolean): string {
@@ -1320,7 +1396,8 @@ function renderCardInspector(project: Project): string {
     ? "Your complete draft is still in the fields below. Review the stored change, then retry or discard your draft."
     : "Your complete draft is still in the fields below, but the latest stored Card could not be loaded. Refresh before retrying, or discard the draft.";
   const storedLabel = latestConflictLoaded ? "Stored" : "Last displayed";
-  const staleMarkup = conflict && card ? `<section class="stale-review jk-status" data-kind="warning" aria-labelledby="stale-heading"><span class="jk-status-marker" aria-hidden="true">!</span><div><h3 id="stale-heading" tabindex="-1">${staleHeading}</h3><p>${staleGuidance}</p><dl class="stored-change"><div><dt>${storedLabel} state</dt><dd>${card.archivedAt ? "Archived" : "Active"}</dd></div><div><dt>${storedLabel} title</dt><dd>${escapeHtml(card.title)}</dd></div><div><dt>${storedLabel} Column</dt><dd>${escapeHtml(project.columns.find((candidate) => candidate.id === card.columnId)?.name || "Unknown Column")}</dd></div><div><dt>${storedLabel} body</dt><dd>${escapeHtml(card.body || "No body")}</dd></div></dl><div class="jk-actions">${latestConflictLoaded ? renderButton(retryLabel, "retry-save", { priority: "primary" }) : renderButton("Refresh latest", "refresh-project", { priority: "primary" })}${renderButton("Discard draft", "discard-draft")}</div></div></section>` : "";
+  const storedWorkFields = card ? `<div><dt>${storedLabel} next actor</dt><dd>${card.nextActor === "human" ? "You" : card.nextActor === "agent" ? "Agent" : "Unassigned"}</dd></div><div><dt>${storedLabel} next action</dt><dd>${escapeHtml(card.nextAction || "None")}</dd></div><div><dt>${storedLabel} priority</dt><dd>${card.priority || "Unset"}</dd></div><div><dt>${storedLabel} blocker</dt><dd>${escapeHtml(card.blockedReason || "None")}</dd></div>` : "";
+  const staleMarkup = conflict && card ? `<section class="stale-review jk-status" data-kind="warning" aria-labelledby="stale-heading"><span class="jk-status-marker" aria-hidden="true">!</span><div><h3 id="stale-heading" tabindex="-1">${staleHeading}</h3><p>${staleGuidance}</p><dl class="stored-change"><div><dt>${storedLabel} state</dt><dd>${card.archivedAt ? "Archived" : "Active"}</dd></div><div><dt>${storedLabel} title</dt><dd>${escapeHtml(card.title)}</dd></div><div><dt>${storedLabel} Column</dt><dd>${escapeHtml(project.columns.find((candidate) => candidate.id === card.columnId)?.name || "Unknown Column")}</dd></div><div><dt>${storedLabel} body</dt><dd>${escapeHtml(card.body || "No body")}</dd></div>${storedWorkFields}</dl><div class="jk-actions">${latestConflictLoaded ? renderButton(retryLabel, "retry-save", { priority: "primary" }) : renderButton("Refresh latest", "refresh-project", { priority: "primary" })}${renderButton("Discard draft", "discard-draft")}</div></div></section>` : "";
   const moveConflictMarkup = card ? renderMoveConflict(project, card) : "";
   const recoveryActive = conflict || Boolean(moveConflictMarkup);
   const previewBlocked = addColumnPreparing || recoveryActive || Boolean(status && (status.tone === "error" || status.title.includes("outcome unconfirmed")));
@@ -1358,7 +1435,7 @@ function renderCardInspector(project: Project): string {
   const previewPanel = `<div id="description-preview-panel" class="description-view-panel markdown-preview" role="tabpanel" aria-labelledby="description-preview-tab" tabindex="0"${descriptionView === "preview" ? "" : " hidden"}>${previewContent}</div>`;
   const descriptionEditor = `<div class="jk-field surface-field card-body-field"><div class="description-field-header"><label for="card-body-input">Description</label>${descriptionTabs}</div><p class="jk-help" id="card-description-help">Markdown supports headings, lists, links, quotes, and code. HTML and images aren’t supported.</p>${writePanel}${previewPanel}</div>`;
   const createDestination = card ? "" : renderCreateDestination(project, draft);
-  const editor = `<form class="card-form surface-card-form" data-form="card" data-autosave="${card ? "true" : "false"}" data-card-id="${escapeHtml(card?.id || "")}" novalidate><div class="jk-field surface-field"><label class="jk-visually-hidden" for="card-title-input">Title</label>${titleControl}${titleError ? `<p class="jk-error" id="card-title-error">${escapeHtml(titleError)}</p>` : ""}</div>${draftRetentionMarkup}${descriptionEditor}${createDestination}${conflict || moveConflictMarkup ? "" : card ? `<div class="inspector-actions">${renderButton("Archive", "archive-card", { priority: "risk", data: `data-card-id="${escapeHtml(card.id)}"` })}</div>` : `<div class="inspector-actions"><button class="jk-button" data-priority="primary" type="submit"${disabledAttribute()}>${mutationKind === "card" ? "Creating…" : "Create Card"}</button></div>`}</form>`;
+  const editor = `<form class="card-form surface-card-form" data-form="card" data-autosave="${card ? "true" : "false"}" data-card-id="${escapeHtml(card?.id || "")}" novalidate><div class="jk-field surface-field"><label class="jk-visually-hidden" for="card-title-input">Title</label>${titleControl}${titleError ? `<p class="jk-error" id="card-title-error">${escapeHtml(titleError)}</p>` : ""}</div><p id="card-filter-note" class="card-filter-note jk-help" role="status">${selectedCardFilterMessage(project, card)}</p>${draftRetentionMarkup}${descriptionEditor}${renderCardWorkFields(draft)}${createDestination}${conflict || moveConflictMarkup ? "" : card ? `<div class="inspector-actions">${renderButton("Archive", "archive-card", { priority: "risk", data: `data-card-id="${escapeHtml(card.id)}"` })}</div>` : `<div class="inspector-actions"><button class="jk-button" data-priority="primary" type="submit"${disabledAttribute()}>${mutationKind === "card" ? "Creating…" : "Create Card"}</button></div>`}</form>`;
   const cardPanel = `<div id="card-panel" class="inspector-panel" role="tabpanel" aria-labelledby="card-tab">${status ? `<div class="card-status">${renderStatus(status, "card-status")}</div>` : renderStatus(null, "card-status")}${staleMarkup}${moveConflictMarkup}${pendingCardCreate}${editor}${card ? renderComments(card) : ""}</div>`;
   const preparingStatus = addColumnPreparing && cardOnlyQuery.matches
     ? `<div class="card-status inspector-preparing-status">${renderStatus(ADD_COLUMN_PREPARING_STATUS, "add-column-preparing-status")}</div>`
@@ -1438,7 +1515,12 @@ function restorePendingContext(): void {
   pendingScrollRestore = null;
   window.requestAnimationFrame(() => {
     if (scrollTop !== null) window.scrollTo({ top: scrollTop });
-    const target = focusId ? document.getElementById(focusId) : focusTarget ? findFocusTarget(focusTarget) : null;
+    let target = focusId ? document.getElementById(focusId) : focusTarget ? findFocusTarget(focusTarget) : null;
+    if (!target && focusTarget?.action === "open-card" && activeProject) {
+      const card = activeProject.cards.find((candidate) => candidate.id === focusTarget.cardId);
+      const heading = document.getElementById(`column-${safeId(card?.columnId || selectedMobileColumn(activeProject))}`);
+      target = heading?.getClientRects().length ? heading : document.getElementById("board-filter-next-actor");
+    }
     target?.focus();
   });
 }
@@ -1494,7 +1576,19 @@ function captureAddColumnDraft(form: HTMLFormElement): void {
 function sameDraft(left: CardDraft, right: CardDraft): boolean {
   return cleanValue(left.title) === cleanValue(right.title)
     && cardBodyValue(left.body) === cardBodyValue(right.body)
-    && left.columnId === right.columnId;
+    && left.columnId === right.columnId
+    && sameCardFields(left, right);
+}
+
+function sameCardFields(left: CardFields, right: CardFields): boolean {
+  return left.nextActor === right.nextActor
+    && cleanValue(left.nextAction) === cleanValue(right.nextAction)
+    && left.priority === right.priority
+    && cleanValue(left.blockedReason) === cleanValue(right.blockedReason);
+}
+
+function cardFieldsPayload(draft: CardDraft): CardFields {
+  return { nextActor: draft.nextActor, nextAction: cleanValue(draft.nextAction), priority: draft.priority, blockedReason: cleanValue(draft.blockedReason) };
 }
 
 function sameRevision(left: Revision | null, right: Revision | null): boolean {
@@ -1505,7 +1599,8 @@ function storedCardMatchesDraftBase(card: ProjectCard, draft: CardDraft): boolea
   return cleanValue(card.title) === cleanValue(draft.baseTitle)
     && cardBodyValue(card.body) === cardBodyValue(draft.baseBody)
     && card.columnId === draft.baseColumnId
-    && card.archivedAt === draft.baseArchivedAt;
+    && card.archivedAt === draft.baseArchivedAt
+    && sameCardFields(card, { nextActor: draft.baseNextActor, nextAction: draft.baseNextAction, priority: draft.basePriority, blockedReason: draft.baseBlockedReason });
 }
 
 function rebaseDraft(draft: CardDraft, card: ProjectCard): CardDraft {
@@ -1515,7 +1610,11 @@ function rebaseDraft(draft: CardDraft, card: ProjectCard): CardDraft {
     baseTitle: card.title,
     baseBody: card.body,
     baseColumnId: card.columnId,
-    baseArchivedAt: card.archivedAt
+    baseArchivedAt: card.archivedAt,
+    baseNextActor: card.nextActor,
+    baseNextAction: card.nextAction,
+    basePriority: card.priority,
+    baseBlockedReason: card.blockedReason
   };
 }
 
@@ -1533,12 +1632,17 @@ function captureCardDraft(form: HTMLFormElement): CardDraft | null {
     cardId,
     title: formValue(data, "title"),
     body: formValue(data, "body"),
+    ...normalizeCardFields({ nextActor: formValue(data, "nextActor"), nextAction: formValue(data, "nextAction"), priority: formValue(data, "priority"), blockedReason: formValue(data, "blockedReason") }),
     columnId: formValue(data, "columnId") || base.columnId,
     baseVersion: base.baseVersion,
     baseTitle: base.baseTitle,
     baseBody: base.baseBody,
     baseColumnId: base.baseColumnId,
-    baseArchivedAt: base.baseArchivedAt
+    baseArchivedAt: base.baseArchivedAt,
+    baseNextActor: base.baseNextActor,
+    baseNextAction: base.baseNextAction,
+    basePriority: base.basePriority,
+    baseBlockedReason: base.baseBlockedReason
   };
   if (sameDraft(draft, storedCardDraft(project, card))) retainedDrafts.delete(key);
   else retainedDrafts.set(key, draft);
@@ -1586,6 +1690,7 @@ function clearPrivateState(notice: AuthNotice | null): void {
   repeatedAutosaves.clear();
   mobileColumns.clear();
   boardScrollPositions.clear();
+  projectCardFilters.clear();
   cardReturnFocus = null;
   projectEditorReturnFocus = null;
   addColumnReturnFocus = null;
@@ -2276,37 +2381,27 @@ function announceAutosave(message: string): void {
 }
 
 function updateRenderedBoardCard(card: ProjectCard): void {
-  const cardButton = [...root.querySelectorAll<HTMLElement>("[data-action='open-card']")]
-    .find((candidate) => candidate.dataset.cardId === card.id);
-  if (!cardButton) return;
-  const title = cardButton.querySelector<HTMLElement>(".card-title");
-  if (title) title.textContent = card.title;
-  const summaryText = bodySummary(card.body);
-  let summary = cardButton.querySelector<HTMLElement>(".card-summary");
-  if (summaryText && !summary) {
-    summary = document.createElement("span");
-    summary.className = "card-summary";
-    cardButton.querySelector(".card-meta")?.before(summary);
+  const project = activeProject;
+  const board = root.querySelector<HTMLElement>(".board-pane");
+  if (project && board) {
+    const scrollTop = window.scrollY;
+    const columnsScrollLeft = board.querySelector(".columns")?.scrollLeft || 0;
+    const focused = document.activeElement instanceof HTMLElement && board.contains(document.activeElement) ? document.activeElement : null;
+    const focusId = focused?.id;
+    const focusTarget = focused ? focusTargetFor(focused) : null;
+    board.outerHTML = renderBoardPane(project);
+    const columns = root.querySelector(".board-pane .columns");
+    if (columns) columns.scrollLeft = columnsScrollLeft;
+    let nextFocus = focusId ? document.getElementById(focusId) : focusTarget ? findFocusTarget(focusTarget) : null;
+    if (!nextFocus && focusTarget?.action === "open-card") nextFocus = document.getElementById(`column-${safeId(card.columnId)}`);
+    nextFocus?.focus({ preventScroll: true });
+    window.scrollTo({ top: scrollTop });
   }
-  if (summary) {
-    summary.textContent = summaryText;
-    summary.hidden = !summaryText;
+  if (selectedCardId === card.id && project) {
+    const note = root.querySelector<HTMLElement>("#card-filter-note");
+    if (note) note.textContent = selectedCardFilterMessage(project, card);
+    if (!retainedDrafts.has(draftKey(project.id, card.id))) root.querySelector(".draft-retained-note")?.remove();
   }
-  const meta = cardButton.querySelector<HTMLElement>(".card-meta");
-  if (!meta) return;
-  const hasRetainedDraft = Boolean(activeProject && retainedDrafts.has(draftKey(activeProject.id, card.id)));
-  let draftState = meta.querySelector<HTMLElement>(".card-draft-state");
-  if (hasRetainedDraft && !draftState) {
-    draftState = document.createElement("span");
-    draftState.className = "card-draft-state jk-meta";
-    draftState.textContent = "Draft retained";
-    meta.prepend(draftState);
-  } else if (!hasRetainedDraft) {
-    draftState?.remove();
-    if (selectedCardId === card.id) root.querySelector(".draft-retained-note")?.remove();
-  }
-  const recency = meta.lastElementChild;
-  if (recency instanceof HTMLElement) recency.textContent = formatRecency(card.updatedAt);
 }
 
 function inspectorHasActiveControl(): boolean {
@@ -2338,7 +2433,7 @@ async function performCardAutosave(projectId: string, cardId: string): Promise<v
     const response = await api(`/projects/${safeId(projectId)}/cards/${safeId(cardId)}`, {
       method: "PATCH",
       revision: draft.baseVersion ?? card.version,
-      body: { title: cleanValue(draft.title), body: cardBodyValue(draft.body) }
+      body: { title: cleanValue(draft.title), body: cardBodyValue(draft.body), ...cardFieldsPayload(draft) }
     });
     const storedCard = applyCardMutationResponse(projectId, response);
     recordBrowserActivity(project, `Updated ${storedCard.title}.`, storedCard.id);
@@ -2625,7 +2720,8 @@ async function saveCard(form: HTMLFormElement | null, explicitRetry = false): Pr
     if (card) {
       const body: Record<string, unknown> = {
         title: cleanValue(draft.title),
-        body: cardBodyValue(draft.body)
+        body: cardBodyValue(draft.body),
+        ...cardFieldsPayload(draft)
       };
       if (explicitRetry && card.archivedAt) body.archivedAt = null;
       const response = await api(`/projects/${safeId(project.id)}/cards/${safeId(card.id)}`, {
@@ -2636,7 +2732,7 @@ async function saveCard(form: HTMLFormElement | null, explicitRetry = false): Pr
       storedCard = applyCardMutationResponse(project.id, response);
       recordBrowserActivity(project, `Updated ${storedCard.title}.`, storedCard.id);
     } else {
-      const body = { title: cleanValue(draft.title), body: cardBodyValue(draft.body), columnId: draft.columnId };
+      const body = { title: cleanValue(draft.title), body: cardBodyValue(draft.body), columnId: draft.columnId, ...cardFieldsPayload(draft) };
       const idempotencyScope = `card:create:${project.id}`;
       const response = await api(`/projects/${safeId(project.id)}/cards`, {
         method: "POST",
@@ -2965,6 +3061,12 @@ function handlePrivateError(error: unknown): boolean {
 
 async function handleAction(button: HTMLElement): Promise<void> {
   const action = button.dataset.action || "";
+  if (action === "clear-card-filters" && activeProject && !workspaceLocked()) {
+    projectCardFilters.delete(activeProject.id);
+    pendingFocusId = "board-filter-next-actor";
+    render();
+    return;
+  }
   if (action === "passkey-sign-in") return beginPasskeyFlow("signin");
   if (action === "start-signup") return beginPasskeyFlow("signup");
   if (action === "start-recovery") return beginPasskeyFlow("recover");
@@ -3133,7 +3235,7 @@ root.addEventListener("input", (event) => {
 
 root.addEventListener("focusout", (event) => {
   const target = event.target as HTMLElement;
-  if (target.id !== "card-title-input" && target.id !== "card-body-input") return;
+  if (!["card-title-input", "card-body-input", "card-next-action", "card-blocked-reason"].includes(target.id)) return;
   if (target.id === "card-body-input") captureDescriptionSelection();
   const form = target.closest<HTMLFormElement>("form[data-form='card'][data-autosave='true']");
   if (form) queueCardAutosave(form);
@@ -3142,6 +3244,16 @@ root.addEventListener("focusout", (event) => {
 root.addEventListener("change", (event) => {
   const target = event.target as HTMLSelectElement;
   if (mutationInFlight || projectEditorMode || addColumnDraft) return;
+  if (target.id.startsWith("board-filter-") && activeProject) {
+    const filters = { ...cardFilters(activeProject) };
+    if (target.id === "board-filter-next-actor") filters.nextActor = target.value as CardFilters["nextActor"];
+    if (target.id === "board-filter-priority") filters.priority = target.value as CardFilters["priority"];
+    if (target.id === "board-filter-blocked") filters.blocked = target.value as CardFilters["blocked"];
+    projectCardFilters.set(activeProject.id, filters);
+    pendingFocusId = target.id;
+    render();
+    return;
+  }
   if (target.id === "project-select") {
     void switchProject(target.value);
     return;
@@ -3154,7 +3266,10 @@ root.addEventListener("change", (event) => {
     return;
   }
   const cardForm = target.closest<HTMLFormElement>("form[data-form='card']");
-  if (cardForm) captureCardDraft(cardForm);
+  if (cardForm) {
+    captureCardDraft(cardForm);
+    if (cardForm.dataset.autosave === "true" && (target.id === "card-next-actor" || target.id === "card-priority")) queueCardAutosave(cardForm);
+  }
 });
 
 root.addEventListener("submit", (event) => {
