@@ -21,7 +21,7 @@ export const ROOT_SESSION_COOKIE_DEV = "kanban_root_session";
 export const TENANT_SESSION_COOKIE_PROD = "__Host-kanban_tenant_session";
 export const TENANT_SESSION_COOKIE_DEV = "kanban_tenant_session";
 
-const DEFAULT_SESSION_TTL_SECONDS = 7 * 24 * 60 * 60;
+export const BROWSER_SESSION_TTL_SECONDS = 365 * 24 * 60 * 60;
 const SESSION_ISSUER = "kanban.cards";
 const ROOT_SESSION_AUDIENCE = "kanban.cards:root";
 const TENANT_SESSION_AUDIENCE = "kanban.cards:tenant";
@@ -33,7 +33,7 @@ export async function createRootSessionCookie(
   session: RootSession,
   secret: string,
   production: boolean,
-  ttlSeconds = DEFAULT_SESSION_TTL_SECONDS
+  ttlSeconds = BROWSER_SESSION_TTL_SECONDS
 ): Promise<string> {
   const payload = requireRootSession(session);
   const token = await signSession(payload, secret, ROOT_SESSION_AUDIENCE, ttlSeconds);
@@ -64,7 +64,7 @@ export async function createTenantSessionCookie(
   session: TenantSession,
   secret: string,
   production: boolean,
-  ttlSeconds = DEFAULT_SESSION_TTL_SECONDS
+  ttlSeconds = BROWSER_SESSION_TTL_SECONDS
 ): Promise<string> {
   const payload = requireTenantSession(session);
   const token = await signSession(payload, secret, TENANT_SESSION_AUDIENCE, ttlSeconds);

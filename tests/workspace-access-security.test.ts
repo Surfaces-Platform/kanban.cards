@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { createFileAccessStore, type AccessStore } from "../src/access-store";
-import { createRootSessionCookie, createTenantSessionCookie, type RootSession } from "../src/app-sessions";
+import { BROWSER_SESSION_TTL_SECONDS, createRootSessionCookie, createTenantSessionCookie, verifyRootSession, verifyTenantSession, type RootSession } from "../src/app-sessions";
 import { hashSecret, type PasskeyAuthConfig } from "../src/passkey-auth";
 import { createApp } from "../src/server";
 import { createWorkspaceStoreResolver } from "../src/state-store";
@@ -15,7 +15,24 @@ import { createWorkspaceStoreResolver } from "../src/state-store";
 const ROOT = "https://kanban.cards";
 const AUTH = "https://auth.kanban.cards";
 const SECRET = "passkey-server-security-secret-at-least-32-bytes";
-const CONFIG: PasskeyAuthConfig = { authHost: "auth.kanban.cards", authOrigin: AUTH, rpId: "auth.kanban.cards", sessionSecret: SECRET, rootOrigins: [ROOT], sessionTtlSeconds: 604800 };
+const CONFIG: PasskeyAuthConfig = { authHost: "auth.kanban.cards", authOrigin: AUTH, rpId: "auth.kanban.cards", sessionSecret: SECRET, rootOrigins: [ROOT], sessionTtlSeconds: BROWSER_SESSION_TTL_SECONDS };
+
+function assertSessionCookieLifetime(headers: Headers, name: string, expiresAt: string) {
+  const cookie = headers.getSetCookie().find(value => value.startsWith(`${name}=`));
+  assert.ok(cookie, "Handoff must issue its host-only session cookie");
+  const maxAge = Number(cookie.match(/; Max-Age=(\d+)(?:;|$)/)?.[1]);
+  const token = decodeURIComponent(cookie.split(";")[0].slice(name.length + 1));
+  const claims = JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString("utf8")) as { iat: number; exp: number };
+  assert.ok(Number.isSafeInteger(maxAge) && maxAge > 0);
+  assert.equal(claims.exp - claims.iat, maxAge);
+  assert.ok(claims.exp * 1000 <= Date.parse(expiresAt), "JWT must not outlive the stored session");
+  assert.ok(Date.parse(expiresAt) - claims.exp * 1000 < 2000, "Cookie must retain the stored session's remaining lifetime");
+  assert.match(cookie, /; HttpOnly(?:;|$)/);
+  assert.match(cookie, /; Secure(?:;|$)/);
+  assert.match(cookie, /; SameSite=Lax(?:;|$)/);
+  assert.doesNotMatch(cookie, /; Domain=/i);
+  return maxAge;
+}
 
 async function fixture(run: (f: Awaited<ReturnType<typeof startFixture>>) => Promise<void>) {
   const f = await startFixture();
@@ -114,8 +131,41 @@ test("root handoff requires the initiating browser nonce and consumes once", asy
   assert.equal((await submit("__Host-kanban_login_nonce=wrong")).status, 401);
   const valid = await submit(`__Host-kanban_login_nonce=${nonce}`);
   assert.equal(valid.status, 303);
-  assert.match(valid.headers.get("set-cookie") || "", /__Host-kanban_root_session=/);
+  const storedSession = (await f.accessStore.read()).authSessions.find(session => session.id === "passkey-session-one")!;
+  assert.ok(assertSessionCookieLifetime(valid.headers, "__Host-kanban_root_session", storedSession.expiresAt) <= 600);
   assert.equal((await submit(`__Host-kanban_login_nonce=${nonce}`)).status, 401);
+}));
+
+test("repeated Workspace handoffs preserve an aged browser session's absolute expiry", async () => fixture(async f => {
+  const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+  await f.accessStore.authTransaction(state => {
+    const session = state.authSessions.find(session => session.id === "passkey-session-one")!;
+    session.createdAt = new Date(Date.parse(expiresAt) - BROWSER_SESSION_TTL_SECONDS * 1000).toISOString();
+    session.expiresAt = expiresAt;
+  });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const handoff = await f.request("kanban.cards", "/api/workspace-handoffs", { method: "POST", origin: ROOT, cookie: f.rootCookie, body: { slug: "mike" } });
+    assert.equal(handoff.status, 201);
+    const entered = await f.request("mike.kanban.cards", "/api/workspace-handoff", { method: "POST", origin: ROOT, form: { token: handoff.data.handoffToken } });
+    assert.equal(entered.status, 303);
+    assert.ok(assertSessionCookieLifetime(entered.headers, "__Host-kanban_tenant_session", expiresAt) <= 3600);
+    assert.equal((await f.accessStore.read()).authSessions.find(session => session.id === "passkey-session-one")!.expiresAt, expiresAt);
+  }
+}));
+
+test("expired server sessions reject root and Workspace access while their signed cookies remain valid", async () => fixture(async f => {
+  assert.ok(await verifyRootSession(new Request(`${ROOT}/`, { headers: { cookie: f.rootCookie } }), SECRET, true));
+  assert.ok(await verifyTenantSession(new Request("https://mike.kanban.cards/", { headers: { cookie: f.tenantCookie } }), SECRET, true));
+  await f.accessStore.authTransaction(state => {
+    const session = state.authSessions.find(session => session.id === "passkey-session-one")!;
+    session.createdAt = new Date(Date.now() - 10000).toISOString();
+    session.verifiedAt = session.createdAt;
+    session.expiresAt = new Date(Date.now() - 1000).toISOString();
+  });
+  assert.equal((await f.request("kanban.cards", "/api/session", { cookie: f.rootCookie })).data.authenticated, false);
+  assert.equal((await f.request("mike.kanban.cards", "/api/session", { cookie: f.tenantCookie })).data.authenticated, false);
+  assert.equal((await f.request("mike.kanban.cards", "/api/projects", { cookie: f.tenantCookie })).status, 401);
+  assert.equal((await f.request("kanban.cards", "/api/workspace-handoffs", { method: "POST", origin: ROOT, cookie: f.rootCookie, body: { slug: "mike" } })).status, 401);
 }));
 
 test("fresh verification gates credential changes and final passkey cannot be removed", async () => fixture(async f => {

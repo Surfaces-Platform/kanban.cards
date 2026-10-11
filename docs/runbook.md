@@ -15,7 +15,7 @@ Use Node.js 22. Set these values in the server's environment:
 
 `POSTGRES_URL` or `DATABASE_URL` can provide the database connection. Keep secrets in the hosting environment. Local development may use `board.localhost:4317` and `auth.board.localhost:4317` with isolated JSON data.
 
-The auth host runs passkey ceremonies with RP ID `auth.kanban.cards`. It denies Workspace and board-data APIs. Owners get seven-day, host-only browser sessions. Production accepts scoped agent credentials and passkey sessions; the global bearer bridge is disabled.
+The auth host runs passkey ceremonies with RP ID `auth.kanban.cards`. It denies Workspace and board-data APIs. Owners get host-only browser sessions that last 365 days from sign-in. Root and Workspace cookie lifetimes follow the server session's remaining lifetime. Activity and identity verification do not extend expiry. Sessions issued before this lifetime change retain their original expiry; sign in again after release to start a 365-day session. Temporary sign-in cookies still last ten minutes. Production accepts scoped agent credentials and passkey sessions; the global bearer bridge is disabled.
 
 ## Enroll Mike's first passkey
 

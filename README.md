@@ -33,7 +33,7 @@ Local development uses JSON files under `data/`. Production requires Postgres. `
 
 Passkey ceremonies run only on the configured auth host. Production uses `https://auth.kanban.cards` and the exact RP ID `auth.kanban.cards`. The auth host denies board-data APIs.
 
-Successful verification creates a seven-day browser session in a Secure, HttpOnly, host-only cookie. Server-side session records support revocation. Short-lived, single-use handoffs open the initiating root and the selected Workspace. Every protected request checks current owner membership.
+Successful sign-in creates a browser session that lasts 365 days from sign-in in a Secure, HttpOnly, host-only cookie. Server-side session records support revocation. Root and Workspace cookies expire with the original session; activity and identity verification do not extend the lifetime. Short-lived, single-use handoffs open the initiating root and the selected Workspace. Every protected request checks current owner membership.
 
 Access settings let an owner add another passkey, manage API keys, replace the recovery code, and end sessions. Credential changes and API-key creation require passkey verification within five minutes. Store a second passkey or the recovery code somewhere safe.
 
