@@ -244,6 +244,7 @@ test("recovery only changes access after replacement verifies and then revokes o
     const before = await h.store.read();
     const oldSession = before.authSessions[0];
     const owner = before.owners[0];
+    await h.store.authTransaction(state => { state.nativeSessions.push({ id: "native-session-recovery-test", ownerId: owner.id, credentialHash: hashSecret("native-recovery-test-credential"), rootOrigin: ROOT_ORIGIN, createdAt: h.time().toISOString(), expiresAt: new Date(h.time().getTime() + 60_000).toISOString(), revokedAt: null }); });
     const agent = await h.store.createAgentConnection({ providerSubject: owner.id, workspaceId: before.workspaces[0].id, label: "Bot", scopes: ["read"] });
     const { jar } = await h.begin("recover");
     const options = await h.request("options", { recoveryCode: signup.verified.body.recoveryCode }, jar);
@@ -251,6 +252,7 @@ test("recovery only changes access after replacement verifies and then revokes o
     assert.equal(failed.status, 401);
     assert.equal((await h.store.read()).passkeys[0].revokedAt, null);
     assert.ok(await activeOwnerSession(h.store, oldSession.id, h.time()));
+    assert.equal((await h.store.read()).nativeSessions[0].revokedAt, null);
     const recovered = await h.enroll("recover", { recoveryCode: signup.verified.body.recoveryCode }, "cmVwbGFjZW1lbnQ", jar);
     assert.equal(recovered.verified.status, 200, JSON.stringify(recovered.verified.body));
     const state = await h.store.read();
@@ -258,6 +260,7 @@ test("recovery only changes access after replacement verifies and then revokes o
     assert.ok(state.passkeys.find((key) => key.id === signup.keyId)?.revokedAt);
     assert.equal(state.passkeys.find((key) => key.id === "cmVwbGFjZW1lbnQ")?.revokedAt, null);
     assert.equal(await activeOwnerSession(h.store, oldSession.id, h.time()), null);
+    assert.ok(state.nativeSessions[0].revokedAt);
     assert.ok(state.authHandoffs.find((handoff) => handoff.sessionId === oldSession.id)?.consumedAt);
     await assert.rejects(h.store.verifyAgentCredential(agent.credential), /revoked/);
     const retry = await h.begin("recover");

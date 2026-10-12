@@ -22,6 +22,8 @@ export interface PasskeyAuthConfig {
   setupOwnerId?: string;
   setupTokenHash?: string;
   setupExpiresAt?: string;
+  /** Explicit App ID prefixes and bundle IDs authorized for webcredentials. */
+  iosAppIds?: string[];
 }
 
 export type PasskeyMode = "signup" | "signin" | "setup" | "recover" | "add" | "verify";
@@ -74,7 +76,8 @@ export function getPasskeyConfig(env: NodeJS.ProcessEnv = process.env): PasskeyA
     sessionTtlSeconds: BROWSER_SESSION_TTL_SECONDS,
     setupOwnerId: env.KANBAN_CARDS_SETUP_OWNER_ID?.trim(),
     setupTokenHash: env.KANBAN_CARDS_SETUP_TOKEN_HASH?.trim(),
-    setupExpiresAt: env.KANBAN_CARDS_SETUP_EXPIRES_AT?.trim()
+    setupExpiresAt: env.KANBAN_CARDS_SETUP_EXPIRES_AT?.trim(),
+    iosAppIds: env.KANBAN_CARDS_IOS_APP_IDS?.split(",").map(value => value.trim()).filter(Boolean) || []
   };
   validatePasskeyAuthConfig(config);
   return config;
@@ -93,6 +96,7 @@ export function validatePasskeyAuthConfig(config: PasskeyAuthConfig): void {
   if (setup.some(Boolean) && !setup.every(Boolean)) throw new Error("One-time owner setup requires owner ID, token hash, and expiry together.");
   if (config.setupTokenHash && !/^sha256:[a-f0-9]{64}$/.test(config.setupTokenHash)) throw new Error("Setup token must be configured as a SHA-256 hash.");
   if (config.setupExpiresAt && !Number.isFinite(Date.parse(config.setupExpiresAt))) throw new Error("Setup expiry must be a valid timestamp.");
+  if (config.iosAppIds && (new Set(config.iosAppIds).size !== config.iosAppIds.length || config.iosAppIds.some(id => !/^[A-Z0-9]{10}\.[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/.test(id)))) throw new Error("iOS App IDs must be unique explicit App ID prefixes and bundle identifiers.");
 }
 
 export const validatePasskeyConfig = validatePasskeyAuthConfig;

@@ -18,6 +18,7 @@ import {
   type PasskeyAuthConfig
 } from "./passkey-auth";
 import { createStateStore, createWorkspaceStoreResolver, DEFAULT_WORKSPACE_ID } from "./state-store";
+import { authorizeNativeCredential, createNativeAuthRouter, isNativeCredential, requireNativeRequest } from "./native-auth";
 import type {
   Activity,
   ActivityActor,
@@ -33,7 +34,7 @@ import type {
 } from "./types";
 import type { WorkspaceStoreResolver } from "./types";
 
-type AuthMethod = "bearer" | "cookie" | "agent";
+type AuthMethod = "bearer" | "cookie" | "agent" | "native";
 
 interface OwnerAuth {
   method: AuthMethod;
@@ -41,6 +42,7 @@ interface OwnerAuth {
   workspace: AccessWorkspace | null;
   store: StateStore;
   scopes?: readonly ("read" | "write")[];
+  expiresAt?: string;
 }
 
 declare global {
@@ -261,6 +263,15 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       if (requestHost(req, trustForwardedHost) !== authHost) { next(); return; }
       router(req, res, next);
     });
+    const nativeRouter = createNativeAuthRouter({ config: { ...passkeyAuthConfig, rootOrigins: [primaryHostFamily.rootOrigin] }, accessStore });
+    app.use("/api/native-auth", (req, res, next) => {
+      if (requestHost(req, trustForwardedHost) !== authHost) { next(); return; }
+      nativeRouter(req, res, next);
+    });
+    app.get("/.well-known/apple-app-site-association", (req, res, next) => {
+      if (requestHost(req, trustForwardedHost) !== authHost || !passkeyAuthConfig.iosAppIds?.length) { next(); return; }
+      res.json({ webcredentials: { apps: passkeyAuthConfig.iosAppIds } });
+    });
   }
   app.get("/api/health", asyncHandler(async (_req, res) => {
     const access = await inspectAccessReadiness();
@@ -279,7 +290,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     }
     const context = await resolveAccessContext(req, contextConfig);
     const family = context.hostFamily || primaryHostFamily;
-    res.json({ authenticated: Boolean(context.auth), context: context.kind, rootUrl: family.rootOrigin, authMode: passkeyAuthConfig ? "passkey" : "local", loginUrl: passkeyAuthConfig ? `${authOrigin}/sign-in` : "", ...(context.auth ? { label: context.auth.actor.label, email: context.identity?.email } : {}), ...(context.workspace ? { workspace: publicAccessWorkspace(context.workspace, family) } : {}), setupAvailable: Boolean(passkeyAuthConfig?.setupOwnerId && !((await accessStore.read()).setupConsumed)) });
+    res.json({ authenticated: Boolean(context.auth), context: context.kind, rootUrl: family.rootOrigin, authMode: passkeyAuthConfig ? "passkey" : "local", loginUrl: passkeyAuthConfig ? `${authOrigin}/sign-in` : "", ...(context.auth ? { label: context.auth.actor.label, email: context.identity?.email } : {}), ...(context.auth?.method === "native" ? { authenticationMethod: "native", expiresAt: context.auth.expiresAt } : {}), ...(context.workspace ? { workspace: publicAccessWorkspace(context.workspace, family) } : {}), setupAvailable: Boolean(passkeyAuthConfig?.setupOwnerId && !((await accessStore.read()).setupConsumed)) });
   }));
   app.post("/api/auth-start", asyncHandler(async (req, res) => {
     noStore(res);
@@ -340,6 +351,17 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
   }));
   app.delete("/api/session", asyncHandler(async (req, res) => {
     noStore(res);
+    if (passkeyAuthConfig && req.get("authorization")) {
+      const context = await resolveAccessContext(req, contextConfig);
+      if (context.auth?.method !== "native" || !context.identity) throw httpError(401, "Owner sign-in required.");
+      await accessStore.authTransaction(state => {
+        const session = state.nativeSessions.find(s => s.id === context.identity!.sessionId && s.ownerId === context.identity!.providerSubject);
+        if (!session || session.revokedAt) throw httpError(401, "Owner sign-in required.");
+        session.revokedAt = new Date().toISOString();
+      });
+      res.json({ signedOutHere: true, globalSignOutComplete: true });
+      return;
+    }
     assertRequestOrigin(req, Boolean(passkeyAuthConfig), trustForwardedHost);
     if (passkeyAuthConfig) {
       const { session } = await requireBrowserOwner(req);
@@ -407,7 +429,9 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
   app.get("/api/workspaces", asyncHandler(async (req, res) => {
     const family = requireRootRequest(req, hostFamilies, trustForwardedHost);
     if (!passkeyAuthConfig) throw httpError(404, "API route not found.");
-    const identity = await verifiedRootIdentity(req, passkeyAuthConfig, trustForwardedHost, accessStore);
+    const identity = req.get("authorization")
+      ? (await resolveAccessContext(req, contextConfig)).identity
+      : await verifiedRootIdentity(req, passkeyAuthConfig, trustForwardedHost, accessStore);
     if (!identity) throw httpError(401, "Owner sign-in required.");
     const workspaces = await accessStore.listWorkspacesForOwner(identity.providerSubject);
     res.json({ workspaces: workspaces.filter((workspace) => supportsWorkspace(family, workspace.slug)).map((workspace) => publicAccessWorkspace(workspace, family)) });
@@ -889,8 +913,19 @@ async function resolveAccessContext(req: Request, config: AccessContextConfig): 
 
   const authorization = req.get("authorization") || "";
   if (authorization) {
-    if (hostContext.kind !== "workspace" || !tenantWorkspace) return { kind: hostContext.kind, auth: null, identity: null, workspace: tenantWorkspace, hostFamily };
     const bearer = /^Bearer\s+(\S+)$/.exec(authorization)?.[1] || "";
+    if (isNativeCredential(bearer)) {
+      requireNativeRequest(req);
+      const verified = await authorizeNativeCredential(config.accessStore, bearer, hostFamily.rootOrigin, tenantWorkspace?.id || null);
+      if (!verified || (hostContext.kind === "workspace" && !tenantWorkspace)) return { kind: hostContext.kind, auth: null, identity: null, workspace: tenantWorkspace, hostFamily };
+      return {
+        kind: hostContext.kind,
+        auth: { method: "native", actor: { channel: "native", label: cleanLabel(verified.owner.displayName, config.ownerLabel) }, workspace: tenantWorkspace, store: tenantWorkspace ? config.workspaceStoreResolver.resolve(tenantWorkspace.storageId) : config.legacyStore, expiresAt: verified.session.expiresAt },
+        identity: { providerSubject: verified.owner.id, email: verified.owner.email, displayName: verified.owner.displayName, sessionId: verified.session.id, rootOrigin: verified.session.rootOrigin },
+        workspace: tenantWorkspace, hostFamily
+      };
+    }
+    if (hostContext.kind !== "workspace" || !tenantWorkspace) return { kind: hostContext.kind, auth: null, identity: null, workspace: tenantWorkspace, hostFamily };
     try {
       const verified = await config.accessStore.authorizeAgentCredential({ credential: bearer, workspaceId: tenantWorkspace.id, requiredScope: req.method === "GET" || req.method === "HEAD" ? "read" : "write" });
       return { kind: "workspace", auth: { method: "agent", actor: { channel: "api", label: verified.connection.label, agentConnectionId: verified.connection.id }, workspace: verified.workspace, store: config.workspaceStoreResolver.resolve(verified.workspace.storageId), scopes: verified.connection.scopes }, identity: null, workspace: verified.workspace, hostFamily };
@@ -1093,6 +1128,8 @@ function isStrictSubdomainHost(host: string, rootHost: string): boolean {
 
 function authHostSurfaceAllows(req: Request): boolean {
   if (req.path.startsWith("/api/passkeys/")) return true;
+  if (req.path.startsWith("/api/native-auth/")) return true;
+  if ((req.method === "GET" || req.method === "HEAD") && req.path === "/.well-known/apple-app-site-association") return true;
   return (req.method === "GET" || req.method === "HEAD") && new Set(["/sign-in", "/sign-up", "/app.js", "/judgmentkit.css", "/styles.css", "/robots.txt", "/favicon.ico", "/api/session"]).has(req.path);
 }
 
