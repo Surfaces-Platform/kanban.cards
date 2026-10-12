@@ -37,7 +37,11 @@ Successful sign-in creates a browser session that lasts 365 days from sign-in in
 
 Access settings let an owner add another passkey, manage API keys, replace the recovery code, and end sessions. Credential changes and API-key creation require passkey verification within five minutes. Store a second passkey or the recovery code somewhere safe.
 
-Use a recovery code once to enroll a replacement passkey. Successful recovery issues a new code and revokes previous passkeys, browser sessions, pending handoffs, and agent keys. Reconnect agents afterward. Losing every passkey and the saved code means losing access; email recovery is unavailable.
+Use a recovery code once to enroll a replacement passkey. Successful recovery issues a new code and revokes previous passkeys, browser and native sessions, pending handoffs, and agent keys. Reconnect agents afterward. Losing every passkey and the saved code means losing access; email recovery is unavailable.
+
+## Native owner access
+
+An iPhone app can sign in with an existing owner's passkey and use the same private Workspaces. See the [native authentication contract](docs/native-auth.md) for app association, sign-in requests, session storage, and release verification.
 
 ## Set up the existing owner
 
