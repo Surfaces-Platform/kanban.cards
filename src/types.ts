@@ -1,6 +1,6 @@
 import type { Pool, PoolClient } from "pg";
 
-export type ActivityChannel = "web" | "api";
+export type ActivityChannel = "web" | "api" | "native";
 
 export interface ActivityActor {
   channel: ActivityChannel;

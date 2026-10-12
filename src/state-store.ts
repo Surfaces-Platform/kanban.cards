@@ -354,7 +354,7 @@ function normalizeActivity(value: unknown): Activity {
   const activity = requireRecord(value, "Activity");
   const actor = requireRecord(activity.actor, "Activity actor");
   const channel = actor.channel;
-  if (channel !== "web" && channel !== "api") throw new Error("Activity actor channel must be web or api.");
+  if (channel !== "web" && channel !== "api" && channel !== "native") throw new Error("Activity actor channel must be web, api, or native.");
   const cardId = optionalString(activity.cardId);
   const agentConnectionId = optionalString(actor.agentConnectionId);
   return {

@@ -298,6 +298,7 @@ export function createPasskeyRouter({ config, accessStore, now = () => new Date(
         code.consumedAt = timestamp;
         for (const key of state.passkeys.filter((entry) => entry.ownerId === ownerId && !entry.revokedAt)) key.revokedAt = timestamp;
         for (const session of state.authSessions.filter((entry) => entry.ownerId === ownerId && !entry.revokedAt)) session.revokedAt = timestamp;
+        for (const session of state.nativeSessions.filter((entry) => entry.ownerId === ownerId && !entry.revokedAt)) session.revokedAt = timestamp;
         for (const handoff of state.authHandoffs.filter((entry) => entry.ownerId === ownerId && !entry.consumedAt)) handoff.consumedAt = timestamp;
         for (const handoff of state.handoffs.filter((entry) => entry.ownerId === ownerId && !entry.consumedAt)) handoff.consumedAt = timestamp;
         for (const connection of state.agentConnections.filter((entry) => entry.ownerId === ownerId && !entry.revokedAt)) connection.revokedAt = timestamp;

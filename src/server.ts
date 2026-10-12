@@ -362,7 +362,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     noStore(res);
     const { owner, session } = await requireBrowserOwner(req);
     const state = await accessStore.read();
-    res.json({ passkeys: state.passkeys.filter(p => p.ownerId === owner.id && !p.revokedAt).map(p => ({ id: p.id, createdAt: p.createdAt, lastUsedAt: p.lastUsedAt })), sessions: state.authSessions.filter(s => s.ownerId === owner.id && !s.revokedAt && Date.parse(s.expiresAt) > Date.now()).map(s => ({ id: s.id, createdAt: s.createdAt, expiresAt: s.expiresAt, current: s.id === session.id })) });
+    res.json({ passkeys: state.passkeys.filter(p => p.ownerId === owner.id && !p.revokedAt).map(p => ({ id: p.id, createdAt: p.createdAt, lastUsedAt: p.lastUsedAt })), sessions: [...state.authSessions, ...state.nativeSessions].filter(s => s.ownerId === owner.id && !s.revokedAt && Date.parse(s.expiresAt) > Date.now()).map(s => ({ id: s.id, createdAt: s.createdAt, expiresAt: s.expiresAt, current: s.id === session.id })) });
   }));
   app.delete("/api/passkeys/:id", asyncHandler(async (req, res) => {
     assertRequestOrigin(req, true, trustForwardedHost);
@@ -394,7 +394,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     await accessStore.authTransaction(state => {
       assertCurrentAuthSession(state, owner.id, session.id);
       const id = routeParam(req, "id");
-      const targets = state.authSessions.filter(s => s.ownerId === owner.id && (id === "all" || s.id === id));
+      const targets = [...state.authSessions, ...state.nativeSessions].filter(s => s.ownerId === owner.id && (id === "all" || s.id === id));
       if (!targets.length) throw httpError(404, "Session unavailable.");
       for (const target of targets) target.revokedAt = new Date().toISOString();
       const ids = new Set(targets.map(s => s.id));
