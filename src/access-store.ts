@@ -104,6 +104,17 @@ export interface AuthSession {
   verifiedAt: string;
 }
 
+/** Native owner sessions never become browser cookies or agent credentials. */
+export interface NativeOwnerSession {
+  id: string;
+  ownerId: string;
+  credentialHash: string;
+  rootOrigin: string;
+  createdAt: string;
+  expiresAt: string;
+  revokedAt: string | null;
+}
+
 export interface RecoveryCode {
   ownerId: string;
   codeHash: string;
@@ -138,6 +149,7 @@ export interface AccessRegistryState {
   passkeys: AccessPasskey[];
   authChallenges: AuthChallenge[];
   authSessions: AuthSession[];
+  nativeSessions: NativeOwnerSession[];
   recoveryCodes: RecoveryCode[];
   authHandoffs: AuthHandoff[];
   authRateLimits: AuthRateLimit[];
@@ -420,6 +432,7 @@ export function freshAccessRegistryState(): AccessRegistryState {
     passkeys: [],
     authChallenges: [],
     authSessions: [],
+    nativeSessions: [],
     recoveryCodes: [],
     authHandoffs: [],
     authRateLimits: [],
@@ -444,6 +457,7 @@ export function normalizeAccessRegistry(rawState: unknown): AccessRegistryState 
   const passkeys = optionalArray(state.passkeys, "Access registry passkeys").map(normalizePasskey);
   const authChallenges = optionalArray(state.authChallenges, "Access registry authChallenges").map(normalizeAuthChallenge);
   const authSessions = optionalArray(state.authSessions, "Access registry authSessions").map(normalizeAuthSession);
+  const nativeSessions = optionalArray(state.nativeSessions, "Access registry nativeSessions").map(normalizeNativeSession);
   const recoveryCodes = optionalArray(state.recoveryCodes, "Access registry recoveryCodes").map(normalizeRecoveryCode);
   const authHandoffs = optionalArray(state.authHandoffs, "Access registry authHandoffs").map(normalizeAuthHandoff);
   const authRateLimits = optionalArray(state.authRateLimits, "Access registry authRateLimits").map(normalizeAuthRateLimit);
@@ -464,6 +478,9 @@ export function normalizeAccessRegistry(rawState: unknown): AccessRegistryState 
   assertUnique(passkeys.map((passkey) => passkey.id), "passkey credential id");
   assertUnique(authChallenges.map((challenge) => challenge.id), "auth challenge id");
   assertUnique(authSessions.map((session) => session.id), "auth session id");
+  assertUnique(nativeSessions.map((session) => session.id), "native session id");
+  assertUnique(nativeSessions.map((session) => session.credentialHash), "native credential hash");
+  assertUnique([...authSessions, ...nativeSessions].map((session) => session.id), "owner session id");
   assertUnique(recoveryCodes.map((code) => code.codeHash), "recovery code hash");
   assertUnique(authHandoffs.map((handoff) => handoff.id), "auth handoff id");
   assertUnique(authHandoffs.map((handoff) => handoff.tokenHash), "auth handoff token hash");
@@ -531,6 +548,11 @@ export function normalizeAccessRegistry(rawState: unknown): AccessRegistryState 
     if (!ownerIds.has(code.ownerId)) throw new Error("Recovery code refers to a missing owner.");
     assertNotBefore(code.consumedAt, code.createdAt, "Recovery code consumedAt");
   }
+  for (const session of nativeSessions) {
+    if (!ownerIds.has(session.ownerId)) throw new Error(`Native session ${session.id} refers to a missing owner.`);
+    if (Date.parse(session.expiresAt) <= Date.parse(session.createdAt)) throw new Error(`Native session ${session.id} must expire after it is created.`);
+    assertNotBefore(session.revokedAt, session.createdAt, "Native session revokedAt");
+  }
   for (const handoff of authHandoffs) {
     const session = sessionsById.get(handoff.sessionId);
     if (!ownerIds.has(handoff.ownerId)) throw new Error(`Auth handoff ${handoff.id} refers to a missing owner.`);
@@ -540,7 +562,7 @@ export function normalizeAccessRegistry(rawState: unknown): AccessRegistryState 
   }
   return {
     schemaVersion: ACCESS_REGISTRY_SCHEMA_VERSION, owners, workspaces, handoffs, revokedSessions, agentConnections,
-    passkeys, authChallenges, authSessions, recoveryCodes, authHandoffs, authRateLimits, setupConsumed
+    passkeys, authChallenges, authSessions, nativeSessions, recoveryCodes, authHandoffs, authRateLimits, setupConsumed
   };
 }
 
@@ -1013,6 +1035,19 @@ function normalizeAuthSession(value: unknown): AuthSession {
     expiresAt: timestamp(session.expiresAt, "Auth session expiresAt"),
     revokedAt: session.revokedAt == null ? null : timestamp(session.revokedAt, "Auth session revokedAt"),
     verifiedAt: timestamp(session.verifiedAt, "Auth session verifiedAt")
+  };
+}
+
+function normalizeNativeSession(value: unknown): NativeOwnerSession {
+  const session = requireRecord(value, "Native session");
+  return {
+    id: normalizeSessionId(session.id),
+    ownerId: requiredIdentifier(session.ownerId, "Native session owner id"),
+    credentialHash: storedHash(session.credentialHash, "Native session credential hash"),
+    rootOrigin: normalizeAuthOrigin(session.rootOrigin, "Native session rootOrigin"),
+    createdAt: timestamp(session.createdAt, "Native session createdAt"),
+    expiresAt: timestamp(session.expiresAt, "Native session expiresAt"),
+    revokedAt: session.revokedAt == null ? null : timestamp(session.revokedAt, "Native session revokedAt")
   };
 }
 
