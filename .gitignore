@@ -20,3 +20,7 @@ npm-debug.log*
 .env*.local
 
 .local/
+
+# Xcode per-user state
+xcuserdata/
+*.xcuserstate

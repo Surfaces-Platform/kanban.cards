@@ -41,7 +41,9 @@ Use a recovery code once to enroll a replacement passkey. Successful recovery is
 
 ## Native owner access
 
-An iPhone app can sign in with an existing owner's passkey and use the same private Workspaces. See the [native authentication contract](docs/native-auth.md) for app association, sign-in requests, session storage, and release verification.
+The early [native iPhone app](ios/README.md) uses standard Apple components for Projects, Cards, Comments, Activity, filtering, and editing. Existing owners sign in with a passkey. The [setup instructions](ios/README.md) cover simulator use and private device installation; the [verification record](docs/iphone-native-app-verification.md) lists completed checks and remaining acceptance work.
+
+See the [native authentication contract](docs/native-auth.md) for app association, sign-in requests, session storage, and release verification.
 
 ## Set up the existing owner
 
