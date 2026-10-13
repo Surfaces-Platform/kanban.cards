@@ -32,3 +32,33 @@ jobs:
 
       - name: Run tests
         run: npm test
+
+  native-ios:
+    runs-on: xcode-27
+    timeout-minutes: 20
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.app/Contents/Developer
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Run native unit and UI tests
+        run: |
+          xcodebuild -project ios/KanbanCards.xcodeproj \
+            -scheme KanbanCards -configuration Debug \
+            -destination 'platform=iOS Simulator,name=iPhone 17,OS=27.0' \
+            -derivedDataPath .local/ios/DerivedData \
+            -resultBundlePath .local/ios/NativeTests.xcresult \
+            -parallel-testing-enabled NO -collect-test-diagnostics never \
+            CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM='' test
+
+      - name: Upload failed native test results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-ios-results
+          path: .local/ios/NativeTests.xcresult
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7
