@@ -22,9 +22,17 @@ struct RootView: View {
                 if let workspace = model.workspaces.first, model.workspaces.count == 1 {
                     ProjectsView(workspace: workspace)
                 } else {
-                    List(model.workspaces) { workspace in
-                        NavigationLink(workspace.name) { ProjectsView(workspace: workspace) }
+                    List {
+                        if model.loadingWorkspaces { ProgressView("Loading Workspaces") }
+                        ForEach(model.workspaces) { workspace in
+                            NavigationLink(workspace.name) { ProjectsView(workspace: workspace) }
+                        }
+                        if !model.loadingWorkspaces && model.workspaces.isEmpty {
+                            ContentUnavailableView(model.workspaceLoadFailed ? "Workspaces unavailable" : "No Workspaces", systemImage: "folder")
+                            Button("Retry loading Workspaces") { Task { await model.refreshWorkspaces() } }
+                        }
                     }
+                    .refreshable { await model.refreshWorkspaces() }
                     .navigationTitle("Workspaces")
                     .toolbar { ToolbarItem { NavigationLink { AccountView() } label: { Label("Account", systemImage: "person.crop.circle") } } }
                 }

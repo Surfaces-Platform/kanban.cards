@@ -42,7 +42,7 @@ xcodebuild -project ios/KanbanCards.xcodeproj \
 npm run check:native-ui
 ```
 
-Use a fresh result bundle path for each run. `KanbanCardsTests` checks API contracts, retained drafts, version checks, session handling, confirmed mutations followed by interrupted refreshes, delayed reads, and obsolete session responses. `KanbanCardsUITests` exercises creation, editing, movement, Comments, combined filters, Activity, archive/restore, and draft retention across relaunch. It saves screenshots and accessibility trees in the result bundle.
+Use a fresh result bundle path for each run. `KanbanCardsTests` checks API contracts, retained drafts, version checks, session handling, confirmed mutations followed by interrupted refreshes, delayed reads, obsolete session responses, and retrying Workspace loading with an existing session. `KanbanCardsUITests` exercises creation, editing, movement, Comments, combined filters, Activity, archive/restore, and draft retention across relaunch. It saves screenshots and accessibility trees in the result bundle.
 
 To browse the interface without server credentials, add `--demo` to the Debug scheme's Run arguments. The app opens an isolated Demo Workspace; board changes remain in memory. Its owner-bound drafts persist locally. `--reset-demo-drafts` clears only those sample drafts. Release builds ignore demo arguments.
 

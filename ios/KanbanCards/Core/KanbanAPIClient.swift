@@ -26,6 +26,7 @@ final class KanbanAPIClient {
     private let session: URLSession
     private let credentialStore: any SessionCredentialStore
     private var workspaceOrigins = Set<URL>()
+    private var workspaceRequestID: UUID?
     private(set) var credential: NativeSessionCredential?
     private(set) var sessionGeneration = UUID()
 
@@ -145,8 +146,10 @@ final class KanbanAPIClient {
     func workspaces() async throws -> [Workspace] {
         struct Result: Decodable { var workspaces: [Workspace] }
         let generation = sessionGeneration
+        let requestID = UUID()
+        workspaceRequestID = requestID
         let result: Result = try await request(origin: rootURL, path: ["workspaces"])
-        guard generation == sessionGeneration else { throw CancellationError() }
+        guard generation == sessionGeneration, workspaceRequestID == requestID else { throw CancellationError() }
         for workspace in result.workspaces { try validateWorkspaceOrigin(workspace.url) }
         workspaceOrigins = Set(result.workspaces.map(\.url))
         return result.workspaces

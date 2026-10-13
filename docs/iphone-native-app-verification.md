@@ -4,7 +4,7 @@ The native app uses standard Apple components with system appearance. This early
 
 | Check | Recorded result |
 | --- | --- |
-| Simulator build and unit tests | Passed: 32 unit tests with Xcode 27 and an iOS 26.5 iPhone Simulator, including delayed refresh and obsolete-session regressions |
+| Simulator build and unit tests | Passed: 38 unit tests with Xcode 27 and an iOS 26.5 iPhone Simulator, including delayed refresh, obsolete-session, and Workspace recovery regressions |
 | Simulator owner workflow | Passed: 3 XCUITests covering creation, editing, movement, Comments, filters, Activity, archive/restore, and retained drafts after relaunch |
 | Backend regression checks | Check passed; 87 Node tests passed for this candidate; 47 browser tests passed during the native backend release |
 | Native GUI source contract | Passed for all 9 application Swift files; no web rendering, custom drawing, custom control styles, or custom materials |

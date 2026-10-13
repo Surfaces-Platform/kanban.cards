@@ -13,6 +13,9 @@ final class AppModel {
     private var projectMutationGenerations: [String: UUID] = [:]
     private var workspaceMutationGenerations: [String: UUID] = [:]
     private var workspaceRefreshes: [String: UUID] = [:]
+    private var workspaceLoadID: UUID?
+    private(set) var loadingWorkspaces = false
+    private(set) var workspaceLoadFailed = false
     private(set) var signedIn = false
     private(set) var restoring = true
     private(set) var signingIn = false
@@ -70,27 +73,58 @@ final class AppModel {
         }
         do {
             if let session = try await api.restoreSession(), session.authenticated {
-                workspaces = try await api.workspaces()
+                guard !signOutPending else { return }
                 signedIn = true
+                await refreshWorkspaces()
             }
         } catch { handle(error) }
     }
 
     func signIn() async {
-        guard !signingIn else { return }
+        guard !signingIn, !signedIn, !signOutPending, !endingSession else { return }
         signingIn = true
         defer { signingIn = false }
         do {
             let challenge = try await api.beginSignIn()
             let assertion = try await passkeys.assertion(for: challenge)
-            _ = try await api.completeSignIn(challenge: challenge, assertion: assertion)
-            workspaces = try await api.workspaces()
-            signedIn = true
+            try await completeSignIn(challenge: challenge, assertion: assertion)
         } catch is CancellationError {
             return
         } catch let error as ASAuthorizationError where error.code == .canceled {
             return
         } catch { handle(error) }
+    }
+
+    func completeSignIn(challenge: NativeSignInChallenge, assertion: NativePasskeyAssertion) async throws {
+        _ = try await api.completeSignIn(challenge: challenge, assertion: assertion)
+        guard !signOutPending, !endingSession else { throw CancellationError() }
+        signedIn = true
+        await refreshWorkspaces()
+    }
+
+    func refreshWorkspaces() async {
+        guard !isDemo, signedIn, !signOutPending else { return }
+        let session = api.sessionGeneration
+        let requestID = UUID()
+        workspaceLoadID = requestID
+        loadingWorkspaces = true
+        workspaceLoadFailed = false
+        defer { if workspaceLoadID == requestID { loadingWorkspaces = false } }
+        do {
+            let incoming = try await api.workspaces()
+            guard session == api.sessionGeneration, workspaceLoadID == requestID,
+                  signedIn, !signOutPending else { return }
+            workspaces = incoming
+        } catch {
+            guard !(error is CancellationError) else { return }
+            if let generation = (error as? APIError)?.sessionGeneration, generation != api.sessionGeneration { return }
+            // A same-session 401 ends authentication even if another Workspace read
+            // superseded this one. Replacement-session failures remain excluded above.
+            if (error as? APIError)?.isUnauthorized == true { handle(error); return }
+            guard workspaceLoadID == requestID else { return }
+            workspaceLoadFailed = true
+            handle(error)
+        }
     }
 
     func signOut() async {
@@ -99,6 +133,9 @@ final class AppModel {
         signOutPending = true
         if !isDemo { defaults.set(true, forKey: Self.signOutIntentKey) }
         signedIn = false
+        workspaceLoadID = nil
+        loadingWorkspaces = false
+        workspaceLoadFailed = false
         workspaces = []
         projectLists = [:]
         loadedProjects = [:]

@@ -130,6 +130,65 @@ final class NativeAsyncRaceTests: XCTestCase {
         XCTAssertNil(model.errorMessage)
     }
 
+    func testLateWorkspaceRefreshCannotRestoreWorkspacesAfterSignOut() async {
+        RaceURLProtocol.state.enqueue(json: Self.workspacesJSON, held: "old-workspaces")
+        let slow = Task { await model.refreshWorkspaces() }
+        await RaceURLProtocol.state.waitForStart("old-workspaces")
+        RaceURLProtocol.state.enqueue(json: #"{"signedOutHere":true,"globalSignOutComplete":true}"#)
+        await model.signOut()
+        RaceURLProtocol.state.release("old-workspaces")
+        await slow.value
+        XCTAssertFalse(model.signedIn)
+        XCTAssertTrue(model.workspaces.isEmpty)
+        XCTAssertFalse(model.loadingWorkspaces)
+        XCTAssertNil(model.errorMessage)
+    }
+
+    func testOlderWorkspaceReadCannotReplaceNewerTenantAllowlist() async throws {
+        RaceURLProtocol.state.enqueue(json: Self.workspacesJSON, held: "older-workspaces")
+        let older = Task { await model.refreshWorkspaces() }
+        await RaceURLProtocol.state.waitForStart("older-workspaces")
+        RaceURLProtocol.state.enqueue(json: #"{"workspaces":[{"id":"workspace-a","slug":"test","name":"Test","url":"https://test.kanban.cards"},{"id":"workspace-b","slug":"second","name":"Second","url":"https://second.kanban.cards"}]}"#)
+        await model.refreshWorkspaces()
+        XCTAssertEqual(model.workspaces.map(\.id), ["workspace-a", "workspace-b"])
+        RaceURLProtocol.state.release("older-workspaces")
+        await older.value
+        let second = try XCTUnwrap(model.workspaces.first(where: { $0.id == "workspace-b" }))
+        let board = project(revision: 2, cardVersion: 1, title: "Second Workspace Card")
+        try RaceURLProtocol.state.enqueue(ProjectReply(project: board))
+        let result = try await client.project(id: board.id, in: second)
+        XCTAssertEqual(result.cards.first?.title, "Second Workspace Card")
+        XCTAssertEqual(model.workspaces.map(\.id), ["workspace-a", "workspace-b"])
+        XCTAssertTrue(model.signedIn)
+        XCTAssertNil(model.errorMessage)
+    }
+
+    func testSupersededWorkspaceReadUnauthorizedStillEndsCurrentSession() async throws {
+        let board = project(revision: 2, cardVersion: 1, title: "Private Card")
+        try RaceURLProtocol.state.enqueue(ProjectReply(project: board))
+        try await model.loadProject(id: board.id, in: workspace)
+        XCTAssertFalse(model.loadedProjects.isEmpty)
+        RaceURLProtocol.state.enqueue(status: 401, json: #"{"error":"Session revoked."}"#, held: "older-workspace-401")
+        let older = Task { await model.refreshWorkspaces() }
+        await RaceURLProtocol.state.waitForStart("older-workspace-401")
+        RaceURLProtocol.state.enqueue(json: Self.workspacesJSON, held: "newer-workspace-read")
+        let newer = Task { await model.refreshWorkspaces() }
+        await RaceURLProtocol.state.waitForStart("newer-workspace-read")
+        RaceURLProtocol.state.release("older-workspace-401")
+        await older.value
+        XCTAssertFalse(model.signedIn)
+        XCTAssertNil(client.credential)
+        XCTAssertNil(store.value)
+        XCTAssertTrue(model.loadedProjects.isEmpty)
+        XCTAssertTrue(model.workspaces.isEmpty)
+        RaceURLProtocol.state.release("newer-workspace-read")
+        await newer.value
+        XCTAssertFalse(model.signedIn)
+        XCTAssertFalse(model.loadingWorkspaces)
+        XCTAssertTrue(model.workspaces.isEmpty)
+        XCTAssertEqual(store.removals, 1)
+    }
+
     private func replaceCredential() async throws {
         let expiry = ServerTimestamp.string(from: .now.addingTimeInterval(3600))
         RaceURLProtocol.state.enqueue(json: """
