@@ -1,0 +1,21 @@
+{
+  "authority": "Mike selected Inter 780 and consistent nickel lockups on October 14, 2026.",
+  "fontFamily": "Inter",
+  "weightAxis": 780,
+  "opticalSizeAxis": 32,
+  "fontFileSha256": "0be2399ea925f1f83ff974764761da9860ec50742ed29a5d4c1ffd0c5c7ac3a8",
+  "wordmarkGlyphPathDigest": "c0359a33a8143d65bcfedb8185590abdc8485ed81821f471e544bf2509c19dd7",
+  "sourceFontSize": 64,
+  "sourceCapHeight": 46.5625,
+  "visibleMarkHeight": 60,
+  "capHeight": 38,
+  "inkToInkGap": 20,
+  "minimumOuterPadding": 24,
+  "baseline": 73,
+  "canvasHeight": 109,
+  "approvedHorizontalSha256": {
+    "horizontal.svg": "23ce8626001002bb5830cd30c97e61321e4e122346efe405a0d4abccda6145c8",
+    "horizontal-reversed.svg": "7b1a33ee8d58be2a3abb7cc29eeab09886b778557ea2ab06aa0bedd97af25daf"
+  },
+  "stackedDerivative": "Keep the same 60px mark height and 38px cap height. Center the mark and wordmark on one vertical axis, with 20px between their visible bounds and at least 24px outer padding."
+}

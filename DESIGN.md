@@ -92,6 +92,8 @@ The intended qualities are:
 
 These qualities are outcomes, not inherited tokens. The new system must choose its own palette, type scale, spacing, geometry, elevation, icons, and component treatments through current design work. Historical values should not be copied and renamed.
 
+Brand artwork uses the canonical outlined Inter 780 lockups in `brand/split-k/lockups/`. They use optical size 32, a 60px visible Split K, a 38px cap height, a 20px measured ink gap, and at least 24px outer padding. Scale the complete lockup uniformly. The lower arm stays Nickel `#8B9096` in both themes; the remaining shapes and wordmark use Ink `#0B0D0E` on light backgrounds and Warm ivory `#F7F6F2` on dark backgrounds. `brand/split-k/README.md` defines the horizontal and stacked compositions. This brand-artwork choice leaves the app’s system typography unchanged.
+
 ## Required surfaces
 
 ### Sign in
