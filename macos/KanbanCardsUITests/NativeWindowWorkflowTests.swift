@@ -1,0 +1,1614 @@
+import Foundation
+import XCTest
+
+@MainActor
+final class NativeWindowWorkflowTests: XCTestCase {
+    private let homepage = "demo-card-homepage"
+    private let signup = "demo-card-signup"
+
+    override func setUpWithError() throws {
+        continueAfterFailure = false
+    }
+
+    func testBoardOpensTwoUniqueViewersAndEachClosesIndependently() throws {
+        let app = launch()
+        let board = board(in: app)
+        let first = viewer(homepage, in: app)
+        let second = viewer(signup, in: app)
+        XCTAssertTrue(board.waitForExistence(timeout: 10))
+        XCTAssertTrue(first.waitForExistence(timeout: 10))
+        XCTAssertTrue(second.waitForExistence(timeout: 10))
+        attach(app, named: "Board and two independent Card windows")
+        let separated = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in !first.frame.intersects(second.frame) }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [separated], timeout: 5), .completed, "The first two Card windows must start side by side: \(first.frame), \(second.frame)")
+        let desktop = XCTAttachment(screenshot: board.screenshot())
+        desktop.name = "direction-a-native-board-and-two-cards"
+        desktop.lifetime = .keepAlways
+        add(desktop)
+
+        showBoard(app)
+        board.buttons["board.card.\(homepage)"].click()
+        XCTAssertEqual(app.windows.containing(.button, identifier: "card.edit.\(homepage)").count, 1)
+        XCTAssertTrue(second.exists)
+        focus(homepage, in: app)
+        first.buttons[XCUIIdentifierCloseWindow].click()
+        XCTAssertTrue(first.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(second.exists)
+        XCTAssertTrue(board.exists)
+        focus(signup, in: app)
+        second.buttons[XCUIIdentifierCloseWindow].click()
+        XCTAssertTrue(second.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(board.exists)
+    }
+
+    func testMovingAndResizingOneCardLeavesTheOtherUnchanged() throws {
+        let app = launch()
+        let first = viewer(homepage, in: app)
+        let second = viewer(signup, in: app)
+        XCTAssertTrue(first.waitForExistence(timeout: 10))
+        XCTAssertTrue(second.waitForExistence(timeout: 10))
+        focus(homepage, in: app)
+        let originalFirst = first.frame
+        let originalSecond = second.frame
+        let titlebar = first.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: 95, dy: 26))
+        // Move away from the adjacent viewer so the resize gesture has free space
+        // instead of ending at the native neighboring-window snap boundary.
+        titlebar.click(forDuration: 0.4, thenDragTo: titlebar.withOffset(CGVector(dx: -35, dy: -25)))
+
+        let moved = first.frame
+        XCTAssertGreaterThan(hypot(moved.minX - originalFirst.minX, moved.minY - originalFirst.minY), 20)
+        assertFrame(second.frame, equals: originalSecond)
+        XCTAssertEqual(moved.width, originalFirst.width, accuracy: 2)
+        XCTAssertEqual(moved.height, originalFirst.height, accuracy: 2)
+
+        let rightEdge = first.coordinate(withNormalizedOffset: CGVector(dx: 1, dy: 0.6))
+            .withOffset(CGVector(dx: -1, dy: 0))
+        rightEdge.click(forDuration: 0.4, thenDragTo: rightEdge.withOffset(CGVector(dx: 45, dy: 0)))
+        let wider = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            first.frame.width > moved.width + 20
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [wider], timeout: 5), .completed)
+        XCTAssertGreaterThan(first.frame.width, moved.width + 20)
+        assertFrame(second.frame, equals: originalSecond)
+        let bottomEdge = first.coordinate(withNormalizedOffset: CGVector(dx: 0.6, dy: 1))
+            .withOffset(CGVector(dx: 0, dy: -1))
+        bottomEdge.click(forDuration: 0.4, thenDragTo: bottomEdge.withOffset(CGVector(dx: 0, dy: 30)))
+        let taller = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            first.frame.height > moved.height + 10
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [taller], timeout: 5), .completed)
+
+        let resized = first.frame
+        XCTAssertGreaterThan(resized.width, moved.width + 20)
+        XCTAssertGreaterThan(resized.height, moved.height + 10)
+        assertFrame(second.frame, equals: originalSecond)
+        attach(app, named: "One Card moved and resized independently")
+    }
+
+    func testEditSaveSharesBoardStateAndCancelRetainsDraft() throws {
+        let app = launch()
+        let first = viewer(homepage, in: app)
+        XCTAssertTrue(first.waitForExistence(timeout: 10))
+        focus(homepage, in: app)
+        first.buttons["card.edit.\(homepage)"].click()
+        let title = first.textFields["editor.title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        let nextAction = first.textFields.matching(NSPredicate(
+            format: "value == %@", "Choose the preferred heading order")).firstMatch
+        let body = first.textViews["editor.body"]
+        XCTAssertTrue(nextAction.waitForExistence(timeout: 5))
+        XCTAssertTrue(body.waitForExistence(timeout: 5))
+        let oldValues = try [XCTUnwrap(title.value as? String),
+                             XCTUnwrap(nextAction.value as? String),
+                             XCTUnwrap(body.value as? String)]
+        replace(title, with: "Confirmed homepage title")
+        replace(nextAction, with: "Verify saved labels.")
+        replace(body, with: "Saved Card description.")
+        first.buttons["editor.save"].click()
+        XCTAssertTrue(title.waitForNonExistence(timeout: 5))
+        assertLabel(board(in: app).buttons["board.card.\(homepage)"], contains: "Confirmed homepage title")
+        for value in ["Confirmed homepage title", "Verify saved labels.", "Saved Card description."] {
+            let savedText = first.descendants(matching: .any).matching(NSPredicate(
+                format: "label == %@ OR value == %@", value, value)).firstMatch
+            XCTAssertTrue(savedText.waitForExistence(timeout: 5), "The complete saved value must be accessible: \(value)")
+        }
+        let staleLabels = first.descendants(matching: .any).matching(NSPredicate(
+            format: "label IN %@ OR value IN %@", oldValues, oldValues))
+        let labelsUpdated = XCTNSPredicateExpectation(predicate: NSPredicate(format: "count == 0"), object: staleLabels)
+        let updateResult = XCTWaiter.wait(for: [labelsUpdated], timeout: 3)
+        attach(app, named: "Native Card accessibility labels after Save")
+        XCTAssertEqual(updateResult, .completed, "No Card accessibility element may retain an old title, action, or body label after Save.")
+
+        first.buttons["card.edit.\(homepage)"].click()
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        replace(title, with: "Keep this unsaved title")
+        first.buttons["editor.cancel"].click()
+        first.buttons["card.edit.\(homepage)"].click()
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        XCTAssertEqual(title.value as? String, "Keep this unsaved title")
+        assertLabel(first.staticTexts["editor.draft-status"], contains: "Recovered draft")
+        first.buttons["editor.cancel"].click()
+        assertLabel(board(in: app).buttons["board.card.\(homepage)"], contains: "Confirmed homepage title")
+        attach(app, named: "Confirmed changes shared while unsaved draft remains separate")
+    }
+
+    func testFocusedCardReceivesKeyboardEditAndSignOutClearsAllWindows() throws {
+        let app = launch()
+        let first = viewer(homepage, in: app)
+        let second = viewer(signup, in: app)
+        XCTAssertTrue(first.waitForExistence(timeout: 10))
+        XCTAssertTrue(second.waitForExistence(timeout: 10))
+        for (cardID, window) in [(homepage, first), (signup, second)] {
+            focus(cardID, in: app)
+            app.typeKey("e", modifierFlags: [.command, .option])
+            XCTAssertTrue(window.textFields["editor.title"].waitForExistence(timeout: 5))
+            window.buttons["editor.cancel"].click()
+        }
+        showBoard(app)
+        board(in: app).buttons["session.sign-out"].click()
+        XCTAssertTrue(app.buttons["session.sign-in"].waitForExistence(timeout: 5))
+        XCTAssertTrue(first.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(second.waitForNonExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["Review homepage hierarchy"].exists)
+        XCTAssertFalse(app.staticTexts["Simplify the signup introduction"].exists)
+        attach(app, named: "Sign-out removes private data from every window")
+    }
+
+    func testClosingBoardPreservesViewersAndShowBoardReopensOnlyOneBoard() throws {
+        let app = launch()
+        let first = viewer(homepage, in: app)
+        let second = viewer(signup, in: app)
+        XCTAssertTrue(first.waitForExistence(timeout: 10))
+        XCTAssertTrue(second.waitForExistence(timeout: 10))
+        showBoard(app)
+        let originalBoard = board(in: app)
+        originalBoard.buttons[XCUIIdentifierCloseWindow].click()
+        XCTAssertTrue(originalBoard.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(first.exists)
+        XCTAssertTrue(second.exists)
+
+        focus(homepage, in: app)
+        showBoard(app)
+        XCTAssertTrue(board(in: app).waitForExistence(timeout: 5))
+        showBoard(app)
+        XCTAssertEqual(app.windows.containing(.button, identifier: "session.sign-out").count, 1)
+        XCTAssertTrue(first.exists)
+        XCTAssertTrue(second.exists)
+        attach(app, named: "Board reopened while both Card viewers remain open")
+    }
+
+    func testMenuCommandsUseFocusedWindowAndPreserveStandardFindShortcut() throws {
+        let app = launch()
+        showBoard(app)
+        assertMenu(app, named: "File", enabled: ["New Card…", "New Project…", "Show Board"])
+        assertMenu(app, named: "Project", enabled: ["Edit Project…", "Activity…", "Archive Project…"])
+        assertMenu(app, named: "View", enabled: ["Refresh"])
+
+        app.typeKey("n", modifierFlags: [.command, .shift])
+        let projectName = board(in: app).textFields["project-name"]
+        XCTAssertTrue(projectName.waitForExistence(timeout: 5))
+        board(in: app).buttons["editor.cancel"].click()
+        app.typeKey("n", modifierFlags: .command)
+        let cardTitle = board(in: app).textFields["editor.title"]
+        XCTAssertTrue(cardTitle.waitForExistence(timeout: 5))
+        board(in: app).buttons["editor.cancel"].click()
+
+        focus(homepage, in: app)
+        let first = viewer(homepage, in: app)
+        assertMenu(app, named: "Card", enabled: ["Edit Card…", "Add Comment…", "Move Card…", "Activity…", "Archive Card…"])
+        assertMenu(app, named: "View", enabled: ["Refresh"])
+        app.typeKey("e", modifierFlags: .command)
+        XCTAssertFalse(first.textFields["editor.title"].exists,
+                       "Command-E must remain available to the system Find selection command.")
+        app.typeKey("e", modifierFlags: [.command, .option])
+        XCTAssertTrue(first.textFields["editor.title"].waitForExistence(timeout: 5))
+        first.buttons["editor.cancel"].click()
+        attach(app, named: "Focused menu coverage and standard keyboard behavior")
+    }
+
+    func testCommentCommandCannotQueueBehindCardEditor() throws {
+        let app = launch()
+        focus(homepage, in: app)
+        let first = viewer(homepage, in: app)
+        app.typeKey("e", modifierFlags: [.command, .option])
+        XCTAssertTrue(first.textFields["editor.title"].waitForExistence(timeout: 5))
+        assertMenu(app, named: "Card", disabled: ["Edit Card…", "Add Comment…", "Move Card…", "Activity…", "Archive Card…"])
+        app.typeKey("m", modifierFlags: [.command, .shift])
+        first.buttons["editor.cancel"].click()
+        XCTAssertTrue(first.textFields["editor.title"].waitForNonExistence(timeout: 5))
+        XCTAssertFalse(first.textViews["comment.body"].waitForExistence(timeout: 1),
+                       "Cancel must return to the viewer without opening a queued Comment sheet.")
+        app.typeKey("m", modifierFlags: [.command, .shift])
+        XCTAssertTrue(first.textViews["comment.body"].waitForExistence(timeout: 5))
+        first.buttons["editor.cancel"].click()
+        attach(app, named: "Sheet commands disabled until the active task ends")
+    }
+
+    func testContextualCommentActionKeepsToolbarCompactAndOpensEditor() throws {
+        let app = launch()
+        defer { attach(app, named: "Contextual Comment editing and compact Card toolbar") }
+        focus(homepage, in: app)
+        let first = viewer(homepage, in: app)
+        let commentAction = first.buttons["card.add-comment.\(homepage)"]
+        XCTAssertTrue(commentAction.waitForExistence(timeout: 5))
+        XCTAssertEqual(first.buttons.matching(identifier: "card.add-comment.\(homepage)").count, 1,
+                       "Comments should have one contextual Add Comment action.")
+        XCTAssertFalse(first.toolbars.buttons.matching(identifier: "card.add-comment.\(homepage)").firstMatch.exists,
+                       "The Card toolbar should not duplicate the contextual Comment action.")
+        assertLabel(commentAction, contains: "Add Comment")
+        commentAction.click()
+        XCTAssertTrue(first.textViews["comment.body"].waitForExistence(timeout: 5))
+        first.buttons["editor.cancel"].click()
+        XCTAssertTrue(first.textViews["comment.body"].waitForNonExistence(timeout: 5))
+        let actions = first.descendants(matching: .any).matching(identifier: "card.actions.\(homepage)").firstMatch
+        XCTAssertTrue(actions.exists)
+        assertLabel(actions, contains: "More Card actions")
+        actions.click()
+        let activity = app.menuItems["card.actions.\(homepage).action.0"]
+        XCTAssertTrue(activity.waitForExistence(timeout: 5))
+        XCTAssertEqual(activity.title, "Activity…", "Native menu items expose their action name as a title.")
+        XCTAssertTrue(activity.isEnabled)
+        activity.click()
+        let done = first.buttons["Done"].firstMatch
+        XCTAssertTrue(done.waitForExistence(timeout: 5), "The native pull-down action must open Activity.")
+        done.click()
+        XCTAssertTrue(done.waitForNonExistence(timeout: 5))
+        assertMenu(app, named: "Card", enabled: ["Add Comment…", "Activity…", "Archive Card…"])
+    }
+
+    func testRequiredTitleAndRetainedDraftAreExplained() throws {
+        let app = launch()
+        defer { attach(app, named: "Required title validation and recovered local draft") }
+        showBoard(app)
+        app.typeKey("n", modifierFlags: .command)
+        let board = board(in: app)
+        let title = board.textFields["editor.title"]
+        let requiredLabel = board.staticTexts.matching(NSPredicate(format: "label == %@ OR value == %@",
+            "Title (required)", "Title (required)")).firstMatch
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        XCTAssertFalse(board.buttons["editor.save"].isEnabled)
+        XCTAssertTrue(requiredLabel.isHittable, "The required-field label must remain visible beside the native field.")
+        XCTAssertTrue(board.staticTexts["editor.draft-status"].exists)
+        replace(title, with: "   ")
+        XCTAssertFalse(board.buttons["editor.save"].isEnabled)
+        XCTAssertTrue(requiredLabel.isHittable, "A filled field must retain its required-field label.")
+        replace(title, with: "Retained creation draft")
+        XCTAssertTrue(board.buttons["editor.save"].isEnabled)
+        board.buttons["editor.cancel"].click()
+        app.typeKey("n", modifierFlags: .command)
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        XCTAssertEqual(title.value as? String, "Retained creation draft")
+        assertLabel(board.staticTexts["editor.draft-status"], contains: "Recovered draft")
+        board.buttons["editor.cancel"].click()
+    }
+
+    func testCreatedCardOpensViewerEvenWhenBoardFiltersExcludeIt() throws {
+        let app = launch()
+        showBoard(app)
+        let board = board(in: app)
+        choose("You", from: board.popUpButtons["board.filter.actor"], in: app)
+        choose("High", from: board.popUpButtons["board.filter.priority"], in: app)
+        app.typeKey("n", modifierFlags: .command)
+        let title = board.textFields["editor.title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        let createdTitle = "Created while filters exclude Unassigned Cards"
+        replace(title, with: createdTitle)
+        board.buttons["editor.save"].click()
+        XCTAssertTrue(title.waitForNonExistence(timeout: 5))
+        let created = app.windows.containing(.staticText, identifier: createdTitle).firstMatch
+        XCTAssertTrue(created.waitForExistence(timeout: 5), "Creation must reveal the confirmed Card.")
+        XCTAssertTrue(created.staticTexts[createdTitle].exists)
+        showBoard(app)
+        XCTAssertEqual(board.popUpButtons["board.filter.actor"].value as? String, "You")
+        XCTAssertEqual(board.popUpButtons["board.filter.priority"].value as? String, "High")
+        XCTAssertFalse(board.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@",
+                                                          "board.card.", createdTitle)).firstMatch.exists)
+        attach(app, named: "Created Card remains reachable while filters stay applied")
+    }
+
+    func testNativeBoardPopupsUpdateBindingsAndClearRestoresInventory() throws {
+        let app = launch()
+        showBoard(app)
+        let board = board(in: app)
+        let workspace = board.popUpButtons["board.workspace"]
+        let actor = board.popUpButtons["board.filter.actor"]
+        let priority = board.popUpButtons["board.filter.priority"]
+        let blocked = board.popUpButtons["board.filter.blocked"]
+        func assertCount(_ visible: Int, file: StaticString = #filePath, line: UInt = #line) {
+            let summary = "\(visible) of 9 Cards"
+            let count = board.staticTexts.matching(NSPredicate(format: "label == %@ OR value == %@", summary, summary)).firstMatch
+            XCTAssertTrue(count.waitForExistence(timeout: 5), "Expected \(summary)", file: file, line: line)
+        }
+
+        assertCount(9)
+        choose("Studio Workspace", from: workspace, in: app)
+        XCTAssertEqual(workspace.value as? String, "Studio Workspace")
+        assertCount(9)
+        choose("You", from: actor, in: app)
+        assertCount(4)
+        XCTAssertEqual(actor.value as? String, "You")
+        choose("High", from: priority, in: app)
+        assertCount(3)
+        XCTAssertEqual(priority.value as? String, "High")
+        choose("Blocked", from: blocked, in: app)
+        assertCount(0)
+        XCTAssertEqual(blocked.value as? String, "Blocked")
+        board.buttons["Clear"].click()
+        assertCount(9)
+        XCTAssertEqual(actor.value as? String, "All actors")
+        XCTAssertEqual(priority.value as? String, "All priorities")
+        XCTAssertEqual(blocked.value as? String, "All")
+
+        choose("Blocked", from: blocked, in: app)
+        assertCount(1)
+        XCTAssertTrue(board.buttons["board.card.demo-card-licenses"].exists)
+        XCTAssertFalse(board.buttons["board.card.\(homepage)"].exists)
+        choose("Unblocked", from: blocked, in: app)
+        assertCount(8)
+        XCTAssertEqual(blocked.value as? String, "Unblocked")
+        XCTAssertFalse(board.buttons["board.card.demo-card-licenses"].exists)
+        XCTAssertTrue(board.buttons["board.card.\(homepage)"].exists)
+        choose("All", from: blocked, in: app)
+        assertCount(9)
+        XCTAssertFalse(board.buttons["Clear"].exists)
+        XCTAssertEqual(workspace.value as? String, "Studio Workspace")
+        attach(app, named: "Native board popup bindings and restored filter inventory")
+    }
+
+    func testArchivedProjectCanBeRestoredAndEditingResumes() throws {
+        let app = launch()
+        showBoard(app)
+        let board = board(in: app)
+        clickMenu(app, named: "Project", item: "Archive Project…")
+        let confirm = board.buttons["project.archive-confirm"]
+        XCTAssertTrue(confirm.waitForExistence(timeout: 5))
+        confirm.click()
+        assertLabel(board.staticTexts.matching(NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@",
+                                                         "Archived Project", "Archived Project")).firstMatch,
+                    contains: "read-only")
+        XCTAssertFalse(board.buttons["board.new-card"].isEnabled)
+        XCTAssertFalse(viewer(homepage, in: app).buttons["card.edit.\(homepage)"].isEnabled)
+        assertMenu(app, named: "Project", enabled: ["Restore Project…"], disabled: ["Edit Project…"])
+        clickMenu(app, named: "Project", item: "Restore Project…")
+        let restore = board.buttons["project.restore-confirm"]
+        XCTAssertTrue(restore.waitForExistence(timeout: 5))
+        restore.click()
+        assertEnabled(board.buttons["board.new-card"])
+        assertEnabled(viewer(homepage, in: app).buttons["card.edit.\(homepage)"])
+        app.typeKey("n", modifierFlags: .command)
+        XCTAssertTrue(board.textFields["editor.title"].waitForExistence(timeout: 5))
+        board.buttons["editor.cancel"].click()
+        attach(app, named: "Project restoration re-enables board and Card editing")
+    }
+
+    func testGracefulRelaunchRestoresIndependentWindowsGeometryAndLocalDraft() throws {
+        // The first launch resets only synthetic draft/frame fixtures. Both launches
+        // allow normal macOS state restoration; the second does not force example windows.
+        let app = launch(restoration: true)
+        // The preceding case may restore no board. Establish this test's starting
+        // fixture through the normal command; the second launch stays unforced.
+        showBoard(app)
+        XCTAssertTrue(board(in: app).waitForExistence(timeout: 10))
+        // Establish a synthetic initial workspace through the normal UI, without
+        // racing forced example opening against the system's restoration transaction.
+        for cardID in [homepage, signup] {
+            for window in app.windows.containing(.button, identifier: "card.edit.\(cardID)").allElementsBoundByIndex {
+                window.buttons[XCUIIdentifierCloseWindow].click()
+            }
+        }
+        showBoard(app)
+        board(in: app).buttons["board.card.\(homepage)"].click()
+        XCTAssertTrue(viewer(homepage, in: app).waitForExistence(timeout: 5))
+        showBoard(app)
+        board(in: app).buttons["board.card.\(signup)"].click()
+        let first = viewer(homepage, in: app)
+        let second = viewer(signup, in: app)
+        XCTAssertTrue(first.waitForExistence(timeout: 10))
+        XCTAssertTrue(second.waitForExistence(timeout: 10))
+        focus(homepage, in: app)
+        let titlebar = first.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 95, dy: 26))
+        titlebar.click(forDuration: 0.4, thenDragTo: titlebar.withOffset(CGVector(dx: 35, dy: -20)))
+        first.buttons["card.edit.\(homepage)"].click()
+        let title = first.textFields["editor.title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        replace(title, with: "Draft recovered after normal app relaunch")
+        first.buttons["editor.cancel"].click()
+        focus(signup, in: app)
+        let rightEdge = second.coordinate(withNormalizedOffset: CGVector(dx: 1, dy: 0.6))
+            .withOffset(CGVector(dx: -1, dy: 0))
+        rightEdge.click(forDuration: 0.4, thenDragTo: rightEdge.withOffset(CGVector(dx: 30, dy: 0)))
+        let firstFrame = first.frame
+        let secondFrame = second.frame
+        app.typeKey("q", modifierFlags: .command)
+        XCTAssertTrue(app.wait(for: .notRunning, timeout: 10))
+
+        app.launchArguments = ["--demo", "-NSQuitAlwaysKeepsWindows", "YES", "-ApplePersistenceIgnoreState", "NO"]
+        app.launch()
+        let restoredFirst = viewer(homepage, in: app)
+        let restoredSecond = viewer(signup, in: app)
+        XCTAssertTrue(board(in: app).waitForExistence(timeout: 10))
+        XCTAssertTrue(restoredFirst.waitForExistence(timeout: 10))
+        XCTAssertTrue(restoredSecond.waitForExistence(timeout: 10))
+        XCTAssertEqual(app.windows.containing(.button, identifier: "session.sign-out").count, 1)
+        XCTAssertEqual(app.windows.containing(.button, identifier: "card.edit.\(homepage)").count, 1)
+        XCTAssertEqual(app.windows.containing(.button, identifier: "card.edit.\(signup)").count, 1)
+        assertFrame(restoredFirst.frame, equals: firstFrame)
+        assertFrame(restoredSecond.frame, equals: secondFrame)
+        focus(homepage, in: app)
+        restoredFirst.buttons["card.edit.\(homepage)"].click()
+        let recoveredTitle = restoredFirst.textFields["editor.title"]
+        XCTAssertTrue(recoveredTitle.waitForExistence(timeout: 5))
+        XCTAssertEqual(recoveredTitle.value as? String, "Draft recovered after normal app relaunch")
+        assertLabel(restoredFirst.staticTexts["editor.draft-status"], contains: "Recovered draft")
+        restoredFirst.buttons["editor.cancel"].click()
+        attach(app, named: "Normal relaunch restores viewers geometry and retained draft")
+    }
+
+    func testLongContentKeepsControlsReachableInLightAndDarkAppearance() throws {
+        for appearance in ["--appearance-light", "--appearance-dark"] {
+            let app = launch(extraArguments: [appearance, "--audit-long-content"])
+            let board = board(in: app)
+            XCTAssertTrue(board.waitForExistence(timeout: 10))
+            showBoard(app)
+            let rightEdge = board.coordinate(withNormalizedOffset: CGVector(dx: 1, dy: 0.6))
+                .withOffset(CGVector(dx: -1, dy: 0))
+            let contraction = max(0, board.frame.width - 760)
+            if contraction > 2 {
+                rightEdge.click(forDuration: 0.4, thenDragTo: rightEdge.withOffset(CGVector(dx: -contraction, dy: 0)))
+            }
+            XCTAssertTrue(board.buttons["board.new-card"].isHittable)
+            XCTAssertTrue(board.popUpButtons["board.filter.actor"].isHittable)
+            XCTAssertTrue(board.popUpButtons["board.filter.priority"].isHittable)
+            XCTAssertTrue(board.popUpButtons["board.filter.blocked"].isHittable)
+            XCTAssertTrue(board.checkBoxes["Include archived"].isHittable)
+            assertFiltersFit(board)
+            choose("Unassigned", from: board.popUpButtons["board.filter.actor"], in: app)
+            choose("High", from: board.popUpButtons["board.filter.priority"], in: app)
+            choose("Unblocked", from: board.popUpButtons["board.filter.blocked"], in: app)
+            XCTAssertEqual(board.popUpButtons["board.filter.actor"].value as? String, "Unassigned")
+            XCTAssertEqual(board.popUpButtons["board.filter.priority"].value as? String, "High")
+            XCTAssertEqual(board.popUpButtons["board.filter.blocked"].value as? String, "Unblocked")
+            XCTAssertTrue(board.buttons["Clear"].isHittable)
+            assertFiltersFit(board)
+            for column in ["next", "doing", "done"] {
+                XCTAssertTrue(board.descendants(matching: .any).matching(identifier: "board.column.\(column)").firstMatch.exists)
+            }
+            app.typeKey("n", modifierFlags: .command)
+            XCTAssertTrue(board.textFields["editor.title"].waitForExistence(timeout: 5))
+            XCTAssertTrue(board.buttons["editor.cancel"].isHittable)
+            XCTAssertTrue(board.buttons["editor.save"].isHittable)
+            board.buttons["editor.cancel"].click()
+            attach(app, named: "Long content at minimum board width \(appearance)")
+            app.terminate()
+        }
+    }
+
+    func testNativeVoiceOverCommonTasksUseSpeechAndNativeActions() throws {
+        guard #available(macOS 27.0, *) else { XCTFail("Requires the macOS 27 VoiceOver test service."); return }
+        try withVoiceOverDemo("Board navigation and filters") { flow in
+            let app = flow.app
+            let board = board(in: app)
+            try flow.enter("Enter sidebar")
+            try flow.seekBackward("Workspace", terms: ["Workspace", "Studio Workspace"], role: "pop up button", limit: 6)
+            try flow.activate("Open Workspace popup")
+            XCTAssertTrue(app.menuItems["Studio Workspace"].firstMatch.waitForExistence(timeout: 5))
+            try flow.require("Selected Workspace", terms: ["Studio Workspace"])
+            try flow.activate("Keep Studio Workspace selected")
+            XCTAssertEqual(board.popUpButtons["board.workspace"].value as? String, "Studio Workspace")
+            try flow.seekForward("Projects heading", terms: ["Projects"], role: "heading", limit: 5)
+            try flow.leave("Leave sidebar", terms: ["Workspaces and Projects"])
+            try flow.enterBoardContents()
+            try flow.enter("Project name", terms: ["Atlas website"], role: "heading")
+            try flow.forward("Project description", terms: ["Prepare a clear"])
+            try flow.leave("Leave overview", terms: ["Project overview"])
+            try flow.selectPopup("Next actor", identifier: "board.filter.actor", value: "You", expectedCount: 4)
+            try flow.selectPopup("Priority", identifier: "board.filter.priority", value: "High", expectedCount: 3)
+            try flow.selectPopup("Blocked", identifier: "board.filter.blocked", value: "Blocked", expectedCount: 0)
+            try flow.seekForward("Clear", terms: ["Clear"], role: "button", limit: 5)
+            try flow.activate("Clear board filters")
+            flow.assertCount(9)
+            // Clear disappears when the last filter resets. Native VoiceOver
+            // returns to the containing group; enter it from that actual focus.
+            try flow.enterBoardContents()
+            try flow.seekForward("Columns scroll area", terms: [], role: "scroll area", limit: 14)
+            try flow.enter("Next Column", terms: ["Next", "4 Cards"], role: "group")
+            for (index, column) in [("Next", 4), ("Doing", 3), ("Done", 2)].enumerated() {
+                if index > 0 {
+                    try flow.forward("Column splitter", terms: ["splitter"])
+                    try flow.forward("\(column.0) Column", terms: [column.0, "\(column.1) Cards"], role: "group")
+                }
+                try flow.enter("\(column.0) heading", terms: [column.0, "\(column.1) Cards"], role: "heading")
+                try flow.leave("Leave \(column.0) Column", terms: [column.0])
+            }
+        }
+    }
+
+    func testNativeVoiceOverReadsCurrentCardContentAfterSave() throws {
+        guard #available(macOS 27.0, *) else { XCTFail("Requires the macOS 27 VoiceOver test service."); return }
+        try withVoiceOverDemo("Current Card speech after Save",
+                              openExampleCards: true, resetBoardCursor: false) { flow in
+            let app = flow.app
+            focus(homepage, in: app)
+            let first = viewer(homepage, in: app)
+            app.typeKey("e", modifierFlags: [.command, .option])
+            let title = first.textFields["editor.title"]
+            let action = first.textFields.matching(NSPredicate(
+                format: "value == %@", "Choose the preferred heading order")).firstMatch
+            let body = first.textViews["editor.body"]
+            XCTAssertTrue(title.waitForExistence(timeout: 5))
+            XCTAssertTrue(action.waitForExistence(timeout: 5))
+            XCTAssertTrue(body.waitForExistence(timeout: 5))
+            let savedTitle = "Saved title"
+            let savedAction = "Saved next action"
+            let savedBody = "Saved description"
+            replace(title, with: savedTitle)
+            replace(action, with: savedAction)
+            replace(body, with: savedBody)
+            XCTAssertEqual(title.value as? String, savedTitle)
+            XCTAssertEqual(body.value as? String, savedBody)
+            first.buttons["editor.save"].click()
+            XCTAssertTrue(title.waitForNonExistence(timeout: 5))
+            let setup = XCTAttachment(string: "Native Window-menu focus, editor interaction, and Save establish the synthetic data change as setup; these actions do not prove VoiceOver activation. The following native VoiceOver traversal must speak the newly saved title, action, and description and must not speak the original content. The shared helper retains the actual speech transcript and screenshot.")
+            setup.name = "Saved Card setup and actual speech boundary"
+            setup.lifetime = .keepAlways
+            add(setup)
+
+            let firstReadingStep = flow.transcript.count
+            try flow.startCardReading()
+            try flow.scan("Updated Card title", terms: [savedTitle], role: "heading", limit: 12)
+            try flow.scan("Next action heading", terms: ["Next action"], role: "heading", limit: 8)
+            try flow.scan("Updated next action", terms: [savedAction], limit: 4)
+            try flow.scan("Description heading", terms: ["Description"], role: "heading", limit: 16)
+            try flow.scan("Updated Description body", terms: [savedBody], limit: 4)
+            let capturedSpeech = flow.transcript.dropFirst(firstReadingStep).joined(separator: "\n")
+            for oldContent in ["Review homepage hierarchy", "Choose the preferred heading order", "Help a first-time visitor"] {
+                XCTAssertFalse(capturedSpeech.localizedCaseInsensitiveContains(oldContent),
+                               "VoiceOver must not read superseded Card content after Save: \(oldContent)")
+            }
+            XCTAssertTrue(viewer(signup, in: app).exists)
+            XCTAssertTrue(board(in: app).exists)
+        }
+    }
+
+    func testNativeVoiceOverCardReadingAndCommentTask() throws {
+        guard #available(macOS 27.0, *) else { XCTFail("Requires the macOS 27 VoiceOver test service."); return }
+        try withVoiceOverDemo("Card reading and contextual Comment") { flow in
+            let first = try flow.openCard(homepage)
+            func assertCommentDuration(after author: String, speech: String) {
+                let escapedAuthor = NSRegularExpression.escapedPattern(for: author)
+                let units = "(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|years?)"
+                let pattern = "^\(escapedAuthor)(?:,\\s*|\\s+)\\d+\\s*\(units)\\b"
+                XCTAssertNotNil(speech.range(of: pattern, options: [.regularExpression, .caseInsensitive]),
+                                "The Comment must announce a native relative duration immediately after its author: \(speech)")
+            }
+            try flow.startCardReading()
+            try flow.scan("Card title", terms: ["Review homepage hierarchy"], limit: 12)
+            try flow.scan("Next action", terms: ["Next action"], limit: 8)
+            try flow.scan("Details", terms: ["Details"], limit: 8)
+            try flow.readMetadata("Next actor", value: "You")
+            try flow.readMetadata("Priority", value: "High")
+            try flow.readMetadata("Blocker", value: "None")
+            try flow.scan("Description", terms: ["Description"], limit: 10)
+            try flow.scan("Comments", terms: ["Comments (2)"], limit: 10)
+            try flow.scan("First Comment author and time", terms: ["Studio assistant"], limit: 8)
+            assertCommentDuration(after: "Studio assistant", speech: flow.lastSpeech)
+            try flow.scan("First Comment spoken prefix", terms: ["The revised order puts"], limit: 4)
+            let captureBoundary = XCTAttachment(string: "This host has returned at most 64 characters per VoiceOver utterance. Native Comment grouping can announce the author, relative duration, and body together or as consecutive items. The short body prefix is checked in the actual speech, including when it belongs to that same item. The complete body is checked separately in the native accessibility value; this does not prove the complete body was spoken.")
+            captureBoundary.name = "Comment speech capture and native List grouping boundary"
+            captureBoundary.lifetime = .keepAlways
+            add(captureBoundary)
+            let firstBody = "The revised order puts the offer before implementation detail."
+            let firstText = first.staticTexts.matching(NSPredicate(format: "label == %@ OR value == %@", firstBody, firstBody)).firstMatch
+            XCTAssertTrue(firstText.exists)
+            XCTAssertTrue(firstText.label == firstBody || firstText.value as? String == firstBody)
+            try flow.scan("Second Comment author and time", terms: ["You"], limit: 4)
+            assertCommentDuration(after: "You", speech: flow.lastSpeech)
+            try flow.scan("Second Comment spoken prefix", terms: ["Keep the short explanation; compare"], limit: 4)
+            let secondBody = "Keep the short explanation; compare the two heading options."
+            let secondText = first.staticTexts.matching(NSPredicate(format: "label == %@ OR value == %@", secondBody, secondBody)).firstMatch
+            XCTAssertTrue(secondText.exists)
+            XCTAssertTrue(secondText.label == secondBody || secondText.value as? String == secondBody)
+            try flow.scan("Add Comment", terms: ["Add Comment"], role: "button", limit: 6)
+            try flow.activate("Open Comment editor")
+            XCTAssertTrue(first.textViews["comment.body"].waitForExistence(timeout: 5))
+            // The empty TextEditor starts in text interaction and can announce
+            // only "actions available". Leave that interaction to hear the
+            // native field's label and role before navigating its siblings.
+            try flow.leave("Leave autofocused Comment text interaction")
+            try flow.beginContentScan("Comment editor")
+            try flow.scan("Comment field", terms: ["Comment"], role: "edit text", limit: 12)
+            try flow.scan("Cancel Comment", terms: ["Cancel"], role: "button", limit: 20)
+            try flow.activate("Cancel Comment")
+            XCTAssertTrue(first.textViews["comment.body"].waitForNonExistence(timeout: 5))
+            XCTAssertTrue(first.buttons["card.edit.\(homepage)"].isEnabled)
+        }
+    }
+
+    func testNativeVoiceOverRequiredTitleAndIndependentCardEditing() throws {
+        guard #available(macOS 27.0, *) else { XCTFail("Requires the macOS 27 VoiceOver test service."); return }
+        try withVoiceOverDemo("Required Title and independent Card editing",
+                              openExampleCards: true, resetBoardCursor: false) { flow in
+            let app = flow.app
+            let setup = XCTAttachment(string: "The demo opens the board and two synthetic Card windows. The native Window menu focuses each Card, and the native Edit keyboard shortcut opens its editor; these are setup actions, not VoiceOver opening proof. Board navigation and Card opening are covered separately. This workflow requires actual field speech, exact initial and draft values, required-field validation, independent focused editors, and native Cancel activation.")
+            setup.name = "Independent Card editor setup and VoiceOver proof boundary"
+            setup.lifetime = .keepAlways
+            add(setup)
+            @MainActor func requireInitialTitle(_ value: String, in field: XCUIElement) throws {
+                // Native sheet entry can initially announce the dialog title
+                // or its selected Title field. Traverse from either position;
+                // a field's presence alone does not prove its spoken identity.
+                if !flow.lastSpeech.localizedCaseInsensitiveContains(value) {
+                    // The sheet can announce only "Edit Card" while its Title
+                    // is already in text interaction. Forward would skip it.
+                    try flow.leave("Leave autofocused Title text interaction")
+                    try flow.beginContentScan("Initial Title after text interaction")
+                }
+                try flow.scan("Initial Title value", terms: [value], limit: 20)
+                try flow.require("Initial Title value", terms: [value])
+                let speech = flow.lastSpeech
+                let fullTitle = speech.range(of: #"\bTitle\b"#, options: [.regularExpression, .caseInsensitive]) != nil
+                let clippedTitle = speech.count == 64
+                    && speech.range(of: #"\bTit(?:l)?$"#, options: [.regularExpression, .caseInsensitive]) != nil
+                XCTAssertTrue(fullTitle || clippedTitle,
+                              "The initial selected field must announce its Title label or the observed 64-character Title prefix: \(speech)")
+                XCTAssertEqual(field.value as? String, value)
+            }
+            focus(homepage, in: app)
+            let first = viewer(homepage, in: app)
+            XCTAssertTrue(first.exists)
+            app.typeKey("e", modifierFlags: [.command, .option])
+            let firstTitle = first.textFields["editor.title"]
+            XCTAssertTrue(firstTitle.waitForExistence(timeout: 5))
+            try flow.beginContentScan("Autofocused homepage Title")
+            try requireInitialTitle("Review homepage hierarchy", in: firstTitle)
+            app.typeKey("a", modifierFlags: .command)
+            app.typeKey(XCUIKeyboardKey.delete.rawValue, modifierFlags: [])
+            XCTAssertEqual(firstTitle.value as? String, "")
+            XCTAssertFalse(first.buttons["editor.save"].isEnabled)
+
+            // A short draft keeps the complete native label/role within this
+            // host's observed speech capture boundary after empty validation.
+            app.typeText("Draft")
+            XCTAssertEqual(firstTitle.value as? String, "Draft")
+            assertEnabled(first.buttons["editor.save"])
+            try flow.current("Short Title field")
+            if !flow.lastSpeech.localizedCaseInsensitiveContains("Title")
+                || !flow.lastSpeech.localizedCaseInsensitiveContains("required")
+                || !flow.lastSpeech.localizedCaseInsensitiveContains("edit text") {
+                try flow.leave("Leave Title text interaction for its complete label")
+                try flow.beginContentScan("Required Title after text interaction")
+                try flow.scan("Complete required Title field", terms: ["Title", "required"],
+                              role: "edit text", limit: 20)
+            }
+            try flow.require("Complete required Title field", terms: ["Title", "required"], role: "edit text")
+            let boundary = XCTAttachment(string: "The initial selected Title can combine the dialog, value, label, and role beyond this host's observed 64-character speech boundary. Its actual value and Title prefix are verified first. Empty validation is verified before typing the exact short draft, enabling Save, and requiring complete Title, required, and native edit-text speech. Native Cancel must leave the viewer's original Title unchanged, and the other Card editor must retain its own original value. This workflow does not claim long-title typing verification.")
+            boundary.name = "Required Title speech capture and native role boundary"
+            boundary.lifetime = .keepAlways
+            add(boundary)
+
+            try flow.leave("Leave homepage Title text interaction")
+            try flow.beginContentScan("Homepage editor after text interaction")
+            try flow.scan("Cancel homepage editing", terms: ["Cancel"], role: "button", limit: 24)
+            try flow.activate("Cancel homepage editing")
+            XCTAssertTrue(firstTitle.waitForNonExistence(timeout: 5))
+            XCTAssertTrue(first.buttons["card.edit.\(homepage)"].isEnabled)
+            let unchangedHomepage = first.staticTexts.matching(NSPredicate(
+                format: "label == %@ OR value == %@", "Review homepage hierarchy", "Review homepage hierarchy")).firstMatch
+            XCTAssertTrue(unchangedHomepage.exists, "Cancel must leave the original Card Title unchanged.")
+
+            focus(signup, in: app)
+            let second = viewer(signup, in: app)
+            XCTAssertTrue(second.exists)
+            XCTAssertEqual(app.windows.containing(.button, identifier: "card.edit.\(homepage)").count, 1)
+            XCTAssertEqual(app.windows.containing(.button, identifier: "card.edit.\(signup)").count, 1)
+            XCTAssertTrue(board(in: app).exists)
+            app.typeKey("e", modifierFlags: [.command, .option])
+            let secondTitle = second.textFields["editor.title"]
+            XCTAssertTrue(secondTitle.waitForExistence(timeout: 5))
+            XCTAssertFalse(firstTitle.exists)
+            try flow.beginContentScan("Autofocused signup Title")
+            try requireInitialTitle("Simplify the signup introduction", in: secondTitle)
+            try flow.leave("Leave signup Title text interaction")
+            try flow.beginContentScan("Signup editor after text interaction")
+            try flow.scan("Cancel signup editing", terms: ["Cancel"], role: "button", limit: 24)
+            try flow.activate("Cancel signup editing")
+            XCTAssertTrue(secondTitle.waitForNonExistence(timeout: 5))
+            XCTAssertTrue(second.buttons["card.edit.\(signup)"].isEnabled)
+            XCTAssertFalse(second.textViews["comment.body"].exists)
+            let unchangedSignup = second.staticTexts.matching(NSPredicate(
+                format: "label == %@ OR value == %@", "Simplify the signup introduction", "Simplify the signup introduction")).firstMatch
+            XCTAssertTrue(unchangedSignup.exists, "Editing the first Card must not change the second Card's Title.")
+        }
+    }
+
+    func testNativeVoiceOverHomepageLinearHeadingsAndReadingScope() throws {
+        guard #available(macOS 27.0, *) else { XCTFail("Requires the macOS 27 VoiceOver test service."); return }
+        try verifyNativeCardHeadingSpeech(for: homepage, title: "Review homepage hierarchy",
+                                         excluding: "Simplify the signup introduction")
+    }
+
+    func testNativeVoiceOverSignupLinearHeadingsAndReadingScope() throws {
+        guard #available(macOS 27.0, *) else { XCTFail("Requires the macOS 27 VoiceOver test service."); return }
+        try verifyNativeCardHeadingSpeech(for: signup, title: "Simplify the signup introduction",
+                                         excluding: "Review homepage hierarchy")
+    }
+
+    @available(macOS 27.0, *)
+    private func verifyNativeCardHeadingSpeech(for cardID: String, title: String,
+                                              excluding otherTitle: String) throws {
+        try withVoiceOverDemo("Native heading speech for \(title)",
+                              openExampleCards: true, resetBoardCursor: false) { flow in
+            let app = flow.app
+            let setup = XCTAttachment(string: "Both synthetic Card windows and the board are open. The native Window menu focuses this Card for setup; setup is not VoiceOver proof. Native traversal must capture this Card's title, Next action, Details, Description, and Comments and announce each as a heading. All five identities are captured before role assertions; continueAfterFailure=false can stop this case at its first assertion failure, so the other Card has an independent test. Every captured native traversal step is checked for the other Card's title. No rotor or heading-shortcut behavior is claimed.")
+            setup.name = "Card linear heading speech and reading-scope evidence boundary"
+            setup.lifetime = .keepAlways
+            add(setup)
+            focus(cardID, in: app)
+            try flow.startCardReading()
+            try flow.verifyCardLinearHeadings(
+                [title, "Next action", "Details", "Description", "Comments (2)"],
+                excluding: otherTitle)
+            XCTAssertTrue(viewer(homepage, in: app).exists)
+            XCTAssertTrue(viewer(signup, in: app).exists)
+            XCTAssertTrue(board(in: app).exists)
+            XCTAssertEqual(app.windows.count, 3)
+        }
+    }
+
+    @available(macOS 27.0, *)
+    private func withVoiceOverDemo(_ name: String, openExampleCards: Bool = false,
+                                  resetBoardCursor: Bool = true,
+                                  body: (VoiceOverWorkflow) throws -> Void) throws {
+        let vo = XCUIDevice.shared.voiceOverService
+        let initiallyEnabled = vo.isEnabled
+        let app = XCUIApplication()
+        addTeardownBlock {
+            try await MainActor.run {
+                defer { XCTAssertEqual(vo.isEnabled, initiallyEnabled, "Restore the original VoiceOver state.") }
+                if vo.isEnabled != initiallyEnabled {
+                    if initiallyEnabled { try vo.enable() } else { try vo.disable() }
+                }
+            }
+        }
+        app.launchArguments = ["--demo", "--reset-demo-drafts", "--reset-demo-window-layout",
+                               "-ApplePersistenceIgnoreState", "YES"]
+        if openExampleCards { app.launchArguments.append("--open-example-cards") }
+        app.launch()
+        showBoard(app)
+        XCTAssertTrue(board(in: app).waitForExistence(timeout: 10))
+        if openExampleCards {
+            XCTAssertTrue(viewer(homepage, in: app).waitForExistence(timeout: 10))
+            XCTAssertTrue(viewer(signup, in: app).waitForExistence(timeout: 10))
+            XCTAssertEqual(app.windows.count, 3)
+        } else {
+            XCTAssertEqual(app.windows.count, 1)
+        }
+        // Initialize the test service even when VoiceOver was enabled natively.
+        // The preceding successful speech run used this sequence before focus.
+        try vo.enable()
+        XCTAssertTrue(vo.isEnabled)
+        app.activate()
+        showBoard(app)
+        let flow = VoiceOverWorkflow(test: self, app: app)
+        defer {
+            let speech = XCTAttachment(string: flow.transcript.joined(separator: "\n"))
+            speech.name = "\(name): actual VoiceOver speech"
+            speech.lifetime = .keepAlways
+            add(speech)
+            attach(app, named: name)
+        }
+        if resetBoardCursor { try flow.resetBoardCursor() }
+        try body(flow)
+    }
+
+    @available(macOS 27.0, *)
+    @MainActor
+    private final class VoiceOverWorkflow {
+        unowned let test: NativeWindowWorkflowTests
+        let app: XCUIApplication
+        private let vo = XCUIDevice.shared.voiceOverService
+        private let started = Date()
+        private var calls = 0
+        private var scanDepth = 0
+        private var scanSeen: [Set<String>] = [Set()]
+        private var entered: Set<String> = []
+        private var climbsWithoutKnownParent = 0
+        private(set) var transcript: [String] = []
+        private(set) var lastSpeech = ""
+
+        init(test: NativeWindowWorkflowTests, app: XCUIApplication) {
+            self.test = test
+            self.app = app
+        }
+
+        private func checkBudget() throws {
+            guard calls < 120, Date().timeIntervalSince(started) < 280 else {
+                throw failure("Exceeded the 120-operation or 280-second VoiceOver workflow budget.")
+            }
+            calls += 1
+        }
+
+        private func failure(_ message: String) -> NSError {
+            NSError(domain: "KanbanCardsUITests.VoiceOverNavigation", code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "\(message) Last speech: \(lastSpeech)"])
+        }
+
+        private func record(_ step: String, _ speech: String) {
+            XCTAssertFalse(speech.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                           "VoiceOver returned no actual speech for \(step).")
+            lastSpeech = speech
+            let entry = "\(step): \(speech)"
+            transcript.append(entry)
+            print("VOICEOVER TASK \(entry)")
+        }
+
+        private func matches(_ terms: [String], role: String?) -> Bool {
+            (terms + (role.map { [$0] } ?? [])).allSatisfy { lastSpeech.localizedCaseInsensitiveContains($0) }
+        }
+
+        func require(_ step: String, terms: [String], role: String? = nil) throws {
+            guard matches(terms, role: role) else {
+                throw failure("\(step) must announce \((terms + (role.map { [$0] } ?? [])).joined(separator: ", ")).")
+            }
+        }
+
+        func current(_ step: String, terms: [String] = [], role: String? = nil) throws {
+            try checkBudget()
+            record(step, try vo.currentSpeech().utterance)
+            try require(step, terms: terms, role: role)
+        }
+
+        func forward(_ step: String, terms: [String] = [], role: String? = nil) throws {
+            try checkBudget()
+            record(step, try vo.moveForward().utterance)
+            try require(step, terms: terms, role: role)
+        }
+
+        func enter(_ step: String, terms: [String] = [], role: String? = nil) throws {
+            try checkBudget()
+            record(step, try vo.moveIn().utterance)
+            try require(step, terms: terms, role: role)
+        }
+
+        func leave(_ step: String, terms: [String] = []) throws {
+            try checkBudget()
+            record(step, try vo.moveOut().utterance)
+            try require(step, terms: terms)
+        }
+
+        func activate(_ step: String) throws {
+            try checkBudget()
+            app.typeKey(XCUIKeyboardKey.space.rawValue, modifierFlags: [.control, .option])
+            try current("After VO-Space: \(step)")
+        }
+
+        func seekForward(_ step: String, terms: [String], role: String? = nil, limit: Int) throws {
+            if matches(terms, role: role) { return }
+            for index in 1...limit {
+                try forward("\(step), next \(index)")
+                if matches(terms, role: role) { return }
+            }
+            throw failure("Could not reach \(step) within \(limit) forward operations.")
+        }
+
+        func seekBackward(_ step: String, terms: [String], role: String? = nil, limit: Int) throws {
+            if matches(terms, role: role) { return }
+            for index in 1...limit {
+                try checkBudget()
+                record("\(step), previous \(index)", try vo.moveBackward().utterance)
+                if matches(terms, role: role) { return }
+            }
+            throw failure("Could not reach \(step) within \(limit) backward operations.")
+        }
+
+        func resetBoardCursor() throws {
+            // One root command per board entry, never one per landmark.
+            app.typeKey(XCUIKeyboardKey.escape.rawValue, modifierFlags: [.control, .option, .shift])
+            // XCTest's keyboard wait can outlast the identity announcement and
+            // capture a later toolbar hint. Native movement returns the next
+            // item identity synchronously; require the actual root before entry.
+            try current("After board root command")
+            try seekForward("Board root", terms: ["Project board"], role: "group", limit: 8)
+            try require("Board root", terms: ["Project board"], role: "group")
+            for level in 1...3 {
+                try enter("Board root level \(level)")
+                if matches(["Workspaces and Projects"], role: "table") { return }
+                try require("Board wrapper", terms: ["Project board"], role: "group")
+            }
+            throw failure("Could not enter the board sidebar through the native root.")
+        }
+
+        func enterBoardContents() throws {
+            try seekForward("Board contents", terms: ["Project board contents"], role: "group", limit: 3)
+            try enter("Project overview", terms: ["Project overview"], role: "group")
+        }
+
+        func assertCount(_ count: Int) {
+            let summary = "\(count) of 9 Cards"
+            let text = test.board(in: app).staticTexts.matching(NSPredicate(format: "label == %@ OR value == %@", summary, summary)).firstMatch
+            XCTAssertTrue(text.waitForExistence(timeout: 5), "Expected \(summary).")
+        }
+
+        func selectPopup(_ label: String, identifier: String, value: String, expectedCount: Int) throws {
+            try seekForward(label, terms: [label], role: "pop up button", limit: 4)
+            try activate("Open \(label)")
+            XCTAssertTrue(app.menuItems[value].firstMatch.waitForExistence(timeout: 5))
+            for index in 1...8 {
+                if matches([value], role: nil) { break }
+                try checkBudget()
+                app.typeKey(XCUIKeyboardKey.downArrow.rawValue, modifierFlags: [.control, .option])
+                try current("\(label) menu item \(index)")
+            }
+            try require("Selected \(label) menu item", terms: [value])
+            try activate("Select \(value)")
+            XCTAssertEqual(test.board(in: app).popUpButtons[identifier].value as? String, value)
+            assertCount(expectedCount)
+        }
+
+        func openCard(_ cardID: String) throws -> XCUIElement {
+            try enterBoardContents()
+            try seekForward("Columns scroll area", terms: [], role: "scroll area", limit: 14)
+            try enter("Next Column", terms: ["Next", "4 Cards"], role: "group")
+            let targetColumn = cardID == test.homepage ? "Doing" : "Done"
+            for column in ["Doing", "Done"] {
+                try forward("Column splitter", terms: ["splitter"])
+                try forward("\(column) Column", terms: [column], role: "group")
+                if column == targetColumn { break }
+            }
+            try enter("\(targetColumn) heading", terms: [targetColumn], role: "heading")
+            try seekForward("\(targetColumn) Cards", terms: ["\(targetColumn) Cards"], role: "table", limit: 3)
+            try enter("Enter \(targetColumn) Cards")
+            try beginContentScan("Card list")
+            let title = cardID == test.homepage ? "Review homepage hierarchy" : "Simplify the signup introduction"
+            let metadata = cardID == test.homepage ? ["You", "High"] : ["Agent", "Medium"]
+            try scan("Card identity and metadata", terms: [title] + metadata, limit: 12)
+            let button = test.board(in: app).descendants(matching: .any).matching(identifier: "board.card.\(cardID)").firstMatch
+            XCTAssertTrue(button.exists)
+            XCTAssertEqual(button.elementType, .button)
+            let boundary = XCTAttachment(string: "Prior host runs captured at most 64 characters per VoiceOver utterance. Card identity and metadata must be returned as actual speech. The native button role and successful VO-Space window result are verified separately; this does not prove complete long-sentence audio.")
+            boundary.name = "Observed VoiceOver speech capture boundary"
+            boundary.lifetime = .keepAlways
+            test.add(boundary)
+            try activate("Open \(title)")
+            let window = test.viewer(cardID, in: app)
+            XCTAssertTrue(window.waitForExistence(timeout: 5), "VO-Space must open the matching Card window.")
+            return window
+        }
+
+        func startCardReading() throws {
+            app.typeKey(XCUIKeyboardKey.escape.rawValue, modifierFlags: [.control, .option, .shift])
+            try current("After Card root command")
+            try seekForward("Card root", terms: ["Card details"], role: "group", limit: 8)
+            try require("Card root", terms: ["Card details"], role: "group")
+            try beginContentScan("Card contents")
+        }
+
+        func beginContentScan(_ step: String) throws {
+            resetContentScanState()
+            try current(step)
+        }
+
+        private func resetContentScanState() {
+            scanDepth = 0
+            scanSeen = [Set()]
+            entered = []
+            climbsWithoutKnownParent = 0
+        }
+
+        func verifyCardLinearHeadings(_ labels: [String], excluding otherCardTitle: String) throws {
+            guard labels.count == 5, Set(labels).count == 5 else {
+                throw failure("The Card heading verification requires five unique target labels.")
+            }
+            let firstStep = transcript.count
+            defer {
+                let scope = transcript.dropFirst(firstStep).joined(separator: "\n")
+                let attachment = XCTAttachment(string: scope)
+                attachment.name = "Card linear headings: actual names, roles, and reading scope"
+                attachment.lifetime = .keepAlways
+                test.add(attachment)
+            }
+            try scan("Card contents group", terms: ["Card contents"], role: "group", limit: 12)
+            try enter("Enter the Card contents group")
+            var capturedHeadings: [(label: String, speech: String)] = []
+            for label in labels {
+                try scan("Native Card heading: \(label)", terms: [label], limit: 20)
+                capturedHeadings.append((label, lastSpeech))
+                for entry in transcript.dropFirst(firstStep) {
+                    if entry.localizedCaseInsensitiveContains(otherCardTitle) {
+                        throw failure("Native reading crossed into the other Card window: \(otherCardTitle).")
+                    }
+                }
+            }
+            for captured in capturedHeadings {
+                let speech = captured.speech
+                XCTAssertNotNil(speech.range(of: #"\bheading\b"#,
+                                             options: [.regularExpression, .caseInsensitive]),
+                                "\(captured.label) must announce its native heading role: \(speech)")
+            }
+        }
+
+        private var isContainer: Bool {
+            let patterns = [
+                // An entered item's speech can name its parent table first.
+                // Treat only a terminal container role as the current item.
+                #"\b(?:table(?:\s+Row)?|group|scroll(?:\s+area)?|list)\s*$"#,
+                #"\bRow\s+\d+\s+of\s+\d+\b"#
+            ]
+            return patterns.contains { lastSpeech.range(of: $0, options: [.regularExpression, .caseInsensitive]) != nil }
+        }
+
+        func scan(_ step: String, terms: [String], role: String? = nil, limit: Int) throws {
+            // Continue from the existing cursor. Enter only encountered native
+            // containers, never rewind or restart the complete window for a label.
+            for index in 0..<limit {
+                if matches(terms, role: role), role != nil || !isContainer { return }
+                let key = "\(scanDepth):\(lastSpeech)"
+                if isContainer, scanDepth < 8, entered.insert(key).inserted {
+                    let before = lastSpeech
+                    do {
+                        try enter("\(step), enter container \(index)")
+                        if lastSpeech != before {
+                            scanDepth += 1
+                            scanSeen.append(Set())
+                            continue
+                        }
+                    } catch {
+                        let error = error as NSError
+                        guard error.domain == XCUIVoiceOverServiceErrorDomain,
+                              error.code == XCUIVoiceOverService.Error.Code.noSpeech.rawValue else { throw error }
+                    }
+                }
+                let previous = lastSpeech
+                scanSeen[scanDepth].insert(previous)
+                try forward("\(step), next \(index)")
+                if lastSpeech == previous || scanSeen[scanDepth].contains(lastSpeech) {
+                    try leave("\(step), leave completed container")
+                    if scanDepth > 0 {
+                        scanDepth -= 1
+                        scanSeen.removeLast()
+                    } else {
+                        climbsWithoutKnownParent += 1
+                        guard climbsWithoutKnownParent <= 3 else { throw failure("Reached the native traversal boundary while locating \(step).") }
+                    }
+                    try forward("\(step), next after container")
+                }
+            }
+            throw failure("Could not reach \(step) within \(limit) native traversal steps.")
+        }
+
+        func readMetadata(_ label: String, value: String) throws {
+            try scan(label, terms: [label], limit: 8)
+            if !matches([value], role: nil) {
+                try scan("\(label) value", terms: [value], limit: 3)
+            }
+            try require("\(label) value", terms: [value])
+        }
+    }
+
+    func testNativeAccessibilityAuditForBoardAndCardDescriptions() throws {
+        var unexpectedIssues: [String] = []
+        var acceptedDiagnostics: [String] = []
+        var reviewedBoardDiagnostics: [String] = []
+        let containerReview = ReviewedBoardContainerDiagnostics()
+        for appearance in ["--appearance-light", "--appearance-dark"] {
+            let app = XCUIApplication()
+            // Audit a single unobstructed window. Other workflows still exercise
+            // the board plus two viewers and preserve their separate raw evidence.
+            app.launchArguments = ["--demo", "--reset-demo-drafts", "--reset-demo-window-layout",
+                                   "-ApplePersistenceIgnoreState", "YES", appearance]
+            app.launch()
+            showBoard(app)
+            let board = board(in: app)
+            XCTAssertTrue(board.waitForExistence(timeout: 10))
+            XCTAssertEqual(app.windows.count, 1, "The board audit must start without restored/example Card windows.")
+            if board.frame.width < 1320 {
+                let rightEdge = board.coordinate(withNormalizedOffset: CGVector(dx: 1, dy: 0.6))
+                    .withOffset(CGVector(dx: -1, dy: 0))
+                rightEdge.click(forDuration: 0.4,
+                    thenDragTo: rightEdge.withOffset(CGVector(dx: 1320 - board.frame.width, dy: 0)))
+            }
+            XCTAssertTrue(board.buttons["board.card.\(homepage)"].isHittable)
+            XCTAssertTrue(board.buttons["board.card.\(signup)"].isHittable,
+                          "All three Columns must be visible during the ordinary-width board audit.")
+            settlePointerAwayFromHelpTags(in: board, app: app)
+            attach(app, named: "Isolated board accessibility audit \(appearance)")
+            let boardAudit = try collectAccessibilityAudit(app, context: "Isolated board \(appearance)",
+                window: board, containerReview: containerReview)
+            unexpectedIssues += boardAudit.unexpected
+            acceptedDiagnostics += boardAudit.accepted
+            reviewedBoardDiagnostics += boardAudit.reviewed
+
+            board.buttons["board.card.\(homepage)"].click()
+            let card = viewer(homepage, in: app)
+            XCTAssertTrue(card.waitForExistence(timeout: 5))
+            showBoard(app)
+            board.buttons[XCUIIdentifierCloseWindow].click()
+            XCTAssertTrue(board.waitForNonExistence(timeout: 5))
+            focus(homepage, in: app)
+            XCTAssertEqual(app.windows.count, 1, "The Card audit must contain only the focused viewer.")
+            settlePointerAwayFromHelpTags(in: card, app: app)
+            attach(app, named: "Isolated Card accessibility audit \(appearance)")
+            let cardAudit = try collectAccessibilityAudit(app, context: "Isolated Card \(appearance)",
+                window: card, containerReview: containerReview)
+            unexpectedIssues += cardAudit.unexpected
+            acceptedDiagnostics += cardAudit.accepted
+            reviewedBoardDiagnostics += cardAudit.reviewed
+            app.terminate()
+        }
+        let diagnostics = XCTAttachment(string: acceptedDiagnostics.isEmpty
+            ? "No accepted accessibility diagnostics."
+            : acceptedDiagnostics.joined(separator: "\n\n"))
+        diagnostics.name = "Accepted exact framework and fixture accessibility diagnostics"
+        diagnostics.lifetime = .keepAlways
+        add(diagnostics)
+
+        // Disclose only the reviewed Board wrappers, separately from the existing exact
+        // TouchBar/fixture exceptions. These native reports remain present.
+        let counts = containerReview.disclosureCounts
+        var disclosure = ["Reviewed Board container diagnostics remain present in the raw audit. Card contexts expect zero reviewed containers.",
+                          "Existing TouchBar/fixture diagnostics: \(acceptedDiagnostics.count) (separate attachment)."]
+        for context in ReviewedBoardContainerDiagnostics.expectedDisclosureCounts.keys.sorted() {
+            let expected = ReviewedBoardContainerDiagnostics.expectedDisclosureCounts[context]!
+            let missing = containerReview.missingCategories(in: context).sorted()
+            disclosure.append("\(context): \(counts[context] ?? 0)/\(expected) reviewed wrappers; missing: \(missing.joined(separator: ", "))")
+        }
+        let nativeDiagnostics = XCTAttachment(string:
+            disclosure.joined(separator: "\n") + "\n\n" + reviewedBoardDiagnostics.joined(separator: "\n\n"))
+        nativeDiagnostics.name = "Reviewed Board container diagnostics - 12 expected, Card 0, all raw issues retained"
+        nativeDiagnostics.lifetime = .keepAlways
+        add(nativeDiagnostics)
+
+        XCTAssertTrue(unexpectedIssues.isEmpty, unexpectedIssues.joined(separator: "\n\n"))
+        XCTAssertEqual(reviewedBoardDiagnostics.count, 12,
+                       "Board wrapper diagnostics changed; review the raw audit instead of broadening acceptance.")
+        for (context, expected) in ReviewedBoardContainerDiagnostics.expectedDisclosureCounts {
+            XCTAssertEqual(counts[context], expected, "Reviewed wrapper count changed in \(context).")
+            XCTAssertTrue(containerReview.missingCategories(in: context).isEmpty,
+                          "A reviewed wrapper category is missing or changed in \(context).")
+        }
+    }
+
+    private func collectAccessibilityAudit(_ app: XCUIApplication, context: String,
+        window: XCUIElement, containerReview: ReviewedBoardContainerDiagnostics
+    ) throws -> (unexpected: [String], accepted: [String], reviewed: [String]) {
+        var unexpected: [String] = []
+        var accepted: [String] = []
+        var reviewed: [String] = []
+        try app.performAccessibilityAudit(for: .all) { issue in
+            let raw = "\(context)\n\(issue.auditType.rawValue): \(issue.compactDescription)\nDetails: \(issue.detailedDescription)\nElement: \(issue.element?.debugDescription ?? "No element returned")"
+            let detail = XCTAttachment(string: raw)
+            detail.name = "\(context) raw accessibility issue"
+            detail.lifetime = .keepAlways
+            self.add(detail)
+            if let reason = self.acceptedAccessibilityDiagnostic(issue) {
+                accepted.append("\(reason)\n\(raw)")
+                let acceptedDetail = XCTAttachment(string: "\(reason)\n\(raw)")
+                acceptedDetail.name = "Accepted accessibility diagnostic"
+                acceptedDetail.lifetime = .keepAlways
+                self.add(acceptedDetail)
+            } else if let category = containerReview.category(for: issue, context: context, in: window),
+                      let origin = ReviewedBoardContainerDiagnostics.frameworkOrigin(for: category) {
+                let record = "Reviewed native wrapper: \(category)\n\(origin)\n\(raw)"
+                reviewed.append(record)
+                let reviewedDetail = XCTAttachment(string: record)
+                reviewedDetail.name = "Reviewed native container diagnostic: \(category)"
+                reviewedDetail.lifetime = .keepAlways
+                self.add(reviewedDetail)
+            } else {
+                unexpected.append(raw)
+            }
+            // Continue collecting. Every unmatched issue fails the final assertion.
+            return true
+        }
+        return (unexpected, accepted, reviewed)
+    }
+
+    private func settlePointerAwayFromHelpTags(in window: XCUIElement, app: XCUIApplication) {
+        // Snapshotting can leave the pointer over a Card's tooltip. Audit the
+        // stable window rather than a transient native help popup from that hover.
+        window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 1))
+            .withOffset(CGVector(dx: 0, dy: -2)).hover()
+        XCTAssertTrue(app.descendants(matching: .helpTag).firstMatch.waitForNonExistence(timeout: 3),
+                      "Transient help popups must dismiss before auditing the window.")
+    }
+
+    private func acceptedAccessibilityDiagnostic(_ issue: XCUIAccessibilityAuditIssue) -> String? {
+        guard issue.auditType == .sufficientElementDescription, let element = issue.element else { return nil }
+        if issue.compactDescription == "Label duplicates role description",
+           element.elementType == .button,
+           element.identifier == "board.card.demo-card-buttons",
+           element.label == "Replace unclear button labels, You · High priority, No next action yet" {
+            return "Accepted fixture content collision: 'button' is part of the Card title, not an appended accessibility role."
+        }
+        if issue.compactDescription == "Element has no description",
+           element.elementType == .touchBar, !element.isEnabled,
+           element.identifier.isEmpty, element.label.isEmpty,
+           element.children(matching: .any).count == 0 {
+            return "Accepted empty system TouchBar container: no app content, actions, identifier, label, or children."
+        }
+        return nil
+    }
+
+    private func launch(restoration: Bool = false, extraArguments: [String] = []) -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchArguments = ["--demo", "--open-example-cards", "--reset-demo-drafts", "--reset-demo-window-layout"]
+        if restoration {
+            app.launchArguments.removeAll { $0 == "--open-example-cards" }
+            app.launchArguments += ["-NSQuitAlwaysKeepsWindows", "YES", "-ApplePersistenceIgnoreState", "NO"]
+        }
+        else { app.launchArguments += ["-ApplePersistenceIgnoreState", "YES"] }
+        app.launchArguments += extraArguments
+        app.launch()
+        return app
+    }
+
+    private func board(in app: XCUIApplication) -> XCUIElement {
+        app.windows.containing(.button, identifier: "session.sign-out").firstMatch
+    }
+
+    private func viewer(_ cardID: String, in app: XCUIApplication) -> XCUIElement {
+        app.windows.containing(.button, identifier: "card.edit.\(cardID)").firstMatch
+    }
+
+    private func showBoard(_ app: XCUIApplication) {
+        app.typeKey("0", modifierFlags: .command)
+        XCTAssertTrue(board(in: app).waitForExistence(timeout: 5))
+    }
+
+    private func focus(_ cardID: String, in app: XCUIApplication) {
+        let title = cardID == homepage ? "Review homepage hierarchy" : "Simplify the signup introduction"
+        let menu = app.menuBars.menuBarItems["Window"]
+        XCTAssertTrue(menu.waitForExistence(timeout: 5))
+        menu.click()
+        let item = menu.menus.menuItems["\(title) (Studio Workspace / Atlas website)"]
+        XCTAssertTrue(item.waitForExistence(timeout: 5))
+        item.click()
+    }
+
+    private func assertMenu(_ app: XCUIApplication, named name: String,
+                            enabled: [String] = [], disabled: [String] = [],
+                            file: StaticString = #filePath, line: UInt = #line) {
+        let menu = app.menuBars.menuBarItems[name]
+        XCTAssertTrue(menu.waitForExistence(timeout: 5), file: file, line: line)
+        menu.click()
+        for title in enabled {
+            let item = menu.menus.menuItems[title]
+            XCTAssertTrue(item.waitForExistence(timeout: 5), "Missing \(name) → \(title)", file: file, line: line)
+            XCTAssertTrue(item.isEnabled, "Unavailable \(name) → \(title)", file: file, line: line)
+        }
+        for title in disabled {
+            let item = menu.menus.menuItems[title]
+            XCTAssertTrue(item.waitForExistence(timeout: 5), "Missing \(name) → \(title)", file: file, line: line)
+            XCTAssertFalse(item.isEnabled, "\(name) → \(title) must be unavailable during this task", file: file, line: line)
+        }
+        app.typeKey(XCUIKeyboardKey.escape.rawValue, modifierFlags: [])
+    }
+
+    private func clickMenu(_ app: XCUIApplication, named name: String, item title: String) {
+        let menu = app.menuBars.menuBarItems[name]
+        XCTAssertTrue(menu.waitForExistence(timeout: 5))
+        menu.click()
+        let item = menu.menus.menuItems[title]
+        XCTAssertTrue(item.waitForExistence(timeout: 5))
+        XCTAssertTrue(item.isEnabled)
+        item.click()
+    }
+
+    private func choose(_ value: String, from picker: XCUIElement, in app: XCUIApplication) {
+        XCTAssertTrue(picker.waitForExistence(timeout: 5))
+        picker.click()
+        let item = app.menuItems[value].firstMatch
+        XCTAssertTrue(item.waitForExistence(timeout: 5))
+        item.click()
+    }
+
+    private func replace(_ field: XCUIElement, with text: String) {
+        field.click()
+        field.typeKey("a", modifierFlags: .command)
+        field.typeText(text)
+    }
+
+    private func assertEnabled(_ element: XCUIElement,
+                               file: StaticString = #filePath, line: UInt = #line) {
+        let enabled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == true AND enabled == true"), object: element)
+        XCTAssertEqual(XCTWaiter.wait(for: [enabled], timeout: 5), .completed, file: file, line: line)
+    }
+
+    private func assertFrame(_ actual: CGRect, equals expected: CGRect,
+                             file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertEqual(actual.minX, expected.minX, accuracy: 2, file: file, line: line)
+        XCTAssertEqual(actual.minY, expected.minY, accuracy: 2, file: file, line: line)
+        XCTAssertEqual(actual.width, expected.width, accuracy: 2, file: file, line: line)
+        XCTAssertEqual(actual.height, expected.height, accuracy: 2, file: file, line: line)
+    }
+
+    private func assertFiltersFit(_ board: XCUIElement,
+                                  file: StaticString = #filePath, line: UInt = #line) {
+        let controls = [board.popUpButtons["board.filter.actor"],
+                        board.popUpButtons["board.filter.priority"],
+                        board.popUpButtons["board.filter.blocked"],
+                        board.checkBoxes["Include archived"]]
+        for control in controls {
+            XCTAssertTrue(control.isHittable, "Adaptive filters must remain reachable.", file: file, line: line)
+            XCTAssertGreaterThan(control.frame.width, 20, file: file, line: line)
+            XCTAssertGreaterThanOrEqual(control.frame.minX, board.frame.minX, file: file, line: line)
+            XCTAssertLessThanOrEqual(control.frame.maxX, board.frame.maxX,
+                                     "Adaptive filter controls must fit the narrow board.", file: file, line: line)
+        }
+        for (index, control) in controls.enumerated() {
+            for other in controls.dropFirst(index + 1) {
+                XCTAssertFalse(control.frame.intersects(other.frame),
+                               "Adaptive filter controls must not overlap.", file: file, line: line)
+            }
+        }
+    }
+
+    private func assertLabel(_ element: XCUIElement, contains title: String,
+                             file: StaticString = #filePath, line: UInt = #line) {
+        let updated = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in element.exists && (element.label.contains(title) || (element.value as? String)?.contains(title) == true) }, object: element)
+        XCTAssertEqual(XCTWaiter.wait(for: [updated], timeout: 5), .completed, file: file, line: line)
+    }
+
+    private func attach(_ app: XCUIApplication, named name: String) {
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = name
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        let hierarchy = XCTAttachment(string: app.debugDescription)
+        hierarchy.name = "\(name) accessibility tree"
+        hierarchy.lifetime = .keepAlways
+        add(hierarchy)
+    }
+}
+
+/// Test-only Board classifier proposal. Retain separate completed Board VoiceOver evidence.
+/// Retain every raw issue, disclose classified counts, and fail all nil results.
+/// One instance covers exactly one four-context audit of the unchanged default demo fixture.
+/// Card contexts expect zero: no Card diagnostic is classified by this helper.
+///
+/// Reviewed source: NavigationSplitView sidebar/detail panes, HSplitView Column panes,
+/// and the Projects List Section header in BoardView.swift.
+/// Reviewed Board evidence: AccessibilityPrimaryMetadata, macOS 27.0.1.
+/// These are observed disabled host groups around named children of public native components;
+/// this classification does not claim that the framework diagnostics are repaired or absent.
+@MainActor
+private final class ReviewedBoardContainerDiagnostics {
+    private typealias Snapshot = any XCUIElementSnapshot
+    private var seen = Set<String>()
+
+    static let expectedDisclosureCounts = [
+        "Isolated board --appearance-light": 6,
+        "Isolated Card --appearance-light": 0,
+        "Isolated board --appearance-dark": 6,
+        "Isolated Card --appearance-dark": 0
+    ]
+
+    /// A duplicate category in the same context returns nil and must remain a failing issue.
+    /// The supplied window must be the only window in the caller's isolated application audit.
+    func category(for issue: XCUIAccessibilityAuditIssue, context: String,
+                           in window: XCUIElement) -> String? {
+        // Only the two exact Board contexts are eligible. Card diagnostics stay unreviewed.
+        guard Self.expectedDisclosureCounts[context] == 6,
+              issue.auditType == .sufficientElementDescription,
+              issue.compactDescription == "Element has no description",
+              let element = issue.element,
+              let wrapper = try? element.snapshot(),
+              Self.isUnnamedDisabledGroup(wrapper), wrapper.children.count == 1,
+              let root = try? window.snapshot(), Self.isExpectedBoardWindow(root),
+              Self.descendants(of: root).filter({ Self.sameWrapper($0, as: wrapper) }).count == 1
+        else { return nil }
+
+        let child = wrapper.children[0]
+        let candidate: String?
+        if Self.isSidebar(child) { candidate = "board.sidebar-pane" }
+        else if Self.isDetail(child) { candidate = "board.detail-pane" }
+        else if let column = Self.columns.first(where: { Self.isColumn(child, fixture: $0) }) {
+            candidate = "board.column.\(column.id)-pane"
+        } else if Self.isLeafHeading(child, label: "Projects") {
+            candidate = "board.section.projects-header"
+        } else { candidate = nil }
+
+        guard let candidate, Self.expectedCategories(in: context).contains(candidate),
+              seen.insert(context + "|" + candidate).inserted else { return nil }
+        return candidate
+    }
+
+    var disclosureCounts: [String: Int] {
+        Self.expectedDisclosureCounts.mapValues { _ in 0 }.merging(
+            Dictionary(grouping: seen, by: { String($0.split(separator: "|")[0]) }).mapValues(\.count),
+            uniquingKeysWith: { _, observed in observed })
+    }
+
+    func missingCategories(in context: String) -> Set<String> {
+        Self.expectedCategories(in: context).filter { !seen.contains(context + "|" + $0) }
+    }
+
+    static func frameworkOrigin(for category: String) -> String? {
+        switch category {
+        case "board.sidebar-pane", "board.detail-pane":
+            return "SwiftUI NavigationSplitView pane host; its named sidebar or Project content child remains exposed."
+        case "board.column.next-pane", "board.column.doing-pane", "board.column.done-pane":
+            return "SwiftUI HSplitView child host; its named Column, heading, Card list, and buttons remain exposed."
+        case "board.section.projects-header":
+            return "SwiftUI List Section header host; its single named static-text heading remains exposed."
+        default: return nil
+        }
+    }
+
+    private static func expectedCategories(in context: String) -> Set<String> {
+        switch context {
+        case "Isolated board --appearance-light", "Isolated board --appearance-dark":
+            return ["board.sidebar-pane", "board.detail-pane", "board.column.next-pane",
+                    "board.column.doing-pane", "board.column.done-pane", "board.section.projects-header"]
+        default: return []
+        }
+    }
+
+    private static func isExpectedBoardWindow(_ root: Snapshot) -> Bool {
+        guard root.elementType == .window else { return false }
+        let nodes = descendants(of: root)
+        return root.identifier == "board-AppWindow-1"
+            && root.title == "Atlas website – Studio Workspace"
+            && nodes.filter { $0.identifier == "board.window" && $0.label == "Project board" }.count == 1
+    }
+
+    private struct ColumnFixture {
+        let id: String
+        let title: String
+        let cardNames: [String]
+        var label: String { "\(title), \(cardNames.count) Cards" }
+    }
+
+    private static let columns = [
+        ColumnFixture(id: "next", title: "Next", cardNames: ["pricing", "checklist", "footer", "research"]),
+        ColumnFixture(id: "doing", title: "Doing", cardNames: ["homepage", "keyboard", "licenses"]),
+        ColumnFixture(id: "done", title: "Done", cardNames: ["signup", "buttons"])
+    ]
+
+    private static let cardLabels = [
+        "pricing": "Clarify the pricing comparison, You · High priority, Choose the comparison criteria",
+        "checklist": "Draft the launch checklist, Agent · Medium priority, Turn the agreed scope into a checklist",
+        "footer": "Review footer navigation, Unassigned · Unset priority, No next action yet",
+        "research": "Organize the research notes, Agent · Low priority, Group notes by reader question",
+        "homepage": "Review homepage hierarchy, You · High priority, Choose the preferred heading order",
+        "keyboard": "Check keyboard navigation, Agent · High priority, Complete the navigation pass",
+        "licenses": "Confirm illustration licenses, You · Medium priority, No next action yet, Blocked: Waiting for the license receipt",
+        "signup": "Simplify the signup introduction, Agent · Medium priority, Introduction updated",
+        "buttons": "Replace unclear button labels, You · High priority, No next action yet"
+    ]
+
+    private static func isSidebar(_ scroll: Snapshot) -> Bool {
+        guard isUnnamedDisabled(scroll, type: .scrollView), scroll.children.count == 1 else { return false }
+        let outline = scroll.children[0]
+        guard outline.elementType == .outline, outline.label == "Workspaces and Projects",
+              outline.identifier.isEmpty, outline.isEnabled, outline.children.count == 9 else { return false }
+        let rows = outline.children
+        guard rows.prefix(8).allSatisfy({ $0.elementType == .outlineRow && $0.children.count == 1
+            && $0.children[0].elementType == .cell }),
+              rows[8].elementType == .tableColumn, rows[8].identifier == "ListColumn" else { return false }
+        let cells = rows.prefix(8).map { $0.children[0] }
+        guard isEmptyHeaderCell(cells[0]), isEmptyHeaderCell(cells[5]),
+              cells[1].children.count == 2, isText(cells[1].children[0], text: "Workspace"),
+              isPopup(cells[1].children[1], id: "board.workspace", label: "Workspace", value: "Studio Workspace"),
+              cells[2].children.count == 1, isUnnamedDisabledGroup(cells[2].children[0]),
+              cells[2].children[0].children.count == 1,
+              isLeafHeading(cells[2].children[0].children[0], label: "Projects"),
+              cells[3].children.count == 1,
+              cells[3].children[0].identifier == "board.project.demo-project",
+              isText(cells[3].children[0], text: "Atlas website"),
+              cells[4].children.count == 1, isButton(cells[4].children[0], id: "", label: "New Project…"),
+              cells[6].children.count == 1, isText(cells[6].children[0], text: "Demo data"),
+              cells[7].children.count == 1,
+              isButton(cells[7].children[0], id: "session.sign-out", label: "Sign Out") else { return false }
+        return true
+    }
+
+    private static func isDetail(_ child: Snapshot) -> Bool {
+        guard child.elementType == .group, child.identifier.isEmpty, child.label == "Project board contents",
+              child.isEnabled, child.children.count == 10 else { return false }
+        let nodes = child.children
+        guard nodes[0].elementType == .group, nodes[0].label == "Project overview",
+              nodes[0].identifier.isEmpty, nodes[0].children.count == 2,
+              isLeafHeading(nodes[0].children[0], label: "Atlas website"),
+              isText(nodes[0].children[1], text: "Prepare a clear, accessible launch experience."),
+              isText(nodes[1], text: "Next actor"),
+              isPopup(nodes[2], id: "board.filter.actor", label: "Next actor", value: "All actors"),
+              isText(nodes[3], text: "Priority"),
+              isPopup(nodes[4], id: "board.filter.priority", label: "Priority", value: "All priorities"),
+              isText(nodes[5], text: "Blocked"),
+              isPopup(nodes[6], id: "board.filter.blocked", label: "Blocked", value: "All"),
+              nodes[7].elementType == .checkBox, nodes[7].label == "Include archived",
+              nodes[7].isEnabled, isZeroValue(nodes[7]),
+              isText(nodes[8], text: "9 of 9 Cards"),
+              isUnnamedDisabled(nodes[9], type: .scrollView), nodes[9].children.count == 1 else { return false }
+        let split = nodes[9].children[0]
+        guard split.elementType == .splitGroup, split.children.count == 5,
+              split.children[1].elementType == .splitter, split.children[3].elementType == .splitter
+        else { return false }
+        for (index, column) in columns.enumerated() {
+            let host = split.children[index * 2]
+            guard isUnnamedDisabledGroup(host), host.children.count == 1,
+                  isColumn(host.children[0], fixture: column) else { return false }
+        }
+        return true
+    }
+
+    private static func isColumn(_ child: Snapshot, fixture: ColumnFixture) -> Bool {
+        guard child.elementType == .group, child.identifier == "board.column." + fixture.id,
+              child.label == fixture.label, child.isEnabled, child.children.count == 2,
+              isLeafHeading(child.children[0], label: fixture.label),
+              isUnnamedDisabled(child.children[1], type: .scrollView),
+              child.children[1].children.count == 1 else { return false }
+        let outline = child.children[1].children[0]
+        guard outline.elementType == .outline, outline.label == fixture.title + " Cards",
+              outline.identifier.isEmpty, outline.isEnabled,
+              outline.children.count == fixture.cardNames.count + 1 else { return false }
+        for (index, name) in fixture.cardNames.enumerated() {
+            let row = outline.children[index]
+            guard row.elementType == .outlineRow, row.children.count == 1,
+                  row.children[0].elementType == .cell, row.children[0].children.count == 1,
+                  let label = cardLabels[name],
+                  isButton(row.children[0].children[0], id: "board.card.demo-card-" + name, label: label)
+            else { return false }
+        }
+        let last = outline.children[fixture.cardNames.count]
+        return last.elementType == .tableColumn && last.identifier == "ListColumn"
+    }
+
+    private static func isEmptyHeaderCell(_ cell: Snapshot) -> Bool {
+        cell.children.count == 1 && isUnnamedDisabledGroup(cell.children[0])
+            && cell.children[0].children.isEmpty
+    }
+
+    private static func isPopup(_ node: Snapshot, id: String, label: String, value: String) -> Bool {
+        node.elementType == .popUpButton && node.identifier == id && node.label == label
+            && node.isEnabled && (node.value as? String) == value && node.children.isEmpty
+    }
+
+    private static func isButton(_ node: Snapshot, id: String, label: String) -> Bool {
+        node.elementType == .button && node.identifier == id && node.label == label
+            && node.isEnabled && node.children.isEmpty
+    }
+
+    private static func isLeafHeading(_ node: Snapshot, label: String) -> Bool {
+        node.elementType == .staticText && node.identifier.isEmpty && node.label == label
+            && node.isEnabled && hasNoValue(node) && node.children.isEmpty
+    }
+
+    private static func isText(_ node: Snapshot, text: String) -> Bool {
+        guard node.elementType == .staticText, node.label == text || (node.value as? String) == text else { return false }
+        // Text selection can produce one disabled static-text host around the same enabled text.
+        return node.children.isEmpty ? node.isEnabled
+            : !node.isEnabled && node.children.count == 1 && node.children[0].isEnabled
+                && node.children[0].children.isEmpty && isText(node.children[0], text: text)
+    }
+
+    private static func isUnnamedDisabledGroup(_ node: Snapshot) -> Bool {
+        isUnnamedDisabled(node, type: .group)
+    }
+
+    private static func isUnnamedDisabled(_ node: Snapshot, type: XCUIElement.ElementType) -> Bool {
+        node.elementType == type && !node.isEnabled && node.identifier.isEmpty
+            && node.label.isEmpty && node.title.isEmpty && hasNoValue(node)
+    }
+
+    private static func hasNoValue(_ node: Snapshot) -> Bool {
+        node.value == nil || (node.value as? String)?.isEmpty == true
+    }
+
+    private static func isZeroValue(_ node: Snapshot) -> Bool {
+        (node.value as? String) == "0" || (node.value as? NSNumber) == NSNumber(value: 0)
+    }
+
+    private static func sameWrapper(_ node: Snapshot, as wrapper: Snapshot) -> Bool {
+        isUnnamedDisabledGroup(node) && node.frame == wrapper.frame && node.children.count == 1
+            && node.children[0].elementType == wrapper.children[0].elementType
+            && node.children[0].identifier == wrapper.children[0].identifier
+            && node.children[0].label == wrapper.children[0].label
+    }
+
+    private static func descendants(of node: Snapshot) -> [Snapshot] {
+        node.children.flatMap { [$0] + descendants(of: $0) }
+    }
+}
