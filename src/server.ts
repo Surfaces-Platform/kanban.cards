@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { BRAND_LOCKUP_ASSETS, renderProductName } from "./brand";
 import fs from "node:fs/promises";
 import { createServer } from "node:http";
 import { isIP } from "node:net";
@@ -141,7 +142,7 @@ const FALLBACK_INDEX_HTML = `<!doctype html>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <div id="app"><main class="centered-view"><strong>kanban.cards</strong><p>Opening your projects…</p></main></div>
+  <div id="app"><main class="centered-view">${renderProductName("strong")}<p>Opening your projects…</p></main></div>
   <div class="toast-region" id="toast-region" role="status" aria-live="polite" aria-atomic="true"></div>
   <script src="app.js"></script>
 </body>
@@ -578,6 +579,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
   app.get("/styles.css", sendStaticFile(staticDir, "public/styles.css", "text/css; charset=utf-8"));
   app.get("/robots.txt", sendStaticFile(staticDir, "public/robots.txt", "text/plain; charset=utf-8"));
   app.get("/favicon.ico", (_req, res) => res.status(204).end());
+  for (const [route, asset] of BRAND_LOCKUP_ASSETS) app.get(route, sendStaticFile(staticDir, asset, "image/svg+xml; charset=utf-8"));
 
   app.use("/api/projects", (req, _res, next) => {
     void (async () => {
@@ -1130,7 +1132,7 @@ function authHostSurfaceAllows(req: Request): boolean {
   if (req.path.startsWith("/api/passkeys/")) return true;
   if (req.path.startsWith("/api/native-auth/")) return true;
   if ((req.method === "GET" || req.method === "HEAD") && req.path === "/.well-known/apple-app-site-association") return true;
-  return (req.method === "GET" || req.method === "HEAD") && new Set(["/sign-in", "/sign-up", "/app.js", "/judgmentkit.css", "/styles.css", "/robots.txt", "/favicon.ico", "/api/session"]).has(req.path);
+  return (req.method === "GET" || req.method === "HEAD") && new Set(["/sign-in", "/sign-up", "/app.js", "/judgmentkit.css", "/styles.css", "/robots.txt", "/favicon.ico", ...BRAND_LOCKUP_ASSETS.map(([route]) => route), "/api/session"]).has(req.path);
 }
 
 function validateHostFamilies(families: readonly HostFamily[]): void {

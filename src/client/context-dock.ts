@@ -1,3 +1,4 @@
+import { renderProductName } from "../brand";
 import { renderCardMarkdown } from "./markdown";
 import { startRegistration, startAuthentication, type PublicKeyCredentialCreationOptionsJSON, type PublicKeyCredentialRequestOptionsJSON } from "@simplewebauthn/browser";
 
@@ -615,7 +616,7 @@ async function performPasskeyCeremony(form: HTMLFormElement): Promise<void> {
 }
 
 function renderRecoveryCode(): string {
-  return `<section class="access-card jk-panel" aria-labelledby="recovery-title"><p class="product-name">kanban.cards</p><h1 id="recovery-title" tabindex="-1">Save your recovery code</h1><p>Use this code if you lose your passkeys. Store it somewhere private, such as your password manager. It is shown once.</p><code class="recovery-code" id="recovery-code">${escapeHtml(recoveryCode)}</code><div class="jk-actions">${renderButton("Copy code", "copy-recovery-code")}${renderButton("Download code", "download-recovery-code")}</div>${renderButton("I saved my recovery code", "continue-after-recovery", { priority: "primary" })}</section>`;
+  return `<section class="access-card jk-panel" aria-labelledby="recovery-title">${renderProductName()}<h1 id="recovery-title" tabindex="-1">Save your recovery code</h1><p>Use this code if you lose your passkeys. Store it somewhere private, such as your password manager. It is shown once.</p><code class="recovery-code" id="recovery-code">${escapeHtml(recoveryCode)}</code><div class="jk-actions">${renderButton("Copy code", "copy-recovery-code")}${renderButton("Download code", "download-recovery-code")}</div>${renderButton("I saved my recovery code", "continue-after-recovery", { priority: "primary" })}</section>`;
 }
 
 function safeWorkspaceHandoffUrl(value: unknown, workspaceUrl: string): string | null {
@@ -935,11 +936,11 @@ function showConfirmation(title: string, message: string, uiState?: Confirmation
 }
 
 function renderLoading(): string {
-  return `<main class="centered-view"><strong>kanban.cards</strong><p class="quiet" role="status">Opening your workspace…</p></main>`;
+  return `<main class="centered-view">${renderProductName("strong")}<p class="quiet" role="status">Opening your workspace…</p></main>`;
 }
 
 function renderSignOutProgress(): string {
-  return `<main class="centered-view"><strong>kanban.cards</strong><p class="quiet" role="status">Finishing sign out…</p></main>`;
+  return `<main class="centered-view">${renderProductName("strong")}<p class="quiet" role="status">Finishing sign out…</p></main>`;
 }
 
 function renderSignIn(): string {
@@ -954,21 +955,21 @@ function renderSignIn(): string {
   if (accessContext !== "local") {
     if (accessContext === "auth") {
       if (recoveryCode) return `<main class="access-view">${renderRecoveryCode()}</main>`;
-      if (!authIntent) return `<main class="access-view"><section class="access-card jk-panel"><p class="product-name">kanban.cards</p><h1>Open kanban.cards to continue</h1><p>Start from your app to create a Workspace or sign in.</p>${renderButton("Continue", "passkey-sign-in", { priority: "primary", disabled: !rootUrl })}</section></main>`;
+      if (!authIntent) return `<main class="access-view"><section class="access-card jk-panel">${renderProductName()}<h1>Open kanban.cards to continue</h1><p>Start from your app to create a Workspace or sign in.</p>${renderButton("Continue", "passkey-sign-in", { priority: "primary", disabled: !rootUrl })}</section></main>`;
       const mode = authIntent.mode;
       const heading = mode === "signup" ? "Create your Workspace" : mode === "setup" ? "Set up your passkey" : mode === "recover" ? "Recover your account" : mode === "add" ? "Add a passkey" : mode === "verify" ? "Verify your identity" : "Sign in";
       const workspaceFields = mode === "signup" ? renderField({ id: "signup-workspace-name", label: "Workspace name", control: renderTextInput({ id: "signup-workspace-name", name: "workspaceName", value: passkeyDraft.workspaceName, required: true, autofocus: true }) }) + renderField({ id: "signup-workspace-slug", label: "Workspace address", control: renderTextInput({ id: "signup-workspace-slug", name: "workspaceSlug", value: passkeyDraft.workspaceSlug, required: true, placeholder: "your-workspace" }), hint: "Lowercase letters, numbers, and hyphens." }) + renderField({ id: "signup-display-name", label: "Your name (optional)", control: renderTextInput({ id: "signup-display-name", name: "displayName", value: passkeyDraft.displayName, autocomplete: "name" }) }) : "";
       const secretField = mode === "setup" || mode === "recover" ? renderField({ id: "passkey-access-code", label: mode === "setup" ? "Setup token" : "Recovery code", control: renderTextInput({ id: "passkey-access-code", name: mode === "setup" ? "setupToken" : "recoveryCode", type: "password", autocomplete: "off", required: true, autofocus: true }) }) : "";
       const registering = ["signup", "setup", "recover", "add"].includes(mode);
-      return `<main class="access-view"><section class="access-card jk-panel" aria-labelledby="access-title"><p class="product-name">kanban.cards</p><h1 id="access-title">${heading}</h1><p>${registering ? "Use your device or password manager to save a passkey." : "Use your passkey to continue."}</p>${notice}<form data-form="passkey" class="access-form">${workspaceFields}${secretField}<button class="jk-button" data-priority="primary" type="submit"${disabledAttribute()}>${mutationInFlight ? "Waiting for your passkey…" : registering ? "Create passkey" : "Continue with passkey"}</button></form>${renderButton("Back", "passkey-sign-in")}</section></main>`;
+      return `<main class="access-view"><section class="access-card jk-panel" aria-labelledby="access-title">${renderProductName()}<h1 id="access-title">${heading}</h1><p>${registering ? "Use your device or password manager to save a passkey." : "Use your passkey to continue."}</p>${notice}<form data-form="passkey" class="access-form">${workspaceFields}${secretField}<button class="jk-button" data-priority="primary" type="submit"${disabledAttribute()}>${mutationInFlight ? "Waiting for your passkey…" : registering ? "Create passkey" : "Continue with passkey"}</button></form>${renderButton("Back", "passkey-sign-in")}</section></main>`;
     }
     if (accessContext === "root") {
-      if (authNotice?.kind === "signed-out") return `<main class="access-view"><section class="access-card jk-panel" aria-labelledby="access-title"><p class="product-name">kanban.cards</p><h1 id="access-title">Signed out</h1>${renderButton("Continue", "signed-out-continue", { priority: "primary" })}</section></main>`;
-      return `<main class="access-view"><section class="access-card jk-panel" aria-labelledby="access-title"><p class="product-name">kanban.cards</p><h1 id="access-title">Open your Workspace</h1>${notice}<div class="jk-actions">${renderButton("Start free", "start-signup", { priority: "primary", disabled: !loginUrl })}${renderButton("Sign in", "passkey-sign-in", { disabled: !loginUrl })}</div>${renderButton("Recover access", "start-recovery", { disabled: !loginUrl })}${setupAvailable ? renderButton("Set up existing account", "start-setup", { disabled: !loginUrl }) : ""}${authNotice?.kind === "sign-out-incomplete" ? renderButton("Retry sign out", "retry-global-sign-out") : ""}</section></main>`;
+      if (authNotice?.kind === "signed-out") return `<main class="access-view"><section class="access-card jk-panel" aria-labelledby="access-title">${renderProductName()}<h1 id="access-title">Signed out</h1>${renderButton("Continue", "signed-out-continue", { priority: "primary" })}</section></main>`;
+      return `<main class="access-view"><section class="access-card jk-panel" aria-labelledby="access-title">${renderProductName()}<h1 id="access-title">Open your Workspace</h1>${notice}<div class="jk-actions">${renderButton("Start free", "start-signup", { priority: "primary", disabled: !loginUrl })}${renderButton("Sign in", "passkey-sign-in", { disabled: !loginUrl })}</div>${renderButton("Recover access", "start-recovery", { disabled: !loginUrl })}${setupAvailable ? renderButton("Set up existing account", "start-setup", { disabled: !loginUrl }) : ""}${authNotice?.kind === "sign-out-incomplete" ? renderButton("Retry sign out", "retry-global-sign-out") : ""}</section></main>`;
     }
-    return `<main class="access-view"><section class="access-card jk-panel"><p class="product-name">kanban.cards</p><h1>Sign in</h1>${notice}${renderButton("Continue", "passkey-sign-in", { priority: "primary", disabled: !rootUrl })}${authNotice?.kind === "sign-out-incomplete" ? renderButton("Retry sign out", "retry-global-sign-out") : ""}</section></main>`;
+    return `<main class="access-view"><section class="access-card jk-panel">${renderProductName()}<h1>Sign in</h1>${notice}${renderButton("Continue", "passkey-sign-in", { priority: "primary", disabled: !rootUrl })}${authNotice?.kind === "sign-out-incomplete" ? renderButton("Retry sign out", "retry-global-sign-out") : ""}</section></main>`;
   }
-  return `<main class="access-view"><section class="access-card jk-panel" aria-labelledby="access-title"><p class="product-name">kanban.cards</p><div><p class="eyebrow">Local workspace</p><h1 id="access-title">Open your workspace</h1><p class="access-description">Use the local owner key to open this development workspace.</p></div>${notice}<form data-form="sign-in" class="access-form" novalidate>${renderField({
+  return `<main class="access-view"><section class="access-card jk-panel" aria-labelledby="access-title">${renderProductName()}<div><p class="eyebrow">Local workspace</p><h1 id="access-title">Open your workspace</h1><p class="access-description">Use the local owner key to open this development workspace.</p></div>${notice}<form data-form="sign-in" class="access-form" novalidate>${renderField({
     id: "owner-key",
     label: "Owner key",
     control: renderTextInput({
@@ -1003,19 +1004,19 @@ function renderWorkspaceRoute(): string {
       control: renderTextInput({ id: "workspace-slug", name: "slug", required: true, placeholder: "example" }),
       hint: "Use lowercase letters, numbers, and hyphens."
     })}<button class="jk-button" data-priority="primary" type="submit"${disabledAttribute()}>${mutationKind === "workspace" ? "Creating…" : "Create Workspace"}</button></form>`;
-  return `<main class="access-view"><section class="access-card workspace-route-card jk-panel" aria-labelledby="workspace-route-title"><p class="product-name">kanban.cards</p>${chooser}${failure}<div class="workspace-route-footer"><span>${escapeHtml(ownerName())}</span>${renderButton("Manage access", "manage-access")}${renderButton("Sign out", "sign-out")}</div></section></main>`;
+  return `<main class="access-view"><section class="access-card workspace-route-card jk-panel" aria-labelledby="workspace-route-title">${renderProductName()}${chooser}${failure}<div class="workspace-route-footer"><span>${escapeHtml(ownerName())}</span>${renderButton("Manage access", "manage-access")}${renderButton("Sign out", "sign-out")}</div></section></main>`;
 }
 
 function renderHeader(): string {
   const name = ownerName();
   const editingProject = projectEditorMode !== null || addColumnPreparing || addColumnCommitted || addColumnDraft !== null;
-  return `<header class="app-header"><div class="header-primary"><span class="product-name">kanban.cards</span>${renderProjectContext()}</div><div class="profile-menu"><button class="avatar-button" type="button" data-action="toggle-account-panel" aria-label="${accountPanelOpen ? "Close" : "Open"} account panel" aria-expanded="${accountPanelOpen ? "true" : "false"}" aria-controls="account-panel"${disabledAttribute(editingProject)}><span aria-hidden="true">${escapeHtml(ownerInitial())}</span></button>${accountPanelOpen ? `<section id="account-panel" class="menu-panel account-panel" aria-labelledby="account-name"><strong id="account-name">${escapeHtml(name)}</strong>${accessContext === "workspace" ? renderButton("Agent connections", "manage-agents", { disabled: editingProject }) : ""}${accessContext !== "local" ? renderButton("Manage access", "manage-access", { disabled: editingProject }) : ""}${renderButton("Sign out", "sign-out", { disabled: editingProject })}</section>` : ""}</div></header>`;
+  return `<header class="app-header"><div class="header-primary">${renderProductName("span")}${renderProjectContext()}</div><div class="profile-menu"><button class="avatar-button" type="button" data-action="toggle-account-panel" aria-label="${accountPanelOpen ? "Close" : "Open"} account panel" aria-expanded="${accountPanelOpen ? "true" : "false"}" aria-controls="account-panel"${disabledAttribute(editingProject)}><span aria-hidden="true">${escapeHtml(ownerInitial())}</span></button>${accountPanelOpen ? `<section id="account-panel" class="menu-panel account-panel" aria-labelledby="account-name"><strong id="account-name">${escapeHtml(name)}</strong>${accessContext === "workspace" ? renderButton("Agent connections", "manage-agents", { disabled: editingProject }) : ""}${accessContext !== "local" ? renderButton("Manage access", "manage-access", { disabled: editingProject }) : ""}${renderButton("Sign out", "sign-out", { disabled: editingProject })}</section>` : ""}</div></header>`;
 }
 
 function renderAccessSettings(): string {
   const passkeys = accessSettings?.passkeys.map((key) => `<li><strong>Passkey</strong><p class="quiet">Added ${escapeHtml(formatDate(key.createdAt))}${key.lastUsedAt ? ` · Last used ${escapeHtml(formatDate(key.lastUsedAt))}` : ""}</p>${renderButton("Remove passkey", "remove-passkey", { disabled: (accessSettings?.passkeys.length || 0) < 2, data: `data-passkey-id="${escapeHtml(key.id)}"` })}</li>`).join("") || "<li>No passkeys found.</li>";
   const sessions = accessSettings?.sessions.map((item) => `<li><strong>${item.current ? "This browser" : "Browser session"}</strong><p class="quiet">Expires ${escapeHtml(formatDate(item.expiresAt))}</p>${item.current ? "" : renderButton("End session", "end-session", { data: `data-session-id="${escapeHtml(item.id)}"` })}</li>`).join("") || "<li>No other browser sessions.</li>";
-  return `<main class="access-view">${recoveryCode ? renderRecoveryCode() : `<section class="access-card jk-panel"><p class="product-name">kanban.cards</p><h1>Manage access</h1>${renderStatus(accessStatus, "access-settings-status")}<h2>Passkeys</h2><ul class="workspace-choices">${passkeys}</ul>${renderButton("Add a passkey", "add-passkey", { priority: "primary" })}<h2>Recovery</h2><p>Replacing your recovery code makes the previous code unusable.</p>${renderButton("Replace recovery code", "replace-recovery-code")}<h2>Browser sessions</h2><ul class="workspace-choices">${sessions}</ul><div class="jk-actions">${renderButton("Sign out everywhere", "sign-out-everywhere")}${renderButton("Back to Workspaces", "close-access")}</div></section>`}</main>`;
+  return `<main class="access-view">${recoveryCode ? renderRecoveryCode() : `<section class="access-card jk-panel">${renderProductName()}<h1>Manage access</h1>${renderStatus(accessStatus, "access-settings-status")}<h2>Passkeys</h2><ul class="workspace-choices">${passkeys}</ul>${renderButton("Add a passkey", "add-passkey", { priority: "primary" })}<h2>Recovery</h2><p>Replacing your recovery code makes the previous code unusable.</p>${renderButton("Replace recovery code", "replace-recovery-code")}<h2>Browser sessions</h2><ul class="workspace-choices">${sessions}</ul><div class="jk-actions">${renderButton("Sign out everywhere", "sign-out-everywhere")}${renderButton("Back to Workspaces", "close-access")}</div></section>`}</main>`;
 }
 
 async function loadAccessSettings(): Promise<void> {

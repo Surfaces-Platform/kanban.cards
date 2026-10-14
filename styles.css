@@ -2189,3 +2189,46 @@ body[data-state="empty-workspace"] .workbench {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+
+/* Canonical brand artwork scales as one complete lockup. */
+.product-name {
+  display: block;
+  inline-size: min(15rem, 100%);
+}
+
+.product-lockup,
+.product-lockup img {
+  display: block;
+  inline-size: 100%;
+}
+
+.product-lockup img {
+  block-size: auto;
+  object-fit: contain;
+}
+
+.header-primary .product-name {
+  inline-size: 11.5rem;
+}
+
+@media (max-width: 48rem) {
+  .header-primary .product-name {
+    inline-size: 10rem;
+  }
+}
+
+@media (max-width: 24rem) {
+  .header-primary {
+    flex-wrap: wrap;
+  }
+
+  .header-primary .header-project-switcher {
+    flex-basis: 100%;
+    max-inline-size: none;
+  }
+
+  .app-header .profile-menu {
+    align-self: start;
+  }
+}
