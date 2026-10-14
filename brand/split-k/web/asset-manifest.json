@@ -1,0 +1,159 @@
+{
+  "version": 1,
+  "sources": {
+    "brand/split-k/applied/favicon.svg": "e6e5736981b6dc208751427e9c4319e81a154a2e74779c770048b8fb6accd9a2",
+    "brand/split-k/applied/favicon-dark.svg": "535af67ac7a42909622b9e2e647550795e29c36bf516020177e495c21cca1193",
+    "brand/split-k/applied/favicon.ico": "9ac74f5edd9d39602648bf682a851e239848c393e46711e4b8a556cde16951e0",
+    "brand/split-k/applied/apple-touch-icon.png": "e3e9c67dc344aa87400f6f7570bc678de520aec1885368e87f80c1f8cc61f9ba",
+    "brand/split-k/favicon/safari-pinned-tab.svg": "f5e3ec7da14fecd8871be2803382c570c65f9ec53c314db643c287ec05c4e4d8",
+    "brand/split-k/app-icons/app-icon-nickel.svg": "fbe1cd869494d88b72bdb0558c4d94622912b2c7863df02c6b1ef30a675235eb",
+    "brand/split-k/lockups/horizontal.svg": "23ce8626001002bb5830cd30c97e61321e4e122346efe405a0d4abccda6145c8"
+  },
+  "faviconStyleHash": "sha256-vAvc8NQnRBfjEoMkKlGpeqUJSo0t6xLLIZVkJl9M6kE=",
+  "assets": [
+    {
+      "route": "/favicon-light.svg",
+      "source": "brand/split-k/web/favicon-light.svg",
+      "contentType": "image/svg+xml",
+      "sha256": "e6e5736981b6dc208751427e9c4319e81a154a2e74779c770048b8fb6accd9a2",
+      "derivedFrom": [
+        "brand/split-k/applied/favicon.svg"
+      ]
+    },
+    {
+      "route": "/favicon-dark.svg",
+      "source": "brand/split-k/web/favicon-dark.svg",
+      "contentType": "image/svg+xml",
+      "sha256": "535af67ac7a42909622b9e2e647550795e29c36bf516020177e495c21cca1193",
+      "derivedFrom": [
+        "brand/split-k/applied/favicon-dark.svg"
+      ]
+    },
+    {
+      "route": "/favicon.ico",
+      "source": "brand/split-k/web/favicon.ico",
+      "contentType": "image/x-icon",
+      "sha256": "9ac74f5edd9d39602648bf682a851e239848c393e46711e4b8a556cde16951e0",
+      "derivedFrom": [
+        "brand/split-k/applied/favicon.ico"
+      ]
+    },
+    {
+      "route": "/apple-touch-icon.png",
+      "source": "brand/split-k/web/apple-touch-icon.png",
+      "contentType": "image/png",
+      "sha256": "e3e9c67dc344aa87400f6f7570bc678de520aec1885368e87f80c1f8cc61f9ba",
+      "derivedFrom": [
+        "brand/split-k/applied/apple-touch-icon.png"
+      ],
+      "dimensions": [
+        180,
+        180
+      ]
+    },
+    {
+      "route": "/safari-pinned-tab.svg",
+      "source": "brand/split-k/web/safari-pinned-tab.svg",
+      "contentType": "image/svg+xml",
+      "sha256": "f5e3ec7da14fecd8871be2803382c570c65f9ec53c314db643c287ec05c4e4d8",
+      "derivedFrom": [
+        "brand/split-k/favicon/safari-pinned-tab.svg"
+      ]
+    },
+    {
+      "route": "/favicon.svg",
+      "source": "brand/split-k/web/favicon.svg",
+      "contentType": "image/svg+xml",
+      "sha256": "ff64c6a7647d9f6ef4040681b0b53a86bc588c57f8ea328e07540a3a2f5437ae",
+      "derivedFrom": [
+        "brand/split-k/applied/favicon.svg",
+        "brand/split-k/applied/favicon-dark.svg"
+      ]
+    },
+    {
+      "route": "/app-icon-192.png",
+      "source": "brand/split-k/web/app-icon-192.png",
+      "contentType": "image/png",
+      "sha256": "4f4a307fc173f7c73ba40d05c0aa06632120a1c22d19feef6c7e96c7246bcf56",
+      "derivedFrom": [
+        "brand/split-k/app-icons/app-icon-nickel.svg"
+      ],
+      "dimensions": [
+        192,
+        192
+      ]
+    },
+    {
+      "route": "/maskable-192.png",
+      "source": "brand/split-k/web/maskable-192.png",
+      "contentType": "image/png",
+      "sha256": "4f4a307fc173f7c73ba40d05c0aa06632120a1c22d19feef6c7e96c7246bcf56",
+      "derivedFrom": [
+        "brand/split-k/app-icons/app-icon-nickel.svg"
+      ],
+      "dimensions": [
+        192,
+        192
+      ]
+    },
+    {
+      "route": "/app-icon-512.png",
+      "source": "brand/split-k/web/app-icon-512.png",
+      "contentType": "image/png",
+      "sha256": "522772c849c2a67a5b200f5f5c23bd3ed236726592649cf77d93536b2cdd18b4",
+      "derivedFrom": [
+        "brand/split-k/app-icons/app-icon-nickel.svg"
+      ],
+      "dimensions": [
+        512,
+        512
+      ]
+    },
+    {
+      "route": "/maskable-512.png",
+      "source": "brand/split-k/web/maskable-512.png",
+      "contentType": "image/png",
+      "sha256": "522772c849c2a67a5b200f5f5c23bd3ed236726592649cf77d93536b2cdd18b4",
+      "derivedFrom": [
+        "brand/split-k/app-icons/app-icon-nickel.svg"
+      ],
+      "dimensions": [
+        512,
+        512
+      ]
+    },
+    {
+      "route": "/social-brand-v1.svg",
+      "source": "brand/split-k/web/social-brand-v1.svg",
+      "contentType": "image/svg+xml",
+      "sha256": "9841a1f2f2b2d1cf33891c914e5649474675da6ddd72c5158510fc689c264f58",
+      "derivedFrom": [
+        "brand/split-k/lockups/horizontal.svg"
+      ],
+      "dimensions": [
+        1200,
+        630
+      ]
+    },
+    {
+      "route": "/social-brand-v1.png",
+      "source": "brand/split-k/web/social-brand-v1.png",
+      "contentType": "image/png",
+      "sha256": "749a3a1b3293b86074b3725336f0270310e5ac30047361fb25264852165d97f1",
+      "derivedFrom": [
+        "brand/split-k/lockups/horizontal.svg"
+      ],
+      "dimensions": [
+        1200,
+        630
+      ]
+    },
+    {
+      "route": "/site.webmanifest",
+      "source": "brand/split-k/web/site.webmanifest",
+      "contentType": "application/manifest+json",
+      "sha256": "668780c905ab6edfd4c46b1fc7c8084739b22dde6c046cb88687812891efd8e9",
+      "derivedFrom": []
+    }
+  ]
+}
