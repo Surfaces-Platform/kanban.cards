@@ -1,13 +1,13 @@
 # Native owner authentication
 
-An iPhone app can use an existing owner's passkey to open the same Workspaces and board data as the browser. Native sign-in uses AuthenticationServices and a separate owner bearer session. Initial enrollment, recovery, and credential management remain browser operations.
+An iPhone or macOS app can use an existing owner's passkey to open the same Workspaces and board data as the browser. Native sign-in uses AuthenticationServices and a separate owner bearer session. Initial enrollment, recovery, and credential management remain browser operations.
 
 ## Configure app association
 
-Set the server's `KANBAN_CARDS_IOS_APP_IDS` to the exact `application-identifier` from each authorized signed app. The verified iPhone development app uses:
+Set the server's `KANBAN_CARDS_IOS_APP_IDS` to the exact `application-identifier` from each authorized signed app. The verified signed development apps use `2468833C5L.cards.kanban.iphone` for iPhone and `2468833C5L.cards.kanban.macos` for macOS. The existing setting accepts identifiers for both platforms. Preserve every existing app identifier when adding the Mac:
 
 ```text
-KANBAN_CARDS_IOS_APP_IDS=2468833C5L.cards.kanban.iphone
+KANBAN_CARDS_IOS_APP_IDS=2468833C5L.cards.kanban.iphone,2468833C5L.cards.kanban.macos
 ```
 
 Apple defines the value as `<Application Identifier Prefix>.<Bundle Identifier>`. Use the Team ID only when it equals the signed app's prefix. The server accepts a ten-character uppercase alphanumeric prefix and at least two dot-separated bundle segments. Wildcards and duplicate identifiers fail startup.
@@ -15,7 +15,7 @@ Apple defines the value as `<Application Identifier Prefix>.<Bundle Identifier>`
 The signed app must include the Associated Domains entitlement `webcredentials:auth.kanban.cards`. When the App ID setting is nonempty, the auth host serves `/.well-known/apple-app-site-association` with the configured identifiers:
 
 ```json
-{"webcredentials":{"apps":["2468833C5L.cards.kanban.iphone"]}}
+{"webcredentials":{"apps":["2468833C5L.cards.kanban.iphone","2468833C5L.cards.kanban.macos"]}}
 ```
 
 An empty setting disables that route. The file must be available over HTTPS with a valid certificate and no redirect. Check the public response after release:
