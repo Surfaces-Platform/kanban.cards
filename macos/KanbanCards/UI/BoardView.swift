@@ -1,0 +1,511 @@
+import SwiftUI
+
+struct BoardView: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.openWindow) private var openWindow
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var workspaceID: String?
+    @State private var projectID: String?
+    @State private var creatingProject = false
+    @State private var newProjectPresentation = UUID()
+    @State private var openedExamples = false
+    @State private var refreshing = false
+    @State private var navigationError: String?
+
+    private var workspace: Workspace? { model.workspaces.first { $0.id == workspaceID } }
+
+    var body: some View {
+        Group {
+            if model.restoring {
+                ProgressView("Opening kanban.cards")
+            } else if model.signOutPending {
+                ContentUnavailableView {
+                    Label("Sign-out pending", systemImage: "person.crop.circle")
+                } description: {
+                    Text("Retry to confirm that this session has ended on the server.")
+                } actions: {
+                    Button("Retry sign-out") { Task { await model.signOut() } }
+                        .disabled(model.endingSession)
+                }
+            } else if model.signedIn {
+                NavigationSplitView {
+                    sidebar.accessibilityElement(children: .contain).accessibilityLabel("Workspaces and Projects")
+                } detail: {
+                    if let workspace, let projectID {
+                        ProjectBoard(workspace: workspace, projectID: projectID, parentSheet: creatingProject, refreshInventory: { await refreshNavigation() })
+                            .id("\(model.sessionID):\(workspace.id):\(projectID)")
+                            .accessibilityElement(children: .contain).accessibilityLabel("Project board contents")
+                    } else {
+                        ContentUnavailableView("Select a Project", systemImage: "folder",
+                            description: Text("Choose a Project to open its board."))
+                    }
+                }
+            } else {
+                Form {
+                    Section {
+                        Text("Open your Projects and keep work moving.")
+                        Button("Continue with passkey", systemImage: "person.badge.key") {
+                            Task { await model.signIn() }
+                        }
+                        .accessibilityIdentifier("session.sign-in")
+                        .disabled(model.signingIn)
+                        if model.signingIn { ProgressView("Signing in") }
+                    } footer: {
+                        Text("Use a passkey for your existing kanban.cards account.")
+                    }
+                }
+                .formStyle(.grouped)
+                .frame(maxWidth: 560)
+            }
+        }
+        .frame(minWidth: 760, minHeight: 560)
+        .background { NativeWindowAccessibility(label: "Project board").frame(width: 1, height: 1).accessibilityHidden(true) }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Project board")
+        .accessibilityIdentifier("board.window")
+        .task { await model.restore(); selectWorkspace() }
+        .onChange(of: model.workspaces) { _, _ in selectWorkspace() }
+        .onChange(of: model.signedIn) { _, signedIn in
+            if !signedIn { workspaceID = nil; projectID = nil; creatingProject = false }
+        }
+        .onChange(of: workspaceID) { _, _ in projectID = nil }
+        .task(id: workspaceID) { await loadProjects() }
+        .sheet(isPresented: $creatingProject) {
+            if let workspace, model.signedIn {
+                ProjectEditor(workspace: workspace, onRefreshFailure: { navigationError = $0 }).environment(model).id(newProjectPresentation)
+            }
+        }
+        .focusedSceneValue(\.boardWindowActions, BoardWindowActions(
+            canCreateProject: workspace.map { model.canCreateProject(in: $0) } == true && !creatingProject && !refreshing,
+            canRefresh: model.signedIn && !creatingProject && !refreshing,
+            createProject: {
+                if let workspace, model.canCreateProject(in: workspace), !creatingProject {
+                    newProjectPresentation = UUID(); creatingProject = true
+                }
+            },
+            refresh: { Task { await refreshNavigation() } }))
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { model.validateSession(); Task { await refreshNavigation() } }
+        }
+        .safeAreaInset(edge: .bottom) {
+            if let message = navigationError ?? model.errorMessage {
+                VStack(alignment: .leading) {
+                    Text(message).textSelection(.enabled)
+                    HStack {
+                        if model.signedIn { Button("Retry refresh") { Task { await refreshNavigation() } } }
+                        Button("Dismiss") { navigationError = nil; model.errorMessage = nil }
+                    }
+                }.padding().accessibilityElement(children: .contain)
+            }
+        }
+    }
+
+    private var sidebar: some View {
+        List(selection: $projectID) {
+            Section {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Workspace").font(.caption).foregroundStyle(.primary)
+                    NativePopUpPicker(label: "Workspace", selection: $workspaceID,
+                        options: model.workspaces.map { NativePopUpOption(title: $0.name, value: Optional($0.id)) },
+                        identifier: "board.workspace")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                if model.loadingWorkspaces { ProgressView("Loading Workspaces") }
+                if model.workspaces.isEmpty && !model.loadingWorkspaces {
+                    Text(model.workspaceLoadFailed ? "Workspaces unavailable" : "No Workspaces")
+                    Button("Retry") { Task { await model.refreshWorkspaces() } }
+                }
+            }
+            if let workspace {
+                let projects = model.projects(in: workspace)
+                let activeProjects = projects.filter { $0.archivedAt == nil }
+                Section {
+                    ForEach(activeProjects) { project in
+                        Label(project.name, systemImage: "folder").tag(project.id)
+                            .accessibilityIdentifier("board.project.\(project.id)")
+                    }
+                    if model.projectListLoading(in: workspace) { ProgressView("Loading Projects") }
+                    else if let error = model.projectListError(in: workspace) {
+                        Text("Projects could not be refreshed. \(error)")
+                        Button("Retry Projects") { Task { await loadProjects() } }
+                    } else if activeProjects.isEmpty {
+                        Text(projects.isEmpty ? "No Projects" : "No active Projects")
+                    }
+                    Button("New Project…", systemImage: "plus") { newProjectPresentation = UUID(); creatingProject = true }
+                        .disabled(creatingProject || !model.canCreateProject(in: workspace))
+                } header: {
+                    Text("Projects")
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel("Projects")
+                        .accessibilityAddTraits(.isHeader)
+                }
+                let archived = projects.filter { $0.archivedAt != nil }
+                if !archived.isEmpty {
+                    Section("Archived Projects") {
+                        ForEach(archived) { project in
+                            Label(project.name, systemImage: "archivebox").tag(project.id)
+                        }
+                    }
+                }
+            }
+            Section {
+                if model.isDemo { Text("Demo data").foregroundStyle(.primary) }
+                Button("Sign Out", systemImage: "person.crop.circle") { Task { await model.signOut() } }
+                    .accessibilityIdentifier("session.sign-out")
+            }
+        }
+        .navigationTitle("kanban.cards")
+        .navigationSplitViewColumnWidth(min: 180, ideal: 220, max: 300)
+    }
+
+    private func selectWorkspace() {
+        guard model.signedIn else { return }
+        if !model.workspaces.contains(where: { $0.id == workspaceID }) {
+            workspaceID = model.workspaces.first?.id
+        }
+    }
+
+    private func loadProjects() async {
+        guard let workspace, model.signedIn else { return }
+        let session = model.sessionID
+        do {
+            try await model.loadProjects(in: workspace, includeArchived: true)
+            guard session == model.sessionID, workspaceID == workspace.id else { return }
+            if projectID == nil { projectID = model.projects(in: workspace).first(where: { $0.archivedAt == nil })?.id }
+            #if DEBUG
+            if model.isDemo, !openedExamples, ProcessInfo.processInfo.arguments.contains("--open-example-cards"), let projectID {
+                openedExamples = true
+                if let project = model.project(id: projectID, in: workspace) {
+                    for cardID in ["demo-card-homepage", "demo-card-signup"] {
+                        if let card = project.cards.first(where: { $0.id == cardID }) {
+                            openWindow(id: "card", value: CardWindowID(ownerID: model.ownerID,
+                                workspaceID: workspace.id, projectID: projectID, cardID: card.id))
+                        }
+                    }
+                }
+            }
+            #endif
+        } catch {
+            guard !(error is CancellationError) else { return }
+            navigationError = error.localizedDescription
+            if (error as? APIError)?.isUnauthorized == true { model.handle(error) }
+        }
+    }
+
+    private func refreshNavigation() async {
+        guard model.signedIn, !refreshing else { return }
+        refreshing = true
+        defer { refreshing = false }
+        do {
+            try await model.refreshInventory(workspaceID: workspaceID, projectID: projectID)
+            selectWorkspace()
+            if let workspace, !model.projects(in: workspace).contains(where: { $0.id == projectID }) {
+                projectID = model.projects(in: workspace).first(where: { $0.archivedAt == nil })?.id
+            }
+            navigationError = nil
+        } catch {
+            guard !(error is CancellationError) else { return }
+            navigationError = error.localizedDescription
+        }
+    }
+}
+
+struct ProjectBoard: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.openWindow) private var openWindow
+    @Environment(\.scenePhase) private var scenePhase
+    let workspace: Workspace
+    let projectID: String
+    var parentSheet = false
+    var refreshInventory: () async -> Void = {}
+    @State private var confirmingArchive = false
+    @State private var mutating = false
+    @State private var filter = CardFilter()
+    @State private var selectedCardID: String?
+    @State private var creating = false
+    @State private var cardPresentation = UUID()
+    @State private var projectPresentation = UUID()
+    @State private var editing = false
+    @State private var showingActivity = false
+    @State private var loading = false
+    @State private var loadError: String?
+    private var project: Project? { model.project(id: projectID, in: workspace) }
+    private var hasSheet: Bool { parentSheet || creating || editing || showingActivity || confirmingArchive }
+    private var canEdit: Bool { project != nil && project?.archivedAt == nil && !hasSheet && !mutating && model.canEditProject(id: projectID, in: workspace) }
+
+    var body: some View {
+        Group {
+            if let project {
+                VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(project.name).font(.title).fontWeight(.semibold).accessibilityAddTraits(.isHeader)
+                            if !project.description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                Text(project.description).foregroundStyle(.primary).textSelection(.enabled).lineLimit(2)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityElement(children: .contain)
+                        .accessibilityLabel("Project overview")
+                        if project.archivedAt != nil { Text("Archived Project. Cards are read-only.").foregroundStyle(.secondary) }
+                        else if !model.canEditProject(id: projectID, in: workspace) { Label("Read-only", systemImage: "lock").font(.subheadline) }
+                        if let loadError {
+                            Text(loadError).foregroundStyle(.secondary)
+                            Button("Retry refresh") { Task { await refresh() } }
+                        }
+                        if loading { ProgressView("Refreshing Project") }
+                        if mutating { ProgressView("Updating Project") }
+                        filters
+                        Text("\(project.cards.filter(filter.includes).count) of \(project.cards.filter { filter.includesArchived || $0.archivedAt == nil }.count) Cards")
+                            .font(.caption).foregroundStyle(.primary)
+                    }.padding([.horizontal, .top])
+                    if project.columns.isEmpty {
+                        ContentUnavailableView("No Columns", systemImage: "rectangle.split.3x1")
+                    } else {
+                        ScrollView(.horizontal) {
+                            HSplitView {
+                                ForEach(project.columns.sorted { $0.position < $1.position }) { column in
+                                    BoardColumn(column: column,
+                                        cards: project.cards.filter { $0.columnId == column.id && filter.includes($0) }
+                                            .sorted { $0.position < $1.position },
+                                        filtered: filter.active, selectedCardID: $selectedCardID, open: open)
+                                }
+                            }
+                            .containerRelativeFrame(.horizontal) { width, _ in
+                                max(width, CGFloat(project.columns.count) * 250)
+                            }
+                        }
+                    }
+                }
+                .sheet(isPresented: $creating) {
+                    CardEditor(workspace: workspace, projectID: projectID, card: nil,
+                        onCreated: open, onRefreshFailure: { loadError = $0 }).environment(model).id(cardPresentation)
+                }
+                .sheet(isPresented: $editing) {
+                    ProjectEditor(workspace: workspace, project: project, onRefreshFailure: { loadError = $0 }).environment(model).id(projectPresentation)
+                }
+                .sheet(isPresented: $showingActivity) { ProjectActivity(workspace: workspace, projectID: projectID).environment(model) }
+                .confirmationDialog(project.archivedAt == nil ? "Archive this Project?" : "Restore this Project?", isPresented: $confirmingArchive, titleVisibility: .visible) {
+                    Button(project.archivedAt == nil ? "Archive Project" : "Restore Project", role: project.archivedAt == nil ? .destructive : nil) {
+                        Task { await archiveProject(project) }
+                    }.accessibilityIdentifier(project.archivedAt == nil ? "project.archive-confirm" : "project.restore-confirm")
+                } message: { Text("Cards remain in the Project. Archived Projects are read-only until restored.") }
+            } else if loading {
+                ProgressView("Loading Project")
+            } else {
+                ContentUnavailableView {
+                    Label("Project unavailable", systemImage: "folder")
+                } description: { Text(loadError ?? "Refresh to open this Project.") }
+                actions: { Button("Retry") { Task { await refresh() } } }
+            }
+        }
+        .navigationTitle(project?.name ?? "Project")
+        .navigationSubtitle(workspace.name)
+        .searchable(text: $filter.search, prompt: "Search Cards")
+        .toolbar {
+            ToolbarItem { Button("Activity…", systemImage: "clock") { showingActivity = true }.disabled(project == nil || hasSheet) }
+            ToolbarItem { Button("Refresh", systemImage: "arrow.clockwise") { Task { await refreshInventory() } }.disabled(hasSheet || loading || mutating) }
+            ToolbarItem(placement: .primaryAction) {
+                Button("New Card", systemImage: "plus") { cardPresentation = UUID(); creating = true }
+                    .accessibilityIdentifier("board.new-card")
+                    .disabled(!canEdit || project?.columns.isEmpty == true)
+            }
+        }
+        .focusedSceneValue(\.projectWindowActions, ProjectWindowActions(
+            hasSheet: hasSheet, canEdit: canEdit,
+            canCreateCard: canEdit && project?.columns.isEmpty == false,
+            canShowActivity: project != nil && !hasSheet && !mutating,
+            canArchive: project != nil && !hasSheet && !mutating && model.canEditProject(id: projectID, in: workspace),
+            archived: project?.archivedAt != nil,
+            edit: { if canEdit { projectPresentation = UUID(); editing = true } },
+            createCard: { if canEdit { cardPresentation = UUID(); creating = true } },
+            activity: { if project != nil && !hasSheet { showingActivity = true } },
+            archive: { if project != nil && !hasSheet && !mutating && model.canEditProject(id: projectID, in: workspace) { confirmingArchive = true } }))
+        .task { await refresh() }
+        .onChange(of: project?.id) { _, id in
+            if id == nil { creating = false; editing = false; showingActivity = false; confirmingArchive = false }
+        }
+    }
+
+    private var filters: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 16) {
+                actorFilter
+                priorityFilter
+                blockedFilter
+                archivedFilter
+                clearFilters
+            }
+            .fixedSize(horizontal: true, vertical: false)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 16) {
+                    actorFilter
+                    priorityFilter
+                }
+                HStack(spacing: 16) {
+                    blockedFilter
+                    archivedFilter
+                    clearFilters
+                }
+            }
+            .fixedSize(horizontal: true, vertical: false)
+            VStack(alignment: .leading, spacing: 8) {
+                actorFilter
+                priorityFilter
+                blockedFilter
+                archivedFilter
+                clearFilters
+            }
+            .fixedSize(horizontal: true, vertical: false)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .controlSize(.small)
+    }
+
+    private var actorFilter: some View {
+        LabeledContent("Next actor") {
+            NativePopUpPicker(label: "Next actor", selection: $filter.actor, options: [
+                .init(title: "All actors", value: "all"), .init(title: "You", value: "human"),
+                .init(title: "Agent", value: "agent"), .init(title: "Unassigned", value: "unassigned")
+            ], identifier: "board.filter.actor")
+        }
+    }
+
+    private var priorityFilter: some View {
+        LabeledContent("Priority") {
+            NativePopUpPicker(label: "Priority", selection: $filter.priority,
+                options: [.init(title: "All priorities", value: "all")]
+                    + CardPriority.allCases.map { NativePopUpOption(title: $0.rawValue, value: $0.rawValue) }
+                    + [.init(title: "Unset", value: "unset")], identifier: "board.filter.priority")
+        }
+    }
+
+    private var blockedFilter: some View {
+        LabeledContent("Blocked") {
+            NativePopUpPicker(label: "Blocked", selection: $filter.blocked, options: [
+                .init(title: "All", value: "all"), .init(title: "Blocked", value: "true"),
+                .init(title: "Unblocked", value: "false")
+            ], identifier: "board.filter.blocked")
+        }
+    }
+
+    private var archivedFilter: some View {
+        Toggle("Include archived", isOn: $filter.includesArchived)
+    }
+
+    @ViewBuilder private var clearFilters: some View {
+        if filter.active { Button("Clear") { filter = CardFilter() } }
+    }
+
+    private func open(_ card: Card) {
+        guard model.signedIn else { return }
+        selectedCardID = card.id
+        openWindow(id: "card", value: CardWindowID(ownerID: model.ownerID,
+            workspaceID: workspace.id, projectID: projectID, cardID: card.id))
+    }
+
+    private func refresh() async {
+        loading = true
+        defer { loading = false }
+        do { try await model.loadProject(id: projectID, in: workspace); loadError = nil }
+        catch {
+            guard !(error is CancellationError) else { return }
+            loadError = error.localizedDescription
+            if (error as? APIError)?.isUnauthorized == true { model.handle(error) }
+        }
+    }
+
+    private func archiveProject(_ project: Project) async {
+        mutating = true
+        defer { mutating = false }
+        do {
+            loadError = nil
+            try await model.archiveProject(project, in: workspace, archived: project.archivedAt == nil, onRefreshFailure: { loadError = $0 })
+        } catch {
+            guard !(error is CancellationError) else { return }
+            loadError = model.isConflict(error) ? "The Project changed. Refresh and review it before trying again." : error.localizedDescription
+            if (error as? APIError)?.isUnauthorized == true { model.handle(error) }
+        }
+    }
+}
+
+private struct BoardColumn: View {
+    let column: Column
+    let cards: [Card]
+    let filtered: Bool
+    @Binding var selectedCardID: String?
+    let open: (Card) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text(column.name).font(.headline)
+                Spacer()
+                Text("\(cards.count)").foregroundStyle(.primary)
+            }
+            .padding()
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("\(column.name), \(cards.count) Cards")
+            .accessibilityAddTraits(.isHeader)
+            List(selection: $selectedCardID) {
+                ForEach(cards) { card in
+                    Button { open(card) } label: {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(card.title).font(.headline).lineLimit(2)
+                            Text([card.nextActor?.label ?? "Unassigned", card.priority.map { "\($0.rawValue) priority" } ?? "Unset priority"].joined(separator: " · "))
+                                .font(.caption).foregroundStyle(.secondary)
+                            Text(card.nextAction.isEmpty ? "No next action yet" : card.nextAction)
+                                .font(.callout).foregroundStyle(.secondary).lineLimit(2)
+                            if !card.blockedReason.isEmpty { Label("Blocked: \(card.blockedReason)", systemImage: "exclamationmark.circle").font(.caption).lineLimit(2) }
+                            if card.archivedAt != nil { Label("Archived", systemImage: "archivebox").font(.caption) }
+                        }
+                        .padding(.vertical, 8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .tag(card.id)
+                    .help("Open Card in a window")
+                    .accessibilityIdentifier("board.card.\(card.id)")
+                }
+                if cards.isEmpty { Text(filtered ? "No matching Cards" : "No Cards").foregroundStyle(.secondary) }
+            }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .accessibilityLabel("\(column.name) Cards")
+        }
+        .frame(minWidth: 230, idealWidth: 300, maxWidth: .infinity, maxHeight: .infinity)
+        .background(.background.secondary)
+        .padding(.horizontal, 8)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(column.name), \(cards.count) Cards")
+        .accessibilityIdentifier("board.column.\(column.id)")
+    }
+}
+
+struct ProjectActivity: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+    let workspace: Workspace
+    let projectID: String
+    var cardID: String? = nil
+    var body: some View {
+        NavigationStack {
+            List {
+                let items = (model.project(id: projectID, in: workspace)?.activity ?? [])
+                    .filter { cardID == nil || $0.cardId == cardID }.reversed()
+                ForEach(Array(items)) { item in
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(item.summary)
+                        Text(item.actor.label).font(.caption).foregroundStyle(.secondary)
+                        if let date = ServerTimestamp.date(from: item.createdAt) { Text(date, format: .dateTime).font(.caption).foregroundStyle(.secondary) }
+                    }.padding(.vertical, 4)
+                }
+                if items.isEmpty { ContentUnavailableView("No Activity", systemImage: "clock") }
+            }
+            .navigationTitle("Activity")
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() }.keyboardShortcut(.cancelAction) } }
+        }
+        .frame(minWidth: 460, minHeight: 400)
+    }
+}

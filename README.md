@@ -43,6 +43,8 @@ Use a recovery code once to enroll a replacement passkey. Successful recovery is
 
 The early [native iPhone app](ios/README.md) uses standard Apple components for Projects, Cards, Comments, Activity, filtering, and editing. Existing owners sign in with a passkey. The [setup instructions](ios/README.md) cover simulator use and private device installation; the [verification record](docs/iphone-native-app-verification.md) lists completed checks and remaining acceptance work.
 
+The [native macOS app](macos/README.md) opens a Project board and independent Card windows with standard system controls, native passkey sign-in, and normal owner editing. Its separate bundle, session store, drafts, and Xcode project preserve the iPhone setup.
+
 See the [native authentication contract](docs/native-auth.md) for app association, sign-in requests, session storage, and release verification.
 
 ## Set up the existing owner

@@ -17,11 +17,12 @@
     "check:release-policy": "tsx scripts/check-release-policy.ts",
     "release:preflight": "tsx scripts/release-steady.ts",
     "release:promote": "tsx scripts/release-steady.ts --promote",
-    "check": "npm run typecheck && npm run build && tsx scripts/check-ui-contract.ts && npm run check:native-ui && npm run check:release-policy",
+    "check": "npm run typecheck && npm run build && tsx scripts/check-ui-contract.ts && npm run check:native-ui && npm run check:macos-native-ui && npm run check:release-policy",
     "test": "npm run build && node --import tsx --test tests/*.test.ts",
     "test:browser": "npm run build && playwright test --config playwright.config.ts",
     "auth:setup": "tsx scripts/create-owner-setup.ts",
-    "check:native-ui": "node scripts/check-native-ui-contract.mjs"
+    "check:native-ui": "node scripts/check-native-ui-contract.mjs",
+    "check:macos-native-ui": "node scripts/check-macos-native-ui-contract.mjs"
   },
   "dependencies": {
     "@simplewebauthn/browser": "^14.0.0",

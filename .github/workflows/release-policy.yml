@@ -62,3 +62,41 @@ jobs:
           include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7
+
+  native-macos:
+    runs-on: xcode-27
+    timeout-minutes: 20
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.app/Contents/Developer
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Run native Mac unit tests
+        run: |
+          xcodebuild -project macos/KanbanCards.xcodeproj \
+            -scheme KanbanCards -configuration Debug -destination 'platform=macOS' \
+            -derivedDataPath .local/macos/DerivedData \
+            -resultBundlePath .local/macos/NativeTests.xcresult \
+            -parallel-testing-enabled NO -collect-test-diagnostics never \
+            CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual CODE_SIGNING_ALLOWED=YES \
+            CODE_SIGN_ENTITLEMENTS= -only-testing:KanbanCardsTests test
+
+      - name: Build Mac Release configuration
+        run: |
+          xcodebuild -project macos/KanbanCards.xcodeproj \
+            -scheme KanbanCards -configuration Release -destination 'platform=macOS' \
+            -derivedDataPath .local/macos/DerivedData \
+            CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual CODE_SIGNING_ALLOWED=YES \
+            CODE_SIGN_ENTITLEMENTS= build
+
+      - name: Upload failed native Mac test results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-macos-results
+          path: .local/macos/NativeTests.xcresult
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7
