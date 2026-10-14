@@ -1,0 +1,106 @@
+{
+  "status": "asset checks passed",
+  "canonical_source": "split-k.svg",
+  "canonical_sha256": "8d3116094961cb1a45df65e5bcf04d3bf46ca8e0aa43de62669bceb53afaf21f",
+  "geometry_changes": "none",
+  "checks": [
+    {
+      "check": "SVG syntax, locked canonical geometry, and no foreign mark polygons",
+      "result": "pass",
+      "count": 29
+    },
+    {
+      "check": "Portable master and lockups without font dependencies",
+      "result": "pass"
+    },
+    {
+      "check": "Transparent mark PNG dimensions and alpha",
+      "result": "pass",
+      "sizes": [
+        16,
+        24,
+        32,
+        48,
+        96,
+        512
+      ]
+    },
+    {
+      "check": "All flat app icon PNGs square, opaque RGB and unrounded",
+      "result": "pass",
+      "count": 30
+    },
+    {
+      "check": "App icon dimensions through 1024px and Apple touch 180px",
+      "result": "pass"
+    },
+    {
+      "check": "ICO frames match exported PNGs exactly",
+      "result": "pass",
+      "sizes": [
+        16,
+        32,
+        48
+      ]
+    },
+    {
+      "check": "macOS ICNS readable and frames match rendered PNGs",
+      "result": "pass",
+      "sizes": [
+        32,
+        64,
+        128,
+        256,
+        512,
+        1024
+      ]
+    },
+    {
+      "check": "Maskable artwork and antialias pixels fully inside circular safe zone",
+      "result": "pass",
+      "maximum_vertex_radius": 396.9886648255842,
+      "safe_zone_radius": 409.6
+    },
+    {
+      "check": "Manifest references, adaptive favicon declarations and reduced-motion support",
+      "result": "pass"
+    },
+    {
+      "check": "iOS single-image catalog references valid 1024px opaque source",
+      "result": "pass"
+    },
+    {
+      "check": "Proof image dimensions",
+      "result": "pass"
+    },
+    {
+      "check": "Inter 780 optical-size 32 outlines, no fallback, and exact approved horizontal SVG fingerprints",
+      "result": "pass"
+    },
+    {
+      "check": "Canonical lockup 60px marks, 38px cap height, 20px ink gaps, shared horizontal baseline, and minimum 24px padding",
+      "result": "pass"
+    },
+    {
+      "check": "Nickel primary lockups, identical light/dark geometry, and unclipped four-times PNG exports",
+      "result": "pass"
+    },
+    {
+      "check": "Light and dark canonical lockup proof dimensions",
+      "result": "pass"
+    }
+  ],
+  "manual_checks": [
+    {
+      "check": "Canonical Inter 780 lockup visual review",
+      "result": "pass",
+      "date": "2026-10-14",
+      "proofs": [
+        "proofs/lockup-proof.png",
+        "proofs/stacked-proof.png"
+      ],
+      "finding": "Complete lowercase wordmark and locked Split K render clearly in light and dark; nickel lower arm, shared type scale, and measured gaps remain intact.",
+      "scope": "Brand assets only; no app integration or deployment."
+    }
+  ]
+}

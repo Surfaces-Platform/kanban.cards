@@ -1,0 +1,24 @@
+{
+  "advanceWidth" : 411.27993392944336,
+  "baseline" : 0,
+  "capHeight" : 46.5625,
+  "fallbackRuns" : 0,
+  "fontFamily" : "Inter",
+  "fontFile" : "/Users/mike/Library/Fonts/Inter-VariableFont_opsz,wght.ttf",
+  "fontFileSha256" : "0be2399ea925f1f83ff974764761da9860ec50742ed29a5d4c1ffd0c5c7ac3a8",
+  "fontFilesIncluded" : false,
+  "fontSize" : 64,
+  "format" : "CoreText shaped vector outlines",
+  "glyphCount" : 12,
+  "inkBounds" : {
+    "height" : 47.37939453125,
+    "width" : 406.77516555786133,
+    "x" : 3.04248046875,
+    "y" : -46.5625
+  },
+  "opticalSizeAxis" : 32,
+  "postScriptName" : "Inter-Regular_opsz200000_wght30C0000",
+  "text" : "kanban.cards",
+  "weightAxis" : 780,
+  "xHeight" : 33
+}
