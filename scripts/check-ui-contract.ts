@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { renderBrandHead } from "../src/brand";
 
 interface Violation {
   file: string;
@@ -642,6 +643,11 @@ function checkMarkdownSource(markdown: SourceFile, violations: Violation[]): voi
 }
 
 function checkStaticShell(html: SourceFile, violations: Violation[]): void {
+  const approvedBrandHead = renderBrandHead();
+  if (!html.source.includes(approvedBrandHead)) {
+    violations.push({ file: html.file, line: 1, reason: "static shell must include the exact approved public brand metadata", code: "renderBrandHead()" });
+  }
+  const shellOutsideBrandHead = { ...html, source: html.source.replace(approvedBrandHead, approvedBrandHead.replace(/[^\n]/g, " ")) };
   if (!html.source.includes('id="app"')) {
     violations.push({ file: html.file, line: 1, reason: "static app shell is missing", code: "" });
   }
@@ -673,7 +679,7 @@ function checkStaticShell(html: SourceFile, violations: Violation[]): void {
   );
   firstMatchViolation(
     violations,
-    html,
+    shellOutsideBrandHead,
     /https?:\/\//i,
     "static shell must not import external assets"
   );
@@ -684,7 +690,7 @@ function checkStaticShell(html: SourceFile, violations: Violation[]): void {
   ];
   const htmlWithoutApprovedThemeColors = approvedThemeColorMeta.reduce(
     (source, tag) => source.replaceAll(tag, ""),
-    html.source
+    shellOutsideBrandHead.source
   );
   const literalColor = literalColorPattern.exec(htmlWithoutApprovedThemeColors);
   if (literalColor) {
@@ -693,7 +699,7 @@ function checkStaticShell(html: SourceFile, violations: Violation[]): void {
       html.file,
       html.source,
       html.source.indexOf(literalColor[0]),
-      "static shell may use only the pinned light and dark JudgmentKit theme-color literals"
+      "static shell may use only pinned JudgmentKit theme colors and approved brand metadata"
     );
   }
 

@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
-import { BRAND_LOCKUP_ASSETS, renderProductName } from "./brand";
+import { BRAND_PUBLIC_ASSETS, renderBrandHead, renderProductName } from "./brand";
+import { FAVICON_STYLE_HASH } from "./brand-web-assets";
 import fs from "node:fs/promises";
 import { createServer } from "node:http";
 import { isIP } from "node:net";
@@ -137,6 +138,7 @@ const FALLBACK_INDEX_HTML = `<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex,nofollow">
+${renderBrandHead()}
   <title>kanban.cards</title>
   <link rel="stylesheet" href="judgmentkit.css">
   <link rel="stylesheet" href="styles.css">
@@ -577,9 +579,14 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
   app.get("/app.js", sendStaticFile(staticDir, "public/app.js", "application/javascript; charset=utf-8"));
   app.get("/judgmentkit.css", sendStaticFile(staticDir, "public/judgmentkit.css", "text/css; charset=utf-8"));
   app.get("/styles.css", sendStaticFile(staticDir, "public/styles.css", "text/css; charset=utf-8"));
-  app.get("/robots.txt", sendStaticFile(staticDir, "public/robots.txt", "text/plain; charset=utf-8"));
-  app.get("/favicon.ico", (_req, res) => res.status(204).end());
-  for (const [route, asset] of BRAND_LOCKUP_ASSETS) app.get(route, sendStaticFile(staticDir, asset, "image/svg+xml; charset=utf-8"));
+  app.get("/robots.txt", (req, res, next) => {
+    if (requestHost(req, trustForwardedHost) !== rootHost) {
+      res.type("text/plain").send("User-agent: *\nDisallow: /\n");
+      return;
+    }
+    return sendStaticFile(staticDir, "public/robots.txt", "text/plain; charset=utf-8")(req, res, next);
+  });
+  for (const [route, asset, contentType] of BRAND_PUBLIC_ASSETS) app.get(route, sendStaticFile(staticDir, asset, contentType, route === "/favicon.svg" ? FAVICON_STYLE_HASH : undefined));
 
   app.use("/api/projects", (req, _res, next) => {
     void (async () => {
@@ -1132,7 +1139,7 @@ function authHostSurfaceAllows(req: Request): boolean {
   if (req.path.startsWith("/api/passkeys/")) return true;
   if (req.path.startsWith("/api/native-auth/")) return true;
   if ((req.method === "GET" || req.method === "HEAD") && req.path === "/.well-known/apple-app-site-association") return true;
-  return (req.method === "GET" || req.method === "HEAD") && new Set(["/sign-in", "/sign-up", "/app.js", "/judgmentkit.css", "/styles.css", "/robots.txt", "/favicon.ico", ...BRAND_LOCKUP_ASSETS.map(([route]) => route), "/api/session"]).has(req.path);
+  return (req.method === "GET" || req.method === "HEAD") && new Set(["/sign-in", "/sign-up", "/app.js", "/judgmentkit.css", "/styles.css", "/robots.txt", ...BRAND_PUBLIC_ASSETS.map(([route]) => route), "/api/session"]).has(req.path);
 }
 
 function validateHostFamilies(families: readonly HostFamily[]): void {
@@ -1634,10 +1641,14 @@ function serveIndex(staticDir: string): RequestHandler {
   });
 }
 
-function sendStaticFile(staticDir: string, relativePath: string, contentType: string): RequestHandler {
+function sendStaticFile(staticDir: string, relativePath: string, contentType: string, styleHash?: string): RequestHandler {
   return asyncHandler(async (_req, res) => {
     try {
       const content = await fs.readFile(path.join(staticDir, relativePath));
+      if (styleHash) {
+        const policy = String(res.getHeader("Content-Security-Policy") || "");
+        res.setHeader("Content-Security-Policy", policy.replace("style-src 'self'", `style-src 'self' '${styleHash}'`));
+      }
       res.type(contentType).send(content);
     } catch (error) {
       if (!isNodeError(error) || error.code !== "ENOENT") throw error;

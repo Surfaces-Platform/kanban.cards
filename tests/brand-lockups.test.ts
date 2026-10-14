@@ -23,7 +23,7 @@ test("canonical lockups load before sign-in on root, auth, and Workspace hosts t
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "kanban-lockup-routing-"));
   const root = path.resolve(__dirname, "..");
   const server = createServer(createApp({
-    host: "board.localhost", rootHost: "board.localhost", staticDir: root, requireDatabase: false,
+    host: "board.localhost", rootHost: "board.localhost", staticDir: root, requireDatabase: false, trustForwardedHost: true,
     dataPath: path.join(directory, "data.json"),
     accessStore: createFileAccessStore(path.join(directory, "access.json")),
     workspaceStoreResolver: createWorkspaceStoreResolver({ dataPath: path.join(directory, "data.json"), workspaceDirectory: path.join(directory, "workspaces") }),
@@ -40,22 +40,22 @@ test("canonical lockups load before sign-in on root, auth, and Workspace hosts t
         const canonical = index === 0 ? "horizontal.svg" : "horizontal-reversed.svg";
         const expected = await fs.readFile(path.join(root, "brand/split-k/lockups", canonical));
         assert.deepEqual(await fs.readFile(path.join(root, output)), expected, "Build output preserves the canonical source bytes");
-        const response = await fetch(base + route, { headers: { Host: host } });
+        const response = await fetch(base + route, { headers: { "X-Forwarded-Host": host } });
         assert.equal(response.status, 200, host + route);
         assert.match(response.headers.get("content-type") || "", /^image\/svg\+xml/);
         assert.equal(response.headers.get("set-cookie"), null);
         assert.doesNotMatch(response.headers.get("content-security-policy") || "", /unsafe-inline/);
         assert.deepEqual(Buffer.from(await response.arrayBuffer()), expected);
-        const head = await fetch(base + route, { method: "HEAD", headers: { Host: host } });
+        const head = await fetch(base + route, { method: "HEAD", headers: { "X-Forwarded-Host": host } });
         assert.equal(head.status, 200);
         assert.equal((await head.arrayBuffer()).byteLength, 0);
       }
     }
     for (const route of ["/public/branding/brand-lockup.svg", "/brand/split-k/lockups/horizontal.svg", "/api/projects", "/api/workspaces"]) {
-      assert.equal((await fetch(base + route, { headers: { Host: "auth.board.localhost" } })).status, 404, route);
+      assert.equal((await fetch(base + route, { headers: { "X-Forwarded-Host": "auth.board.localhost" } })).status, 404, route);
     }
     for (const [route] of BRAND_LOCKUP_ASSETS) {
-      assert.equal((await fetch(base + route, { method: "POST", headers: { Host: "auth.board.localhost" } })).status, 404);
+      assert.equal((await fetch(base + route, { method: "POST", headers: { "X-Forwarded-Host": "auth.board.localhost" } })).status, 404);
     }
   } finally {
     server.closeAllConnections();
