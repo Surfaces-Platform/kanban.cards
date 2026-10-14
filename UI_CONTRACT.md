@@ -30,6 +30,7 @@ The client has passkey sign-up/sign-in, recovery, access settings, zero/one/many
 
 ## Project workspace
 
+- Product identity uses the complete outlined canonical lockup from `brand/split-k/lockups/`. A local picture source selects the reversed artwork in dark mode and exposes one `kanban.cards` image label. Scale the whole SVG uniformly; keep Project selection and the account trigger visible at narrow widths.
 - The header contains product identity, the compact Project selector, and an avatar trigger. The avatar opens a plain panel containing the session username and Sign out.
 - The client does not repeat the active Project name, description, recency, environment label, or routine workspace-opened receipt in a second context bar.
 - New Project, New Card, Edit Project, and Refresh live in one Actions panel at the top right of the Kanban surface. Add Column is a direct board action: it is the final lane control on desktop and a visible board-local control above the active Column on narrow screens.
