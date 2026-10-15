@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Refresh committed web exports from approved Split K sources.
+"""Refresh site derivatives from approved Split K sources and shared rules.
 
-Requires Python 3, Pillow, and ImageMagick. Routine npm builds copy the committed
-exports and check their hashes; they do not need a rasterizer or a font file.
+Requires Python 3, Pillow, and ImageMagick. Routine npm builds copy committed
+exports and check hashes; they need neither a rasterizer nor a font file.
 """
 from copy import deepcopy
 from pathlib import Path
-import hashlib
 import base64
+import hashlib
 import json
 import math
 import shutil
@@ -22,9 +22,8 @@ OUT.mkdir(exist_ok=True)
 NS = "http://www.w3.org/2000/svg"
 ET.register_namespace("", NS)
 POLYGONS = ["6,6 18,6 18,58 6,58", "26,16 58,2 58,16 26,30", "26,34 58,48 58,62 26,48"]
-RULES = json.loads((BRAND / "wordmark-source/lockup-rules.json").read_text())
-sources = {}
-assets = []
+LOCKUP_RULES = json.loads((BRAND / "wordmark-source/lockup-rules.json").read_text())
+sources, assets = {}, []
 
 
 def source(relative):
@@ -38,92 +37,158 @@ def source(relative):
     return path
 
 
-def record(filename, content_type, derived_from, size=None):
+RULES = json.loads(source("web/derivative-rules.json").read_text())
+INK, IVORY, NICKEL = [RULES["palette"][key] for key in ["ink", "ivory", "nickel"]]
+assert [INK, IVORY, NICKEL] == ["#0B0D0E", "#F7F6F2", "#8B9096"]
+MARKS = {theme: ET.parse(source(relative)).getroot()
+         for theme, relative in [("light", "applied/favicon.svg"), ("dark", "applied/favicon-dark.svg")]}
+for theme, mark in MARKS.items():
+    expected = INK if theme == "light" else IVORY
+    assert [p.get("fill") for p in mark.findall(f"{{{NS}}}polygon")] == [expected, expected, NICKEL]
+vertices = [tuple(map(float, point.split(","))) for points in POLYGONS for point in points.split()]
+xmin, xmax = min(x for x, y in vertices), max(x for x, y in vertices)
+ymin, ymax = min(y for x, y in vertices), max(y for x, y in vertices)
+center_x, center_y = (xmin + xmax) / 2, (ymin + ymax) / 2
+
+
+def record(filename, content_type, derived_from, size=None, opaque=None, alias_of=None):
     path = OUT / filename
     item = {"route": "/" + filename, "source": str(path.relative_to(ROOT)),
             "contentType": content_type, "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
             "derivedFrom": derived_from}
     if size:
         item["dimensions"] = list(size)
+    if opaque is not None:
+        item["opaque"] = opaque
+    if alias_of:
+        item["aliasOf"] = "/" + alias_of
     assets.append(item)
 
 
-def copy(relative, filename, content_type, size=None):
-    path = source(relative)
-    shutil.copyfile(path, OUT / filename)
-    record(filename, content_type, [str(path.relative_to(ROOT))], size)
+def write_svg(filename, document, derived_from):
+    (OUT / filename).write_bytes(ET.tostring(document, encoding="utf-8") + b"\n")
+    record(filename, "image/svg+xml", derived_from)
+    return OUT / filename
 
 
-def render(svg, filename, size):
-    subprocess.run(["magick", "-background", "none", "-density", "96", str(svg),
-                    "-resize", f"{size[0]}x{size[1]}!", "-strip", "-colorspace", "sRGB",
-                    "-alpha", "off", "PNG24:" + str(OUT / filename)], check=True)
+def tile(theme, visible_height, radius):
+    canvas = RULES["browserIcon"]["canvas"]
+    doc = ET.Element(f"{{{NS}}}svg", {"width": str(canvas), "height": str(canvas), "viewBox": f"0 0 {canvas} {canvas}"})
+    ET.SubElement(doc, f"{{{NS}}}title").text = "kanban.cards"
+    ET.SubElement(doc, f"{{{NS}}}rect", {"width": str(canvas), "height": str(canvas), "rx": str(radius), "fill": IVORY if theme == "light" else INK})
+    scale = visible_height / (ymax - ymin)
+    tx, ty = canvas / 2 - center_x * scale, canvas / 2 - center_y * scale
+    group = ET.SubElement(doc, f"{{{NS}}}g", {"data-role": "mark", "transform": f"translate({tx:.9f} {ty:.9f}) scale({scale:.9f})"})
+    for polygon in MARKS[theme].findall(f"{{{NS}}}polygon"):
+        group.append(deepcopy(polygon))
+    return doc
+
+
+def render(svg, filename, size, opaque):
+    icon = max(size) <= 512
+    density = RULES["iconRaster"]["density"] if icon else 96
+    args = ["magick", "-background", "none", "-density", str(density), str(svg),
+            "-resize", f"{size[0]}x{size[1]}!", "-strip", "-colorspace", "sRGB"]
+    args += ["PNG32:" + str(OUT / filename)] if icon else ["-alpha", "off", "PNG24:" + str(OUT / filename)]
+    subprocess.run(args, check=True)
     with Image.open(OUT / filename) as im:
-        assert im.size == size and im.mode == "RGB"
+        assert im.size == size and im.mode == ("RGBA" if icon else "RGB")
+        if opaque:
+            assert im.convert("RGBA").getchannel("A").getextrema() == (255, 255)
+    record(filename, "image/png", [str(svg.relative_to(ROOT))], size, opaque)
 
 
-copy("applied/favicon.svg", "favicon-light.svg", "image/svg+xml")
-copy("applied/favicon-dark.svg", "favicon-dark.svg", "image/svg+xml")
-copy("applied/favicon.ico", "favicon.ico", "image/x-icon")
-copy("applied/apple-touch-icon.png", "apple-touch-icon.png", "image/png", (180, 180))
-copy("favicon/safari-pinned-tab.svg", "safari-pinned-tab.svg", "image/svg+xml")
+def alias(source_name, destination, content_type, size=None, opaque=None):
+    shutil.copyfile(OUT / source_name, OUT / destination)
+    record(destination, content_type, [str((OUT / source_name).relative_to(ROOT))], size, opaque, source_name)
 
-# The adaptive favicon switches between the two approved treatments. It never
-# changes a polygon, its fill, or the nickel arm.
+
+# Rounded browser plates share visible mark height, centering, and radius.
+browser = RULES["browserIcon"]
+for theme in ["light", "dark"]:
+    name = f"favicon-v2-{theme}.svg"
+    svg = write_svg(name, tile(theme, browser["visibleMarkHeight"], browser["cornerRadius"]),
+                    ["brand/split-k/applied/favicon" + ("-dark" if theme == "dark" else "") + ".svg", "brand/split-k/web/derivative-rules.json"])
+    for size in ([16, 32, 48] if theme == "light" else [16, 32]):
+        render(svg, f"favicon-v2-{theme}-{size}.png", (size, size), False)
+    alias(name, f"favicon-{theme}.svg", "image/svg+xml")
+
 adaptive = ET.Element(f"{{{NS}}}svg", {"width": "64", "height": "64", "viewBox": "0 0 64 64"})
 ET.SubElement(adaptive, f"{{{NS}}}title").text = "kanban.cards"
 adaptive_style = ".dark{display:none}@media(prefers-color-scheme:dark){.light{display:none}.dark{display:inline}}"
 ET.SubElement(adaptive, f"{{{NS}}}style").text = adaptive_style
-for scheme, relative in [("light", "applied/favicon.svg"), ("dark", "applied/favicon-dark.svg")]:
-    group = ET.SubElement(adaptive, f"{{{NS}}}g", {"class": scheme})
-    for polygon in ET.parse(source(relative)).getroot().findall(f"{{{NS}}}polygon"):
-        group.append(deepcopy(polygon))
-(OUT / "favicon.svg").write_bytes(ET.tostring(adaptive, encoding="utf-8") + b"\n")
-record("favicon.svg", "image/svg+xml", ["brand/split-k/applied/favicon.svg", "brand/split-k/applied/favicon-dark.svg"])
+for theme in ["light", "dark"]:
+    group = ET.SubElement(adaptive, f"{{{NS}}}g", {"class": theme})
+    for child in tile(theme, browser["visibleMarkHeight"], browser["cornerRadius"]):
+        if child.tag != f"{{{NS}}}title":
+            group.append(deepcopy(child))
+write_svg("favicon-v2.svg", adaptive, ["brand/split-k/web/favicon-v2-light.svg", "brand/split-k/web/favicon-v2-dark.svg"])
+alias("favicon-v2.svg", "favicon.svg", "image/svg+xml")
+frames = [Image.open(OUT / f"favicon-v2-light-{size}.png").convert("RGBA") for size in [16, 32, 48]]
+frames[-1].save(OUT / "favicon-v2.ico", format="ICO", sizes=[(16, 16), (32, 32), (48, 48)], append_images=frames[:-1])
+record("favicon-v2.ico", "image/x-icon", ["brand/split-k/web/favicon-v2-light.svg"])
+alias("favicon-v2.ico", "favicon.ico", "image/x-icon")
+for size in [16, 32]:
+    alias(f"favicon-v2-light-{size}.png", f"favicon-{size}.png", "image/png", (size, size), False)
 
-tile = source("app-icons/app-icon-nickel.svg")
+# Regular install icons keep the shared 48px visible mark on an opaque square.
+regular = RULES["regularAppIcon"]
+regular_svg = write_svg("app-icon-v2.svg", tile(regular["theme"], regular["visibleMarkHeight"], regular["cornerRadius"]),
+                        ["brand/split-k/applied/favicon.svg", "brand/split-k/web/derivative-rules.json"])
+render(regular_svg, "apple-touch-icon-v2.png", (180, 180), True)
+alias("apple-touch-icon-v2.png", "apple-touch-icon.png", "image/png", (180, 180), True)
 for size in [192, 512]:
-    filename = f"app-icon-{size}.png"
-    render(tile, filename, (size, size))
-    record(filename, "image/png", [str(tile.relative_to(ROOT))], (size, size))
-    # The approved square tile already keeps every painted pixel in the safe
-    # zone, so any and maskable exports intentionally have identical pixels.
-    maskable = f"maskable-{size}.png"
-    shutil.copyfile(OUT / filename, OUT / maskable)
-    with Image.open(OUT / maskable) as im:
+    render(regular_svg, f"app-icon-v2-{size}.png", (size, size), True)
+    alias(f"app-icon-v2-{size}.png", f"app-icon-{size}.png", "image/png", (size, size), True)
+
+# Maskable icons use the shared documented 36px alternate, with pixel safety.
+maskable = RULES["maskableIcon"]
+mask_svg = write_svg("maskable-v2.svg", tile(maskable["theme"], maskable["visibleMarkHeight"], maskable["cornerRadius"]),
+                     ["brand/split-k/applied/favicon.svg", "brand/split-k/web/derivative-rules.json"])
+for size in [192, 512]:
+    name = f"maskable-v2-{size}.png"
+    render(mask_svg, name, (size, size), True)
+    with Image.open(OUT / name) as raster:
+        im = raster.convert("RGB")
         for y in range(size):
             for x in range(size):
-                if im.getpixel((x, y)) != (11, 13, 14):
+                if im.getpixel((x, y)) != tuple(bytes.fromhex(IVORY[1:])):
                     assert max(math.hypot(px - size / 2, py - size / 2)
-                               for px in [x, x + 1] for py in [y, y + 1]) <= size * .4
-    record(maskable, "image/png", [str(tile.relative_to(ROOT))], (size, size))
+                               for px in [x, x + 1] for py in [y, y + 1]) <= size * maskable["safeZoneRadiusRatio"]
+    alias(name, f"maskable-{size}.png", "image/png", (size, size), True)
+pinned = source("favicon/safari-pinned-tab.svg")
+shutil.copyfile(pinned, OUT / "safari-pinned-tab.svg")
+record("safari-pinned-tab.svg", "image/svg+xml", [str(pinned.relative_to(ROOT))])
 
-lockup = source("lockups/horizontal.svg")
-assert hashlib.sha256(lockup.read_bytes()).hexdigest() == RULES["approvedHorizontalSha256"][lockup.name]
+# Sharing art contains only the whole canonical reversed outlined lockup.
+card = RULES["socialCard"]
+lockup = source(card["source"])
+assert hashlib.sha256(lockup.read_bytes()).hexdigest() == LOCKUP_RULES["approvedHorizontalSha256"][lockup.name]
 canonical = ET.parse(lockup).getroot()
-width = float(canonical.attrib["width"])
-height = float(canonical.attrib["height"])
-social = ET.Element(f"{{{NS}}}svg", {"width": "1200", "height": "630", "viewBox": "0 0 1200 630"})
+width, height = map(float, canonical.get("viewBox").split()[2:])
+scale = min(card["maximumScale"], card["maximumLockupWidth"] / width)
+social = ET.Element(f"{{{NS}}}svg", {"width": str(card["width"]), "height": str(card["height"]), "viewBox": f"0 0 {card['width']} {card['height']}"})
 ET.SubElement(social, f"{{{NS}}}title").text = "kanban.cards"
-ET.SubElement(social, f"{{{NS}}}rect", {"width": "1200", "height": "630", "fill": "#F7F6F2"})
-group = ET.SubElement(social, f"{{{NS}}}g", {"data-role": "canonical-lockup", "transform": f"translate({(1200 - width * 2) / 2:.9f} {(630 - height * 2) / 2:.9f}) scale(2)"})
+ET.SubElement(social, f"{{{NS}}}rect", {"width": str(card["width"]), "height": str(card["height"]), "fill": card["background"]})
+group = ET.SubElement(social, f"{{{NS}}}g", {"data-role": "canonical-lockup", "transform": f"translate({(card['width'] - width * scale) / 2:.9f} {(card['height'] - height * scale) / 2:.9f}) scale({scale:.12f})"})
 for child in canonical:
     group.append(deepcopy(child))
-(OUT / "social-brand-v1.svg").write_bytes(ET.tostring(social, encoding="utf-8") + b"\n")
-record("social-brand-v1.svg", "image/svg+xml", [str(lockup.relative_to(ROOT))], (1200, 630))
-render(OUT / "social-brand-v1.svg", "social-brand-v1.png", (1200, 630))
-record("social-brand-v1.png", "image/png", [str(lockup.relative_to(ROOT))], (1200, 630))
+svg = write_svg("social-brand-v2.svg", social, [str(lockup.relative_to(ROOT)), "brand/split-k/web/derivative-rules.json"])
+render(svg, "social-brand-v2.png", (card["width"], card["height"]), True)
+alias("social-brand-v2.svg", "social-brand-v1.svg", "image/svg+xml")
+alias("social-brand-v2.png", "social-brand-v1.png", "image/png", (1200, 630), True)
 
 manifest = {"id": "/", "name": "kanban.cards", "short_name": "kanban.cards", "lang": "en",
             "description": "A simple Kanban board for projects run by you and your agents.",
-            "start_url": "/", "scope": "/", "display": "standalone",
-            "background_color": "#0B0D0E", "theme_color": "#0B0D0E",
-            "icons": [{"src": f"/{prefix}-{size}.png", "sizes": f"{size}x{size}", "type": "image/png", "purpose": purpose}
+            "start_url": "/", "scope": "/", "display": "standalone", "background_color": IVORY, "theme_color": IVORY,
+            "icons": [{"src": f"/{prefix}-v2-{size}.png", "sizes": f"{size}x{size}", "type": "image/png", "purpose": purpose}
                       for prefix, purpose in [("app-icon", "any"), ("maskable", "maskable")] for size in [192, 512]]}
 (OUT / "site.webmanifest").write_text(json.dumps(manifest, indent=2) + "\n")
-record("site.webmanifest", "application/manifest+json", [])
+record("site.webmanifest", "application/manifest+json", ["brand/split-k/web/derivative-rules.json"])
 style_hash = "sha256-" + base64.b64encode(hashlib.sha256(adaptive_style.encode()).digest()).decode()
-(OUT / "asset-manifest.json").write_text(json.dumps({"version": 1, "sources": sources, "faviconStyleHash": style_hash, "assets": assets}, indent=2) + "\n")
+style_routes = ["/favicon-v2.svg", "/favicon.svg"]
+(OUT / "asset-manifest.json").write_text(json.dumps({"version": 2, "sources": sources, "faviconStyleHash": style_hash,
+                                                    "faviconStyleRoutes": style_routes, "assets": assets}, indent=2) + "\n")
 routes = [[a["route"], "public/branding/" + Path(a["source"]).name, a["contentType"]] for a in assets]
-(ROOT / "src/brand-web-assets.ts").write_text("// Generated by scripts/generate-web-brand-assets.py.\nexport const FAVICON_STYLE_HASH = " + json.dumps(style_hash) + ";\nexport const BRAND_WEB_ASSETS = " + json.dumps(routes, indent=2) + " as const;\n")
-print(f"Refreshed {len(assets)} web resources from approved sources.")
+(ROOT / "src/brand-web-assets.ts").write_text("// Generated by scripts/generate-web-brand-assets.py.\nexport const FAVICON_STYLE_HASH = " + json.dumps(style_hash) + ";\nexport const FAVICON_STYLE_ROUTES = " + json.dumps(style_routes, separators=(",", ":")) + " as const;\nexport const BRAND_WEB_ASSETS = " + json.dumps(routes, indent=2) + " as const;\n")
+print(f"Refreshed {len(assets)} web resources from unchanged canonical geometry.")

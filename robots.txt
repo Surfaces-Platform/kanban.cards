@@ -2,4 +2,5 @@ User-agent: *
 Disallow: /
 Allow: /$
 Allow: /social-brand-v1.png$
+Allow: /social-brand-v2.png$
 
