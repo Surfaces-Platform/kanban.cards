@@ -1,6 +1,6 @@
 {
-  "version": 3,
-  "authority": "Implements Mike\u2019s October 15 requests to align product icons and remove light fallback borders in dark themes.",
+  "version": 5,
+  "authority": "Implements Mike\u2019s October 15 requests to align product icons and remove favicon borders in dark themes.",
   "palette": {
     "ink": "#0B0D0E",
     "ivory": "#F7F6F2",
@@ -8,13 +8,14 @@
   },
   "browserIcon": {
     "canvas": 64,
-    "cornerRadius": 8,
     "visibleMarkHeight": 48,
     "center": [
       32,
       32
     ],
-    "fallbackTheme": "dark"
+    "background": "transparent",
+    "legacyFallbackTheme": "dark",
+    "noScriptTheme": "light"
   },
   "regularAppIcon": {
     "canvas": 64,
@@ -50,7 +51,16 @@
   "cacheIdentity": {
     "algorithm": "SHA-256",
     "length": 12,
-    "input": "Sorted browser and installation icon route/export SHA-256 pairs, before manifest and social assets.",
+    "input": "Sorted browser and installation icon route/export SHA-256 pairs, including the shared controller bytes, before manifest and social assets.",
     "placement": "Generated filenames in head and PWA manifest"
+  },
+  "compatibilityIconRevisions": [
+    "1965faabf6d1"
+  ],
+  "browserController": {
+    "source": "favicon-theme.js",
+    "sha256": "438e2c44cada8c2a0ae77ff4000d87f5d943b00afda39a786850f5fe3871140e",
+    "head": "One synchronous classic script selects one typed ICO with matchMedia and updates the same link on theme changes.",
+    "scriptDisabledFallback": "One light ICO inside noscript."
   }
 }

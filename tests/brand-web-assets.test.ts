@@ -60,7 +60,19 @@ test("web branding metadata, fixed manifest identity, canonical artwork and rast
   // Python's sort is Unicode codepoint order; use the same order for the identity.
   digestInput.sort((a: string[], b: string[]) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
   assert.equal(sha256(JSON.stringify(digestInput)).slice(0, 12), BRAND_ICON_REVISION);
-  assert.ok(head.includes(`href="/favicon-${BRAND_ICON_REVISION}.ico"`));
+  assert.ok(head.includes(`src="/favicon-theme-${BRAND_ICON_REVISION}.js"`));
+  assert.ok(head.includes(`data-light-icon="/favicon-${BRAND_ICON_REVISION}-light.ico"`));
+  assert.ok(head.includes(`data-dark-icon="/favicon-${BRAND_ICON_REVISION}-dark.ico"`));
+  const scripts = Array.from(head.matchAll(/<script\b([^>]*)><\/script>/g), match => match[1]);
+  assert.equal(scripts.length, 1);
+  assert.doesNotMatch(scripts[0], /\b(?:async|defer)\b|\btype\s*=/);
+  assert.match(head, new RegExp(`<noscript><link rel="icon" href="/favicon-${BRAND_ICON_REVISION}-light.ico" type="image/x-icon" sizes="16x16 32x32 48x48"></noscript>`));
+  assert.doesNotMatch(head.replace(/<noscript>[\s\S]*?<\/noscript>/g, ""), /<link\b[^>]*rel="icon"/);
+  const controller = await fs.readFile(path.join(root, "brand/split-k/web/favicon-theme.js"));
+  const rules = JSON.parse(await fs.readFile(path.join(root, "brand/split-k/web/derivative-rules.json"), "utf8"));
+  assert.equal(sha256(controller), rules.browserController.sha256);
+  assert.equal(rules.browserController.sha256, "438e2c44cada8c2a0ae77ff4000d87f5d943b00afda39a786850f5fe3871140e");
+  assert.ok(manifest.assets.some((asset: { route: string; contentType: string }) => asset.route === `/favicon-theme-${BRAND_ICON_REVISION}.js` && asset.contentType === "text/javascript"));
   assert.ok(head.includes(`href="/apple-touch-icon-${BRAND_ICON_REVISION}.png"`));
   assert.ok(head.includes(`href="/site-${BRAND_ICON_REVISION}.webmanifest"`));
   const social = await fs.readFile(path.join(root, "brand/split-k/web/social-brand-v1.svg"), "utf8");
@@ -97,9 +109,9 @@ test("web branding metadata, fixed manifest identity, canonical artwork and rast
   assert.equal(robots, "User-agent: *\nDisallow: /\nAllow: /$\nAllow: /social-brand-v1.png$\nAllow: /social-brand-v2.png$\n\n");
 });
 
-test("shared icon tiles keep original geometry, theme colors, measured placement and external radius", async () => {
+test("shared icon derivatives keep original geometry, theme colors and measured placement", async () => {
   const rules = JSON.parse(await fs.readFile(path.join(root, "brand/split-k/web/derivative-rules.json"), "utf8"));
-  assert.deepEqual(rules.browserIcon, { canvas: 64, cornerRadius: 8, visibleMarkHeight: 48, center: [32, 32], fallbackTheme: "dark" });
+  assert.deepEqual(rules.browserIcon, { canvas: 64, visibleMarkHeight: 48, center: [32, 32], background: "transparent", legacyFallbackTheme: "dark", noScriptTheme: "light" });
   assert.deepEqual(rules.regularAppIcon, { canvas: 64, cornerRadius: 0, visibleMarkHeight: 48, theme: "dark" });
   assert.deepEqual(rules.maskableIcon, { canvas: 64, cornerRadius: 0, visibleMarkHeight: 36, safeZoneRadiusRatio: 0.4, theme: "dark" });
   assert.equal(rules.iconRaster.density, 384);
@@ -111,8 +123,10 @@ test("shared icon tiles keep original geometry, theme colors, measured placement
     assert.deepEqual(Array.from(svg.matchAll(/ points="([^"]+)"/g), m => m[1]), points);
     assert.doesNotMatch(svg, /<(?:text|path)\b/);
     const fills = Array.from(svg.matchAll(/ fill="([^"]+)"/g), m => m[1]);
-    assert.deepEqual(fills, theme === "light" ? ["#F7F6F2", "#0B0D0E", "#0B0D0E", "#8B9096"] : ["#0B0D0E", "#F7F6F2", "#F7F6F2", "#8B9096"]);
-    assert.match(svg, new RegExp(`<rect width="64" height="64" rx="${radius}"`));
+    const transparentBrowser = name.startsWith("favicon-v2-");
+    assert.deepEqual(fills, theme === "light" ? ["#0B0D0E", "#0B0D0E", "#8B9096"] : transparentBrowser ? ["#F7F6F2", "#F7F6F2", "#8B9096"] : ["#0B0D0E", "#F7F6F2", "#F7F6F2", "#8B9096"]);
+    if (transparentBrowser) assert.doesNotMatch(svg, /<rect\b/);
+    else assert.match(svg, new RegExp(`<rect width="64" height="64" rx="${radius}"`));
     const transform = svg.match(/data-role="mark" transform="translate\(([-\d.]+) ([-\d.]+)\) scale\(([-\d.]+)\)"/);
     assert.ok(transform);
     const [tx, ty, scale] = transform.slice(1).map(Number);
@@ -123,10 +137,6 @@ test("shared icon tiles keep original geometry, theme colors, measured placement
       const [x, y] = point.split(",").map(Number);
       assert.ok(Math.hypot(tx + scale * x - 32, ty + scale * y - 32) < 64 * 0.4);
     }
-  }
-  const head = renderBrandHead();
-  for (const theme of ["light", "dark"]) for (const size of [16, 32]) {
-    assert.ok(head.includes(`href="/favicon-${BRAND_ICON_REVISION}-${theme}-${size}.png" type="image/png" sizes="${size}x${size}" media="(prefers-color-scheme: ${theme})"`));
   }
 });
 
@@ -153,29 +163,35 @@ function decodeRgbaPng(bytes: Buffer): { width: number; height: number; pixels: 
   return { width, height, pixels };
 }
 
-test("fallback ICO frames and raster edges stay dark without a white matte; light icons and opaque installation tiles remain valid", async () => {
+test("both theme ICOs match transparent marks; legacy fallbacks stay dark and installation icons stay opaque", async () => {
   const directory = path.join(root, "brand/split-k/web");
-  const ico = await fs.readFile(path.join(directory, "favicon.ico"));
-  for (const [index, size] of [16, 32, 48].entries()) {
-    const png = decodeRgbaPng(await fs.readFile(path.join(directory, `favicon-v2-dark-${size}.png`)));
-    const offset = ico.readUInt32LE(6 + index * 16 + 12), length = ico.readUInt32LE(6 + index * 16 + 8);
-    const frame = decodeRgbaPng(ico.subarray(offset, offset + length));
-    assert.deepEqual(frame, png, "ICO uses exact dark PNG pixels");
-    for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
-      if (Math.min(x, y, size - x - 1, size - y - 1) >= Math.max(1, Math.floor(size / 16))) continue;
-      const pixel = Array.from(png.pixels.subarray((y * size + x) * 4, (y * size + x) * 4 + 4));
-      for (let channel = 0; channel < 3; channel++) assert.ok(Math.abs(pixel[channel] - [11, 13, 14][channel]) <= 8, "outer plate stays Ink; only small raster filter ringing allowed");
-      if (pixel[3] < 255) assert.deepEqual(pixel.slice(0, 3), [11, 13, 14], "transparent edge RGB has no white matte");
+  assert.deepEqual(await fs.readFile(path.join(directory, "favicon.ico")), await fs.readFile(path.join(directory, "favicon-v2-dark.ico")));
+  for (const theme of ["light", "dark"]) {
+    const ico = await fs.readFile(path.join(directory, `favicon-v2-${theme}.ico`));
+    assert.equal(ico.readUInt16LE(4), 3);
+    for (const [index, size] of [16, 32, 48].entries()) {
+      const png = decodeRgbaPng(await fs.readFile(path.join(directory, `favicon-v2-${theme}-${size}.png`)));
+      const offset = ico.readUInt32LE(6 + index * 16 + 12), length = ico.readUInt32LE(6 + index * 16 + 8);
+      const frame = decodeRgbaPng(ico.subarray(offset, offset + length));
+      assert.deepEqual(frame, png, "ICO uses exact themed PNG pixels");
+      let transparentPixels = 0, primaryPixels = 0, nickelPixels = 0;
+      const primary = theme === "dark" ? [247, 246, 242] : [11, 13, 14];
+      for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+        const pixel = Array.from(png.pixels.subarray((y * size + x) * 4, (y * size + x) * 4 + 4));
+        if (pixel[3] === 0) transparentPixels++;
+        if (Math.min(x, y, size - x - 1, size - y - 1) < Math.max(1, Math.floor(size / 16))) assert.equal(pixel[3], 0, "outside the mark remains fully transparent");
+        if (pixel[3] > 0) assert.notDeepEqual(pixel.slice(0, 3), theme === "dark" ? [11, 13, 14] : [247, 246, 242], "browser icon has no opposite-theme plate");
+        if (pixel[3] === 255 && pixel.slice(0, 3).every((value, i) => value === primary[i])) primaryPixels++;
+        if (pixel[3] === 255 && pixel.slice(0, 3).every((value, i) => value === [139, 144, 150][i])) nickelPixels++;
+      }
+      assert.ok(transparentPixels > size * size / 2, "free-standing mark preserves surrounding transparency");
+      assert.ok(primaryPixels > 0 && nickelPixels > 0, "primary and Nickel shapes remain visible");
     }
   }
   for (const name of ["apple-touch-icon-v2.png", "app-icon-v2-192.png", "app-icon-v2-512.png", "maskable-v2-192.png", "maskable-v2-512.png"]) {
     const png = decodeRgbaPng(await fs.readFile(path.join(directory, name)));
     assert.deepEqual(Array.from(png.pixels.subarray(0, 4)), [11, 13, 14, 255], name + " has a square dark plate");
     for (let offset = 3; offset < png.pixels.length; offset += 4) assert.equal(png.pixels[offset], 255);
-  }
-  for (const size of [16, 32]) {
-    const light = decodeRgbaPng(await fs.readFile(path.join(directory, `favicon-v2-light-${size}.png`)));
-    assert.deepEqual(Array.from(light.pixels.subarray((size / 2 * size) * 4, (size / 2 * size) * 4 + 4)), [247, 246, 242, 255], "explicit light tile stays Ivory");
   }
 });
 
@@ -218,7 +234,7 @@ test("only exact public GET/HEAD brand resources bypass auth-host route restrict
         assert.equal(robots, "User-agent: *\nDisallow: /\n");
       }
     }
-    for (const route of ["/api/projects", "/api/workspaces", "/public/branding/site.webmanifest", "/brand/split-k/web/social-brand-v2.png", "/favicon.svg%2f..%2fapi%2fprojects", "/favicon-v2.svg%2f..%2fapi%2fprojects", "/%2e%2e%2fapi%2fprojects", "/social-brand-v2.png/../api/projects"]) {
+    for (const route of ["/api/projects", "/api/workspaces", "/public/branding/site.webmanifest", "/brand/split-k/web/social-brand-v2.png", "/favicon-theme.js%2f..%2fapi%2fprojects", "/favicon.svg%2f..%2fapi%2fprojects", "/favicon-v2.svg%2f..%2fapi%2fprojects", "/%2e%2e%2fapi%2fprojects", "/social-brand-v2.png/../api/projects"]) {
       const response = await fetch(base + route, { headers: { "X-Forwarded-Host": "auth.board.localhost" } });
       assert.equal(response.status, 404, route);
     }

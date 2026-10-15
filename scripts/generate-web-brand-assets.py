@@ -71,11 +71,12 @@ def write_svg(filename, document, derived_from):
     return OUT / filename
 
 
-def tile(theme, visible_height, radius):
+def tile(theme, visible_height, radius, plate=True):
     canvas = RULES["browserIcon"]["canvas"]
     doc = ET.Element(f"{{{NS}}}svg", {"width": str(canvas), "height": str(canvas), "viewBox": f"0 0 {canvas} {canvas}"})
     ET.SubElement(doc, f"{{{NS}}}title").text = "kanban.cards"
-    ET.SubElement(doc, f"{{{NS}}}rect", {"width": str(canvas), "height": str(canvas), "rx": str(radius), "fill": IVORY if theme == "light" else INK})
+    if plate:
+        ET.SubElement(doc, f"{{{NS}}}rect", {"width": str(canvas), "height": str(canvas), "rx": str(radius), "fill": IVORY if theme == "light" else INK})
     scale = visible_height / (ymax - ymin)
     tx, ty = canvas / 2 - center_x * scale, canvas / 2 - center_y * scale
     group = ET.SubElement(doc, f"{{{NS}}}g", {"data-role": "mark", "transform": f"translate({tx:.9f} {ty:.9f}) scale({scale:.9f})"})
@@ -103,11 +104,11 @@ def alias(source_name, destination, content_type, size=None, opaque=None):
     record(destination, content_type, [str((OUT / source_name).relative_to(ROOT))], size, opaque, source_name)
 
 
-# Rounded browser plates share visible mark height, centering, and radius.
+# Both browser themes use a free-standing mark with identical placement.
 browser = RULES["browserIcon"]
 for theme in ["light", "dark"]:
     name = f"favicon-v2-{theme}.svg"
-    svg = write_svg(name, tile(theme, browser["visibleMarkHeight"], browser["cornerRadius"]),
+    svg = write_svg(name, tile(theme, browser["visibleMarkHeight"], 0, plate=False),
                     ["brand/split-k/applied/favicon" + ("-dark" if theme == "dark" else "") + ".svg", "brand/split-k/web/derivative-rules.json"])
     for size in [16, 32, 48]:
         render(svg, f"favicon-v2-{theme}-{size}.png", (size, size), False)
@@ -116,10 +117,12 @@ for theme in ["light", "dark"]:
 # Unthemed SVG paths use the same dark fallback as ICO and raster aliases.
 alias("favicon-v2-dark.svg", "favicon-v2.svg", "image/svg+xml")
 alias("favicon-v2-dark.svg", "favicon.svg", "image/svg+xml")
-frames = [Image.open(OUT / f"favicon-v2-dark-{size}.png").convert("RGBA") for size in [16, 32, 48]]
-frames[-1].save(OUT / "favicon-v2.ico", format="ICO", sizes=[(16, 16), (32, 32), (48, 48)], append_images=frames[:-1])
-record("favicon-v2.ico", "image/x-icon", ["brand/split-k/web/favicon-v2-dark.svg"])
-alias("favicon-v2.ico", "favicon.ico", "image/x-icon")
+for theme in ["light", "dark"]:
+    frames = [Image.open(OUT / f"favicon-v2-{theme}-{size}.png").convert("RGBA") for size in [16, 32, 48]]
+    frames[-1].save(OUT / f"favicon-v2-{theme}.ico", format="ICO", sizes=[(16, 16), (32, 32), (48, 48)], append_images=frames[:-1])
+    record(f"favicon-v2-{theme}.ico", "image/x-icon", [f"brand/split-k/web/favicon-v2-{theme}.svg"])
+alias("favicon-v2-dark.ico", "favicon-v2.ico", "image/x-icon")
+alias("favicon-v2-dark.ico", "favicon.ico", "image/x-icon")
 for size in [16, 32]:
     alias(f"favicon-v2-dark-{size}.png", f"favicon-{size}.png", "image/png", (size, size), False)
 
@@ -152,23 +155,37 @@ pinned = source("favicon/safari-pinned-tab.svg")
 shutil.copyfile(pinned, OUT / "safari-pinned-tab.svg")
 record("safari-pinned-tab.svg", "image/svg+xml", [str(pinned.relative_to(ROOT))])
 
+# The shared controller is source, served verbatim, and part of the cache identity.
+controller = source("web/" + RULES["browserController"]["source"])
+assert hashlib.sha256(controller.read_bytes()).hexdigest() == RULES["browserController"]["sha256"]
+record(controller.name, "text/javascript", [str(controller.relative_to(ROOT))])
+
 # Every browser/head installation reference carries an identity from actual icon bytes.
 icon_revision = hashlib.sha256(json.dumps(sorted((a["route"], a["sha256"]) for a in assets), separators=(",", ":")).encode()).hexdigest()[:12]
 
-# Fresh content-derived paths avoid reusing browser favicon and touch-icon caches.
-for src, dst in [("favicon-v2.ico", f"favicon-{icon_revision}.ico"),
-                 ("favicon-v2.svg", f"favicon-{icon_revision}.svg"),
-                 ("apple-touch-icon-v2.png", f"apple-touch-icon-{icon_revision}.png"),
-                 ("safari-pinned-tab.svg", f"safari-pinned-tab-{icon_revision}.svg")]:
-    current = next(a for a in assets if a["route"] == "/" + src)
-    alias(src, dst, current["contentType"], current.get("dimensions"), current.get("opaque"))
+# Serve the current and previous hashed paths from the same canonical derivatives.
+icon_revisions = [icon_revision] + RULES.get("compatibilityIconRevisions", [])
+assert len(set(icon_revisions)) == len(icon_revisions)
+assert all(re.fullmatch(r"[a-f0-9]{12}", value) for value in icon_revisions)
+for revision in icon_revisions:
+    for src, dst in [("favicon-v2.ico", f"favicon-{revision}.ico"),
+                     ("favicon-v2.svg", f"favicon-{revision}.svg"),
+                     ("apple-touch-icon-v2.png", f"apple-touch-icon-{revision}.png"),
+                     ("safari-pinned-tab.svg", f"safari-pinned-tab-{revision}.svg")]:
+        current = next(a for a in assets if a["route"] == "/" + src)
+        alias(src, dst, current["contentType"], current.get("dimensions"), current.get("opaque"))
+    for theme in ["light", "dark"]:
+        alias(f"favicon-v2-{theme}.svg", f"favicon-{revision}-{theme}.svg", "image/svg+xml")
+        for size in [16, 32]:
+            alias(f"favicon-v2-{theme}-{size}.png", f"favicon-{revision}-{theme}-{size}.png", "image/png", (size, size), False)
+    for prefix in ["app-icon", "maskable"]:
+        for size in [192, 512]:
+            alias(f"{prefix}-v2-{size}.png", f"{prefix}-{revision}-{size}.png", "image/png", (size, size), True)
+
+# Only the current head uses these newly introduced theme-specific ICO/controller paths.
 for theme in ["light", "dark"]:
-    alias(f"favicon-v2-{theme}.svg", f"favicon-{icon_revision}-{theme}.svg", "image/svg+xml")
-    for size in [16, 32]:
-        alias(f"favicon-v2-{theme}-{size}.png", f"favicon-{icon_revision}-{theme}-{size}.png", "image/png", (size, size), False)
-for prefix in ["app-icon", "maskable"]:
-    for size in [192, 512]:
-        alias(f"{prefix}-v2-{size}.png", f"{prefix}-{icon_revision}-{size}.png", "image/png", (size, size), True)
+    alias(f"favicon-v2-{theme}.ico", f"favicon-{icon_revision}-{theme}.ico", "image/x-icon")
+alias(controller.name, f"favicon-theme-{icon_revision}.js", "text/javascript")
 
 # Sharing art contains only the whole canonical reversed outlined lockup.
 card = RULES["socialCard"]
@@ -195,10 +212,11 @@ manifest = {"id": "/", "name": "kanban.cards", "short_name": "kanban.cards", "la
                       for prefix, purpose in [("app-icon", "any"), ("maskable", "maskable")] for size in [192, 512]]}
 (OUT / "site.webmanifest").write_text(json.dumps(manifest, indent=2) + "\n")
 record("site.webmanifest", "application/manifest+json", ["brand/split-k/web/derivative-rules.json"])
-alias("site.webmanifest", f"site-{icon_revision}.webmanifest", "application/manifest+json")
+for revision in icon_revisions:
+    alias("site.webmanifest", f"site-{revision}.webmanifest", "application/manifest+json")
 style_hash = None
 style_routes = []
-(OUT / "asset-manifest.json").write_text(json.dumps({"version": 3, "iconRevision": icon_revision, "sources": sources, "faviconStyleHash": style_hash,
+(OUT / "asset-manifest.json").write_text(json.dumps({"version": 5, "iconRevision": icon_revision, "sources": sources, "faviconStyleHash": style_hash,
                                                     "faviconStyleRoutes": style_routes, "assets": assets}, indent=2) + "\n")
 routes = [[a["route"], "public/branding/" + Path(a["source"]).name, a["contentType"]] for a in assets]
 (ROOT / "src/brand-web-assets.ts").write_text("// Generated by scripts/generate-web-brand-assets.py.\nexport const BRAND_ICON_REVISION = " + json.dumps(icon_revision) + ";\nexport const FAVICON_STYLE_HASH = " + json.dumps(style_hash) + ";\nexport const FAVICON_STYLE_ROUTES = " + json.dumps(style_routes, separators=(",", ":")) + " as const;\nexport const BRAND_WEB_ASSETS = " + json.dumps(routes, indent=2) + " as const;\n")
