@@ -1,6 +1,6 @@
 {
-  "version": 2,
-  "authority": "Implements Mike\u2019s October 15 request to align favicon scale and corners and use the current Surfaces sharing-card pattern.",
+  "version": 3,
+  "authority": "Implements Mike\u2019s October 15 requests to align product icons and remove light fallback borders in dark themes.",
   "palette": {
     "ink": "#0B0D0E",
     "ivory": "#F7F6F2",
@@ -14,20 +14,20 @@
       32,
       32
     ],
-    "fallbackTheme": "light"
+    "fallbackTheme": "dark"
   },
   "regularAppIcon": {
     "canvas": 64,
     "cornerRadius": 0,
     "visibleMarkHeight": 48,
-    "theme": "light"
+    "theme": "dark"
   },
   "maskableIcon": {
     "canvas": 64,
     "cornerRadius": 0,
     "visibleMarkHeight": 36,
     "safeZoneRadiusRatio": 0.4,
-    "theme": "light"
+    "theme": "dark"
   },
   "socialCard": {
     "width": 1200,
@@ -46,5 +46,11 @@
     "colorspace": "sRGB",
     "format": "PNG32",
     "command": "magick -background none -density 384 source.svg -resize WIDTHxHEIGHT! -strip -colorspace sRGB PNG32:output.png"
+  },
+  "cacheIdentity": {
+    "algorithm": "SHA-256",
+    "length": 12,
+    "input": "Sorted browser and installation icon route/export SHA-256 pairs, before manifest and social assets.",
+    "placement": "Generated filenames in head and PWA manifest"
   }
 }

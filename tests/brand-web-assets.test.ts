@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
+import { inflateSync } from "node:zlib";
 import type { AddressInfo } from "node:net";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -8,7 +9,7 @@ import path from "node:path";
 import test from "node:test";
 import { createFileAccessStore } from "../src/access-store";
 import { BRAND_PUBLIC_ASSETS, renderBrandHead } from "../src/brand";
-import { FAVICON_STYLE_HASH, FAVICON_STYLE_ROUTES } from "../src/brand-web-assets";
+import { BRAND_ICON_REVISION, FAVICON_STYLE_HASH, FAVICON_STYLE_ROUTES } from "../src/brand-web-assets";
 import { createApp } from "../src/server";
 import { createWorkspaceStoreResolver } from "../src/state-store";
 
@@ -50,10 +51,18 @@ test("web branding metadata, fixed manifest identity, canonical artwork and rast
   assert.equal(ico.readUInt16LE(2), 1);
   assert.equal(ico.readUInt16LE(4), 3);
   assert.deepEqual([0, 1, 2].map(i => [ico[6 + i * 16], ico[7 + i * 16]]), [[16, 16], [32, 32], [48, 48]]);
-  const adaptive = await fs.readFile(path.join(root, "public/branding/favicon.svg"), "utf8");
-  const style = adaptive.match(/<style>([^<]+)<\/style>/)?.[1];
-  assert.ok(style);
-  assert.equal("sha256-" + createHash("sha256").update(style).digest("base64"), FAVICON_STYLE_HASH);
+  assert.equal(FAVICON_STYLE_HASH, null);
+  assert.deepEqual(FAVICON_STYLE_ROUTES, []);
+  assert.deepEqual(await fs.readFile(path.join(root, "public/branding/favicon.svg")), await fs.readFile(path.join(root, "public/branding/favicon-v2-dark.svg")));
+  assert.doesNotMatch(await fs.readFile(path.join(root, "public/branding/favicon.svg"), "utf8"), /<style\b/);
+  const baseIcons = manifest.assets.filter((a: { route: string }) => !a.route.startsWith("/social-brand-") && !a.route.startsWith("/site") && !/-[a-f0-9]{12}(?:[-.])/.test(a.route));
+  const digestInput = baseIcons.map((a: { route: string; sha256: string }) => [a.route, a.sha256]);
+  // Python's sort is Unicode codepoint order; use the same order for the identity.
+  digestInput.sort((a: string[], b: string[]) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
+  assert.equal(sha256(JSON.stringify(digestInput)).slice(0, 12), BRAND_ICON_REVISION);
+  assert.ok(head.includes(`href="/favicon-${BRAND_ICON_REVISION}.ico"`));
+  assert.ok(head.includes(`href="/apple-touch-icon-${BRAND_ICON_REVISION}.png"`));
+  assert.ok(head.includes(`href="/site-${BRAND_ICON_REVISION}.webmanifest"`));
   const social = await fs.readFile(path.join(root, "brand/split-k/web/social-brand-v1.svg"), "utf8");
   const canonical = await fs.readFile(path.join(root, "brand/split-k/lockups/horizontal-reversed.svg"), "utf8");
   for (const attribute of ["d", "points"]) {
@@ -80,8 +89,8 @@ test("web branding metadata, fixed manifest identity, canonical artwork and rast
   assert.deepEqual([pwa.id, pwa.start_url, pwa.scope], ["/", "/", "/"]);
   assert.equal(pwa.name, "kanban.cards");
   assert.equal(pwa.display, "standalone");
-  assert.deepEqual([pwa.background_color, pwa.theme_color], ["#F7F6F2", "#F7F6F2"]);
-  assert.deepEqual(pwa.icons.map((i: { src: string }) => i.src), ["/app-icon-v2-192.png", "/app-icon-v2-512.png", "/maskable-v2-192.png", "/maskable-v2-512.png"]);
+  assert.deepEqual([pwa.background_color, pwa.theme_color], ["#0B0D0E", "#0B0D0E"]);
+  assert.deepEqual(pwa.icons.map((i: { src: string }) => i.src), [`/app-icon-${BRAND_ICON_REVISION}-192.png`, `/app-icon-${BRAND_ICON_REVISION}-512.png`, `/maskable-${BRAND_ICON_REVISION}-192.png`, `/maskable-${BRAND_ICON_REVISION}-512.png`]);
   assert.deepEqual(pwa.icons.map((i: { sizes: string; purpose: string }) => [i.sizes, i.purpose]), [["192x192", "any"], ["512x512", "any"], ["192x192", "maskable"], ["512x512", "maskable"]]);
   for (const icon of pwa.icons) assert.ok(BRAND_PUBLIC_ASSETS.some(([route]) => route === icon.src));
   const robots = await fs.readFile(path.join(root, "robots.txt"), "utf8");
@@ -90,13 +99,13 @@ test("web branding metadata, fixed manifest identity, canonical artwork and rast
 
 test("shared icon tiles keep original geometry, theme colors, measured placement and external radius", async () => {
   const rules = JSON.parse(await fs.readFile(path.join(root, "brand/split-k/web/derivative-rules.json"), "utf8"));
-  assert.deepEqual(rules.browserIcon, { canvas: 64, cornerRadius: 8, visibleMarkHeight: 48, center: [32, 32], fallbackTheme: "light" });
-  assert.deepEqual(rules.regularAppIcon, { canvas: 64, cornerRadius: 0, visibleMarkHeight: 48, theme: "light" });
-  assert.deepEqual(rules.maskableIcon, { canvas: 64, cornerRadius: 0, visibleMarkHeight: 36, safeZoneRadiusRatio: 0.4, theme: "light" });
+  assert.deepEqual(rules.browserIcon, { canvas: 64, cornerRadius: 8, visibleMarkHeight: 48, center: [32, 32], fallbackTheme: "dark" });
+  assert.deepEqual(rules.regularAppIcon, { canvas: 64, cornerRadius: 0, visibleMarkHeight: 48, theme: "dark" });
+  assert.deepEqual(rules.maskableIcon, { canvas: 64, cornerRadius: 0, visibleMarkHeight: 36, safeZoneRadiusRatio: 0.4, theme: "dark" });
   assert.equal(rules.iconRaster.density, 384);
   assert.equal(rules.iconRaster.format, "PNG32");
   const points = ["6,6 18,6 18,58 6,58", "26,16 58,2 58,16 26,30", "26,34 58,48 58,62 26,48"];
-  for (const [name, theme, visibleHeight, radius] of [["favicon-v2-light", "light", 48, 8], ["favicon-v2-dark", "dark", 48, 8], ["app-icon-v2", "light", 48, 0], ["maskable-v2", "light", 36, 0]] as const) {
+  for (const [name, theme, visibleHeight, radius] of [["favicon-v2-light", "light", 48, 8], ["favicon-v2-dark", "dark", 48, 8], ["app-icon-v2", "dark", 48, 0], ["maskable-v2", "dark", 36, 0]] as const) {
     const svg = await fs.readFile(path.join(root, "brand/split-k/web", name + ".svg"), "utf8");
     assert.match(svg, /viewBox="0 0 64 64"/);
     assert.deepEqual(Array.from(svg.matchAll(/ points="([^"]+)"/g), m => m[1]), points);
@@ -117,7 +126,56 @@ test("shared icon tiles keep original geometry, theme colors, measured placement
   }
   const head = renderBrandHead();
   for (const theme of ["light", "dark"]) for (const size of [16, 32]) {
-    assert.ok(head.includes(`href="/favicon-v2-${theme}-${size}.png" type="image/png" sizes="${size}x${size}" media="(prefers-color-scheme: ${theme})"`));
+    assert.ok(head.includes(`href="/favicon-${BRAND_ICON_REVISION}-${theme}-${size}.png" type="image/png" sizes="${size}x${size}" media="(prefers-color-scheme: ${theme})"`));
+  }
+});
+
+function decodeRgbaPng(bytes: Buffer): { width: number; height: number; pixels: Buffer } {
+  const width = bytes.readUInt32BE(16), height = bytes.readUInt32BE(20);
+  assert.equal(bytes[24], 8); assert.equal(bytes[25], 6); assert.equal(bytes[28], 0);
+  const chunks: Buffer[] = [];
+  for (let offset = 8; offset < bytes.length;) {
+    const length = bytes.readUInt32BE(offset);
+    if (bytes.toString("ascii", offset + 4, offset + 8) === "IDAT") chunks.push(bytes.subarray(offset + 8, offset + 8 + length));
+    offset += length + 12;
+  }
+  const data = inflateSync(Buffer.concat(chunks)), stride = width * 4, pixels = Buffer.alloc(stride * height);
+  assert.equal(data.length, height * (stride + 1));
+  for (let y = 0; y < height; y++) {
+    const filter = data[y * (stride + 1)]; assert.ok(filter <= 4);
+    for (let x = 0; x < stride; x++) {
+      const a = x >= 4 ? pixels[y * stride + x - 4] : 0, b = y ? pixels[(y - 1) * stride + x] : 0, c = y && x >= 4 ? pixels[(y - 1) * stride + x - 4] : 0;
+      const p = a + b - c, pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c);
+      const predictor = filter === 0 ? 0 : filter === 1 ? a : filter === 2 ? b : filter === 3 ? Math.floor((a + b) / 2) : pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+      pixels[y * stride + x] = (data[y * (stride + 1) + x + 1] + predictor) & 255;
+    }
+  }
+  return { width, height, pixels };
+}
+
+test("fallback ICO frames and raster edges stay dark without a white matte; light icons and opaque installation tiles remain valid", async () => {
+  const directory = path.join(root, "brand/split-k/web");
+  const ico = await fs.readFile(path.join(directory, "favicon.ico"));
+  for (const [index, size] of [16, 32, 48].entries()) {
+    const png = decodeRgbaPng(await fs.readFile(path.join(directory, `favicon-v2-dark-${size}.png`)));
+    const offset = ico.readUInt32LE(6 + index * 16 + 12), length = ico.readUInt32LE(6 + index * 16 + 8);
+    const frame = decodeRgbaPng(ico.subarray(offset, offset + length));
+    assert.deepEqual(frame, png, "ICO uses exact dark PNG pixels");
+    for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+      if (Math.min(x, y, size - x - 1, size - y - 1) >= Math.max(1, Math.floor(size / 16))) continue;
+      const pixel = Array.from(png.pixels.subarray((y * size + x) * 4, (y * size + x) * 4 + 4));
+      for (let channel = 0; channel < 3; channel++) assert.ok(Math.abs(pixel[channel] - [11, 13, 14][channel]) <= 8, "outer plate stays Ink; only small raster filter ringing allowed");
+      if (pixel[3] < 255) assert.deepEqual(pixel.slice(0, 3), [11, 13, 14], "transparent edge RGB has no white matte");
+    }
+  }
+  for (const name of ["apple-touch-icon-v2.png", "app-icon-v2-192.png", "app-icon-v2-512.png", "maskable-v2-192.png", "maskable-v2-512.png"]) {
+    const png = decodeRgbaPng(await fs.readFile(path.join(directory, name)));
+    assert.deepEqual(Array.from(png.pixels.subarray(0, 4)), [11, 13, 14, 255], name + " has a square dark plate");
+    for (let offset = 3; offset < png.pixels.length; offset += 4) assert.equal(png.pixels[offset], 255);
+  }
+  for (const size of [16, 32]) {
+    const light = decodeRgbaPng(await fs.readFile(path.join(directory, `favicon-v2-light-${size}.png`)));
+    assert.deepEqual(Array.from(light.pixels.subarray((size / 2 * size) * 4, (size / 2 * size) * 4 + 4)), [247, 246, 242, 255], "explicit light tile stays Ivory");
   }
 });
 
@@ -144,7 +202,7 @@ test("only exact public GET/HEAD brand resources bypass auth-host route restrict
         assert.deepEqual(Buffer.from(await response.arrayBuffer()), expected);
         const csp = response.headers.get("content-security-policy") || "";
         assert.doesNotMatch(csp, /unsafe-inline/);
-        assert.equal(csp.includes(FAVICON_STYLE_HASH), FAVICON_STYLE_ROUTES.some(adaptive => adaptive === route));
+        assert.doesNotMatch(csp, /sha256-/);
         const head = await fetch(base + route, { method: "HEAD", headers: { "X-Forwarded-Host": host } });
         assert.equal(head.status, 200);
         assert.equal((await head.arrayBuffer()).byteLength, 0);

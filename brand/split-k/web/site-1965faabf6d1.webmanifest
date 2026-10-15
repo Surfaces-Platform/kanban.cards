@@ -1,0 +1,38 @@
+{
+  "id": "/",
+  "name": "kanban.cards",
+  "short_name": "kanban.cards",
+  "lang": "en",
+  "description": "A simple Kanban board for projects run by you and your agents.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0B0D0E",
+  "theme_color": "#0B0D0E",
+  "icons": [
+    {
+      "src": "/app-icon-1965faabf6d1-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/app-icon-1965faabf6d1-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/maskable-1965faabf6d1-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/maskable-1965faabf6d1-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

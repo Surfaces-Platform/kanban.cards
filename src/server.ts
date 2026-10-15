@@ -1,6 +1,5 @@
 import crypto from "node:crypto";
 import { BRAND_PUBLIC_ASSETS, renderBrandHead, renderProductName } from "./brand";
-import { FAVICON_STYLE_HASH, FAVICON_STYLE_ROUTES } from "./brand-web-assets";
 import fs from "node:fs/promises";
 import { createServer } from "node:http";
 import { isIP } from "node:net";
@@ -586,7 +585,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     }
     return sendStaticFile(staticDir, "public/robots.txt", "text/plain; charset=utf-8")(req, res, next);
   });
-  for (const [route, asset, contentType] of BRAND_PUBLIC_ASSETS) app.get(route, sendStaticFile(staticDir, asset, contentType, FAVICON_STYLE_ROUTES.some(adaptive => adaptive === route) ? FAVICON_STYLE_HASH : undefined));
+  for (const [route, asset, contentType] of BRAND_PUBLIC_ASSETS) app.get(route, sendStaticFile(staticDir, asset, contentType));
 
   app.use("/api/projects", (req, _res, next) => {
     void (async () => {
