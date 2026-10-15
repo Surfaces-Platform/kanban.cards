@@ -17,8 +17,9 @@ Use the Split K with a nickel lower arm and the outlined Inter 780 wordmark. The
 | Monochrome geometry master | [split-k.svg](split-k.svg) |
 | Monochrome reversed mark | [svg/mark-reversed.svg](svg/mark-reversed.svg) |
 | Inline monochrome mark that inherits text color | [svg/mark-currentcolor.svg](svg/mark-currentcolor.svg) |
-| Applied light and dark browser favicons | [applied/favicon.svg](applied/favicon.svg), [applied/favicon-dark.svg](applied/favicon-dark.svg) |
-| Applied ICO fallback and touch icon | [applied/favicon.ico](applied/favicon.ico), [applied/apple-touch-icon.png](applied/apple-touch-icon.png) |
+| Website light and dark browser favicons | [web/favicon-v2-light.svg](web/favicon-v2-light.svg), [web/favicon-v2-dark.svg](web/favicon-v2-dark.svg) |
+| Website ICO fallback and touch icon | [web/favicon-v2.ico](web/favicon-v2.ico), [web/apple-touch-icon-v2.png](web/apple-touch-icon-v2.png) |
+| Website installation icons and sharing card | [web/README.md](web/README.md), [web/derivative-rules.json](web/derivative-rules.json) |
 | Nickel app tile source and 1024px export | [app-icons/app-icon-nickel.svg](app-icons/app-icon-nickel.svg), [app-icons/app-icon-nickel-1024.png](app-icons/app-icon-nickel-1024.png) |
 | Monochrome app and maskable alternatives | [app-icons/app-icon.svg](app-icons/app-icon.svg), [192px](app-icons/maskable-192.png), [512px](app-icons/maskable-512.png) |
 | Conventional monochrome Apple catalog | [app-icons/apple/AppIcon.appiconset/Contents.json](app-icons/apple/AppIcon.appiconset/Contents.json) |
@@ -45,7 +46,7 @@ The standalone master uses `0 0 64 64`, with visible bounds x=6 to 58 and y=2 to
 
 The primary lockup uses Ink `#0B0D0E` on light backgrounds and Warm ivory `#F7F6F2` on dark backgrounds. Its lower arm stays Nickel `#8B9096` in both themes. Monochrome assets remain available when one color is required.
 
-Leave at least 12 canonical units around standalone marks. App tiles center a 640px mark viewport on a 1024px square. The visible silhouette occupies 520 by 600px and stays inside the 409.6px maskable safe-zone radius. Platform masks belong to the container. Opaque app sources have square corners.
+Leave at least 12 canonical units around standalone marks. Website tiles use the shared placement and external container rules in [web/README.md](web/README.md). Legacy app tiles center a 640px mark viewport on a 1024px square. The visible silhouette occupies 520 by 600px and stays inside the 409.6px maskable safe-zone radius. Platform masks belong to the container. Opaque app sources have square corners.
 
 ## Wordmark source
 
