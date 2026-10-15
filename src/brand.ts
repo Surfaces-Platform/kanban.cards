@@ -1,4 +1,4 @@
-import { BRAND_WEB_ASSETS } from "./brand-web-assets";
+import { BRAND_ICON_REVISION, BRAND_WEB_ASSETS } from "./brand-web-assets";
 
 export const BRAND_LOCKUP_ASSETS = [
   ["/brand-lockup.svg", "public/branding/brand-lockup.svg"],
@@ -17,17 +17,17 @@ export function renderBrandHead(): string {
   <meta name="theme-color" content="#f8f7f2" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#101312" media="(prefers-color-scheme: dark)">
   <link rel="canonical" href="https://kanban.cards/">
-  <link rel="icon" href="/favicon-v2.ico" sizes="16x16 32x32 48x48">
-  <link rel="icon" href="/favicon-v2-light-16.png" type="image/png" sizes="16x16" media="(prefers-color-scheme: light)">
-  <link rel="icon" href="/favicon-v2-dark-16.png" type="image/png" sizes="16x16" media="(prefers-color-scheme: dark)">
-  <link rel="icon" href="/favicon-v2-light-32.png" type="image/png" sizes="32x32" media="(prefers-color-scheme: light)">
-  <link rel="icon" href="/favicon-v2-dark-32.png" type="image/png" sizes="32x32" media="(prefers-color-scheme: dark)">
-  <link rel="icon" href="/favicon-v2.svg" type="image/svg+xml" sizes="any">
-  <link rel="icon" href="/favicon-v2-light.svg" type="image/svg+xml" sizes="any" media="(prefers-color-scheme: light)">
-  <link rel="icon" href="/favicon-v2-dark.svg" type="image/svg+xml" sizes="any" media="(prefers-color-scheme: dark)">
-  <link rel="apple-touch-icon" href="/apple-touch-icon-v2.png" sizes="180x180">
-  <link rel="mask-icon" href="/safari-pinned-tab.svg" color="#0B0D0E">
-  <link rel="manifest" href="/site.webmanifest">
+  <link rel="icon" href="/favicon-${BRAND_ICON_REVISION}.ico" sizes="16x16 32x32 48x48">
+  <link rel="icon" href="/favicon-${BRAND_ICON_REVISION}-light-16.png" type="image/png" sizes="16x16" media="(prefers-color-scheme: light)">
+  <link rel="icon" href="/favicon-${BRAND_ICON_REVISION}-dark-16.png" type="image/png" sizes="16x16" media="(prefers-color-scheme: dark)">
+  <link rel="icon" href="/favicon-${BRAND_ICON_REVISION}-light-32.png" type="image/png" sizes="32x32" media="(prefers-color-scheme: light)">
+  <link rel="icon" href="/favicon-${BRAND_ICON_REVISION}-dark-32.png" type="image/png" sizes="32x32" media="(prefers-color-scheme: dark)">
+  <link rel="icon" href="/favicon-${BRAND_ICON_REVISION}.svg" type="image/svg+xml" sizes="any">
+  <link rel="icon" href="/favicon-${BRAND_ICON_REVISION}-light.svg" type="image/svg+xml" sizes="any" media="(prefers-color-scheme: light)">
+  <link rel="icon" href="/favicon-${BRAND_ICON_REVISION}-dark.svg" type="image/svg+xml" sizes="any" media="(prefers-color-scheme: dark)">
+  <link rel="apple-touch-icon" href="/apple-touch-icon-${BRAND_ICON_REVISION}.png" sizes="180x180">
+  <link rel="mask-icon" href="/safari-pinned-tab-${BRAND_ICON_REVISION}.svg" color="#0B0D0E">
+  <link rel="manifest" href="/site-${BRAND_ICON_REVISION}.webmanifest">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="kanban.cards">
   <meta property="og:title" content="kanban.cards">
