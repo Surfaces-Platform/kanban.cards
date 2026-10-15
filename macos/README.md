@@ -64,3 +64,15 @@ xcodebuild -project macos/KanbanCards.xcodeproj \
 CI runs these unit tests, a Release build, and the Mac source guard alongside the existing iPhone and web checks. Interactive tests use synthetic data and require an unlocked Mac. To run the UI suite, replace the final unit-test selector with `-only-testing:KanbanCardsUITests`. The suite includes independent window behavior, editing and drafts, menus, filters, archived Projects, appearance, accessible values, VoiceOver speech, and the native diagnostic audit. VoiceOver cases temporarily control VoiceOver and restore its initial state. The diagnostic audit retains reviewed host-specific native wrapper and system findings and rejects unreviewed issues.
 
 Keep signed-account, hosted CI, interactive accessibility, and distribution evidence distinct. Use a dedicated test Project for live edit verification and confirm persistence by server readback and relaunch.
+
+## App icon
+
+The app uses the canonical Nickel Split K artwork in `KanbanCards/AppIcon.icon`. Apple's [Icon Composer](https://developer.apple.com/documentation/xcode/creating-your-app-icon-using-icon-composer) supplies the native icon shape, sizes, and system appearances. The source artwork keeps the approved geometry, Ink background, ivory stem and upper arm, and Nickel lower arm.
+
+To refresh both native icons from [the canonical brand tile](../brand/split-k/app-icons/app-icon-nickel.svg), run from the repository root:
+
+```sh
+python3 scripts/sync-native-app-icons.py
+```
+
+Xcode compiles the checked-in icon documents for both Debug and Release builds. Rebuild and reinstall the app to update an existing installation.
