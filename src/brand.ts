@@ -17,14 +17,8 @@ export function renderBrandHead(): string {
   <meta name="theme-color" content="#f8f7f2" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#101312" media="(prefers-color-scheme: dark)">
   <link rel="canonical" href="https://kanban.cards/">
-  <link rel="icon" href="/favicon-${BRAND_ICON_REVISION}.ico" sizes="16x16 32x32 48x48">
-  <link rel="icon" href="/favicon-${BRAND_ICON_REVISION}-light-16.png" type="image/png" sizes="16x16" media="(prefers-color-scheme: light)">
-  <link rel="icon" href="/favicon-${BRAND_ICON_REVISION}-dark-16.png" type="image/png" sizes="16x16" media="(prefers-color-scheme: dark)">
-  <link rel="icon" href="/favicon-${BRAND_ICON_REVISION}-light-32.png" type="image/png" sizes="32x32" media="(prefers-color-scheme: light)">
-  <link rel="icon" href="/favicon-${BRAND_ICON_REVISION}-dark-32.png" type="image/png" sizes="32x32" media="(prefers-color-scheme: dark)">
-  <link rel="icon" href="/favicon-${BRAND_ICON_REVISION}.svg" type="image/svg+xml" sizes="any">
-  <link rel="icon" href="/favicon-${BRAND_ICON_REVISION}-light.svg" type="image/svg+xml" sizes="any" media="(prefers-color-scheme: light)">
-  <link rel="icon" href="/favicon-${BRAND_ICON_REVISION}-dark.svg" type="image/svg+xml" sizes="any" media="(prefers-color-scheme: dark)">
+  <script src="/favicon-theme-${BRAND_ICON_REVISION}.js" data-light-icon="/favicon-${BRAND_ICON_REVISION}-light.ico" data-dark-icon="/favicon-${BRAND_ICON_REVISION}-dark.ico"></script>
+  <noscript><link rel="icon" href="/favicon-${BRAND_ICON_REVISION}-light.ico" type="image/x-icon" sizes="16x16 32x32 48x48"></noscript>
   <link rel="apple-touch-icon" href="/apple-touch-icon-${BRAND_ICON_REVISION}.png" sizes="180x180">
   <link rel="mask-icon" href="/safari-pinned-tab-${BRAND_ICON_REVISION}.svg" color="#0B0D0E">
   <link rel="manifest" href="/site-${BRAND_ICON_REVISION}.webmanifest">

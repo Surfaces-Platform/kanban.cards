@@ -1,11 +1,12 @@
 {
-  "version": 3,
-  "iconRevision": "1965faabf6d1",
+  "version": 5,
+  "iconRevision": "6cc1895139b5",
   "sources": {
-    "brand/split-k/web/derivative-rules.json": "71c7a8c4181264c5eddb11ba1532e3cfc2129343a78e476b95d6345b7d7cc89c",
+    "brand/split-k/web/derivative-rules.json": "871ba1dac6728e47845a57c9253610ce50a95b2c475d8e7ae72d0d9e8f636422",
     "brand/split-k/applied/favicon.svg": "e6e5736981b6dc208751427e9c4319e81a154a2e74779c770048b8fb6accd9a2",
     "brand/split-k/applied/favicon-dark.svg": "535af67ac7a42909622b9e2e647550795e29c36bf516020177e495c21cca1193",
     "brand/split-k/favicon/safari-pinned-tab.svg": "f5e3ec7da14fecd8871be2803382c570c65f9ec53c314db643c287ec05c4e4d8",
+    "brand/split-k/web/favicon-theme.js": "438e2c44cada8c2a0ae77ff4000d87f5d943b00afda39a786850f5fe3871140e",
     "brand/split-k/lockups/horizontal-reversed.svg": "7b1a33ee8d58be2a3abb7cc29eeab09886b778557ea2ab06aa0bedd97af25daf"
   },
   "faviconStyleHash": null,
@@ -15,7 +16,7 @@
       "route": "/favicon-v2-light.svg",
       "source": "brand/split-k/web/favicon-v2-light.svg",
       "contentType": "image/svg+xml",
-      "sha256": "5a1f3648fc0fc3543c62534117771a6363e55b2d7fabbd6d5ab7e5f604c6bb71",
+      "sha256": "cb89d34446374d956cc39bba6d42f23084d8599f9b6e3515d0089b33113fdfd9",
       "derivedFrom": [
         "brand/split-k/applied/favicon.svg",
         "brand/split-k/web/derivative-rules.json"
@@ -25,7 +26,7 @@
       "route": "/favicon-v2-light-16.png",
       "source": "brand/split-k/web/favicon-v2-light-16.png",
       "contentType": "image/png",
-      "sha256": "af648dc270468cccb1097005d2b2e272eb8b9f4e376d7ea0f327d4601bd115d1",
+      "sha256": "f153a7b4349e2907197387623837c4d6b05dfcd37625282a8c842869bc79c4b2",
       "derivedFrom": [
         "brand/split-k/web/favicon-v2-light.svg"
       ],
@@ -39,7 +40,7 @@
       "route": "/favicon-v2-light-32.png",
       "source": "brand/split-k/web/favicon-v2-light-32.png",
       "contentType": "image/png",
-      "sha256": "06f2d6778c903eac00c778d45963c9113013c90d32f78015b7d570ff8df8ad9a",
+      "sha256": "c6ff0dd1981916620576e4942f8ff9879a6c5e887108b7f683165f429991a9a9",
       "derivedFrom": [
         "brand/split-k/web/favicon-v2-light.svg"
       ],
@@ -53,7 +54,7 @@
       "route": "/favicon-v2-light-48.png",
       "source": "brand/split-k/web/favicon-v2-light-48.png",
       "contentType": "image/png",
-      "sha256": "704e53bce8672d1793a0afd13ffc3a5962d77727c279328e5fd62644122a0d17",
+      "sha256": "5d7bc780071db6762f854814f2a3f5a4a8c64de8b52d89735b6c42d416241917",
       "derivedFrom": [
         "brand/split-k/web/favicon-v2-light.svg"
       ],
@@ -67,7 +68,7 @@
       "route": "/favicon-light.svg",
       "source": "brand/split-k/web/favicon-light.svg",
       "contentType": "image/svg+xml",
-      "sha256": "5a1f3648fc0fc3543c62534117771a6363e55b2d7fabbd6d5ab7e5f604c6bb71",
+      "sha256": "cb89d34446374d956cc39bba6d42f23084d8599f9b6e3515d0089b33113fdfd9",
       "derivedFrom": [
         "brand/split-k/web/favicon-v2-light.svg"
       ],
@@ -77,7 +78,7 @@
       "route": "/favicon-v2-dark.svg",
       "source": "brand/split-k/web/favicon-v2-dark.svg",
       "contentType": "image/svg+xml",
-      "sha256": "14a514b7fa94c5dd776e540f01c086a4fc9ae3a471cf2e036814da284c56e399",
+      "sha256": "3fd5a3a11fba4e5eacdaabb22232dadb69456908e85a2aeee4a8b08349a5cd2a",
       "derivedFrom": [
         "brand/split-k/applied/favicon-dark.svg",
         "brand/split-k/web/derivative-rules.json"
@@ -87,7 +88,7 @@
       "route": "/favicon-v2-dark-16.png",
       "source": "brand/split-k/web/favicon-v2-dark-16.png",
       "contentType": "image/png",
-      "sha256": "3bcc08c0054682392bf9be0bc62d042cf5ceaf3c054f8ba9c6943506c614507a",
+      "sha256": "458b04c2c50f84ecf20b26cb4a91bacc209f8480771695fcf56709a5fc501ca1",
       "derivedFrom": [
         "brand/split-k/web/favicon-v2-dark.svg"
       ],
@@ -101,7 +102,7 @@
       "route": "/favicon-v2-dark-32.png",
       "source": "brand/split-k/web/favicon-v2-dark-32.png",
       "contentType": "image/png",
-      "sha256": "433914e92f510c2ed24a1f9c0a5cd244c838bea6fdaa2b99d534664721d03883",
+      "sha256": "d2c6f461611afe184dda02244876f4b88499daa07cc24fb28256ff55b4a85574",
       "derivedFrom": [
         "brand/split-k/web/favicon-v2-dark.svg"
       ],
@@ -115,7 +116,7 @@
       "route": "/favicon-v2-dark-48.png",
       "source": "brand/split-k/web/favicon-v2-dark-48.png",
       "contentType": "image/png",
-      "sha256": "367157a0913885ba92e2f1f00fd40940d71906a934153ed6b27e8cffd2092ed8",
+      "sha256": "cb3dcaf5cf4f0c833faaec1f560cbb145aebf6457e13102966791fd67e158bdd",
       "derivedFrom": [
         "brand/split-k/web/favicon-v2-dark.svg"
       ],
@@ -129,7 +130,7 @@
       "route": "/favicon-dark.svg",
       "source": "brand/split-k/web/favicon-dark.svg",
       "contentType": "image/svg+xml",
-      "sha256": "14a514b7fa94c5dd776e540f01c086a4fc9ae3a471cf2e036814da284c56e399",
+      "sha256": "3fd5a3a11fba4e5eacdaabb22232dadb69456908e85a2aeee4a8b08349a5cd2a",
       "derivedFrom": [
         "brand/split-k/web/favicon-v2-dark.svg"
       ],
@@ -139,7 +140,7 @@
       "route": "/favicon-v2.svg",
       "source": "brand/split-k/web/favicon-v2.svg",
       "contentType": "image/svg+xml",
-      "sha256": "14a514b7fa94c5dd776e540f01c086a4fc9ae3a471cf2e036814da284c56e399",
+      "sha256": "3fd5a3a11fba4e5eacdaabb22232dadb69456908e85a2aeee4a8b08349a5cd2a",
       "derivedFrom": [
         "brand/split-k/web/favicon-v2-dark.svg"
       ],
@@ -149,36 +150,55 @@
       "route": "/favicon.svg",
       "source": "brand/split-k/web/favicon.svg",
       "contentType": "image/svg+xml",
-      "sha256": "14a514b7fa94c5dd776e540f01c086a4fc9ae3a471cf2e036814da284c56e399",
+      "sha256": "3fd5a3a11fba4e5eacdaabb22232dadb69456908e85a2aeee4a8b08349a5cd2a",
       "derivedFrom": [
         "brand/split-k/web/favicon-v2-dark.svg"
       ],
       "aliasOf": "/favicon-v2-dark.svg"
     },
     {
-      "route": "/favicon-v2.ico",
-      "source": "brand/split-k/web/favicon-v2.ico",
+      "route": "/favicon-v2-light.ico",
+      "source": "brand/split-k/web/favicon-v2-light.ico",
       "contentType": "image/x-icon",
-      "sha256": "9ffff913ee67e8cb2afeb08febf01f7486c00de99c72acc19cade9caea9e47c2",
+      "sha256": "79473a3d7dd7ca0a76ee47202225b36c102a3dc505907142630570aeb4c02cde",
+      "derivedFrom": [
+        "brand/split-k/web/favicon-v2-light.svg"
+      ]
+    },
+    {
+      "route": "/favicon-v2-dark.ico",
+      "source": "brand/split-k/web/favicon-v2-dark.ico",
+      "contentType": "image/x-icon",
+      "sha256": "fc720b9530e56b9666daae1dcfe36316f27a2820e58073f5700acd2dda7f9573",
       "derivedFrom": [
         "brand/split-k/web/favicon-v2-dark.svg"
       ]
     },
     {
+      "route": "/favicon-v2.ico",
+      "source": "brand/split-k/web/favicon-v2.ico",
+      "contentType": "image/x-icon",
+      "sha256": "fc720b9530e56b9666daae1dcfe36316f27a2820e58073f5700acd2dda7f9573",
+      "derivedFrom": [
+        "brand/split-k/web/favicon-v2-dark.ico"
+      ],
+      "aliasOf": "/favicon-v2-dark.ico"
+    },
+    {
       "route": "/favicon.ico",
       "source": "brand/split-k/web/favicon.ico",
       "contentType": "image/x-icon",
-      "sha256": "9ffff913ee67e8cb2afeb08febf01f7486c00de99c72acc19cade9caea9e47c2",
+      "sha256": "fc720b9530e56b9666daae1dcfe36316f27a2820e58073f5700acd2dda7f9573",
       "derivedFrom": [
-        "brand/split-k/web/favicon-v2.ico"
+        "brand/split-k/web/favicon-v2-dark.ico"
       ],
-      "aliasOf": "/favicon-v2.ico"
+      "aliasOf": "/favicon-v2-dark.ico"
     },
     {
       "route": "/favicon-16.png",
       "source": "brand/split-k/web/favicon-16.png",
       "contentType": "image/png",
-      "sha256": "3bcc08c0054682392bf9be0bc62d042cf5ceaf3c054f8ba9c6943506c614507a",
+      "sha256": "458b04c2c50f84ecf20b26cb4a91bacc209f8480771695fcf56709a5fc501ca1",
       "derivedFrom": [
         "brand/split-k/web/favicon-v2-dark-16.png"
       ],
@@ -193,7 +213,7 @@
       "route": "/favicon-32.png",
       "source": "brand/split-k/web/favicon-32.png",
       "contentType": "image/png",
-      "sha256": "433914e92f510c2ed24a1f9c0a5cd244c838bea6fdaa2b99d534664721d03883",
+      "sha256": "d2c6f461611afe184dda02244876f4b88499daa07cc24fb28256ff55b4a85574",
       "derivedFrom": [
         "brand/split-k/web/favicon-v2-dark-32.png"
       ],
@@ -379,10 +399,204 @@
       ]
     },
     {
+      "route": "/favicon-theme.js",
+      "source": "brand/split-k/web/favicon-theme.js",
+      "contentType": "text/javascript",
+      "sha256": "438e2c44cada8c2a0ae77ff4000d87f5d943b00afda39a786850f5fe3871140e",
+      "derivedFrom": [
+        "brand/split-k/web/favicon-theme.js"
+      ]
+    },
+    {
+      "route": "/favicon-6cc1895139b5.ico",
+      "source": "brand/split-k/web/favicon-6cc1895139b5.ico",
+      "contentType": "image/x-icon",
+      "sha256": "fc720b9530e56b9666daae1dcfe36316f27a2820e58073f5700acd2dda7f9573",
+      "derivedFrom": [
+        "brand/split-k/web/favicon-v2.ico"
+      ],
+      "aliasOf": "/favicon-v2.ico"
+    },
+    {
+      "route": "/favicon-6cc1895139b5.svg",
+      "source": "brand/split-k/web/favicon-6cc1895139b5.svg",
+      "contentType": "image/svg+xml",
+      "sha256": "3fd5a3a11fba4e5eacdaabb22232dadb69456908e85a2aeee4a8b08349a5cd2a",
+      "derivedFrom": [
+        "brand/split-k/web/favicon-v2.svg"
+      ],
+      "aliasOf": "/favicon-v2.svg"
+    },
+    {
+      "route": "/apple-touch-icon-6cc1895139b5.png",
+      "source": "brand/split-k/web/apple-touch-icon-6cc1895139b5.png",
+      "contentType": "image/png",
+      "sha256": "518e765e09e88f22fedc722d23ef00f0fa19163d784c036961346730318a3bf5",
+      "derivedFrom": [
+        "brand/split-k/web/apple-touch-icon-v2.png"
+      ],
+      "dimensions": [
+        180,
+        180
+      ],
+      "opaque": true,
+      "aliasOf": "/apple-touch-icon-v2.png"
+    },
+    {
+      "route": "/safari-pinned-tab-6cc1895139b5.svg",
+      "source": "brand/split-k/web/safari-pinned-tab-6cc1895139b5.svg",
+      "contentType": "image/svg+xml",
+      "sha256": "f5e3ec7da14fecd8871be2803382c570c65f9ec53c314db643c287ec05c4e4d8",
+      "derivedFrom": [
+        "brand/split-k/web/safari-pinned-tab.svg"
+      ],
+      "aliasOf": "/safari-pinned-tab.svg"
+    },
+    {
+      "route": "/favicon-6cc1895139b5-light.svg",
+      "source": "brand/split-k/web/favicon-6cc1895139b5-light.svg",
+      "contentType": "image/svg+xml",
+      "sha256": "cb89d34446374d956cc39bba6d42f23084d8599f9b6e3515d0089b33113fdfd9",
+      "derivedFrom": [
+        "brand/split-k/web/favicon-v2-light.svg"
+      ],
+      "aliasOf": "/favicon-v2-light.svg"
+    },
+    {
+      "route": "/favicon-6cc1895139b5-light-16.png",
+      "source": "brand/split-k/web/favicon-6cc1895139b5-light-16.png",
+      "contentType": "image/png",
+      "sha256": "f153a7b4349e2907197387623837c4d6b05dfcd37625282a8c842869bc79c4b2",
+      "derivedFrom": [
+        "brand/split-k/web/favicon-v2-light-16.png"
+      ],
+      "dimensions": [
+        16,
+        16
+      ],
+      "opaque": false,
+      "aliasOf": "/favicon-v2-light-16.png"
+    },
+    {
+      "route": "/favicon-6cc1895139b5-light-32.png",
+      "source": "brand/split-k/web/favicon-6cc1895139b5-light-32.png",
+      "contentType": "image/png",
+      "sha256": "c6ff0dd1981916620576e4942f8ff9879a6c5e887108b7f683165f429991a9a9",
+      "derivedFrom": [
+        "brand/split-k/web/favicon-v2-light-32.png"
+      ],
+      "dimensions": [
+        32,
+        32
+      ],
+      "opaque": false,
+      "aliasOf": "/favicon-v2-light-32.png"
+    },
+    {
+      "route": "/favicon-6cc1895139b5-dark.svg",
+      "source": "brand/split-k/web/favicon-6cc1895139b5-dark.svg",
+      "contentType": "image/svg+xml",
+      "sha256": "3fd5a3a11fba4e5eacdaabb22232dadb69456908e85a2aeee4a8b08349a5cd2a",
+      "derivedFrom": [
+        "brand/split-k/web/favicon-v2-dark.svg"
+      ],
+      "aliasOf": "/favicon-v2-dark.svg"
+    },
+    {
+      "route": "/favicon-6cc1895139b5-dark-16.png",
+      "source": "brand/split-k/web/favicon-6cc1895139b5-dark-16.png",
+      "contentType": "image/png",
+      "sha256": "458b04c2c50f84ecf20b26cb4a91bacc209f8480771695fcf56709a5fc501ca1",
+      "derivedFrom": [
+        "brand/split-k/web/favicon-v2-dark-16.png"
+      ],
+      "dimensions": [
+        16,
+        16
+      ],
+      "opaque": false,
+      "aliasOf": "/favicon-v2-dark-16.png"
+    },
+    {
+      "route": "/favicon-6cc1895139b5-dark-32.png",
+      "source": "brand/split-k/web/favicon-6cc1895139b5-dark-32.png",
+      "contentType": "image/png",
+      "sha256": "d2c6f461611afe184dda02244876f4b88499daa07cc24fb28256ff55b4a85574",
+      "derivedFrom": [
+        "brand/split-k/web/favicon-v2-dark-32.png"
+      ],
+      "dimensions": [
+        32,
+        32
+      ],
+      "opaque": false,
+      "aliasOf": "/favicon-v2-dark-32.png"
+    },
+    {
+      "route": "/app-icon-6cc1895139b5-192.png",
+      "source": "brand/split-k/web/app-icon-6cc1895139b5-192.png",
+      "contentType": "image/png",
+      "sha256": "7aa95c684cfe13a287aa1082e4af02be20a352487ff6ce40fcd62a726af2fea9",
+      "derivedFrom": [
+        "brand/split-k/web/app-icon-v2-192.png"
+      ],
+      "dimensions": [
+        192,
+        192
+      ],
+      "opaque": true,
+      "aliasOf": "/app-icon-v2-192.png"
+    },
+    {
+      "route": "/app-icon-6cc1895139b5-512.png",
+      "source": "brand/split-k/web/app-icon-6cc1895139b5-512.png",
+      "contentType": "image/png",
+      "sha256": "1ae5cd43419619442b7f01fa71c3236ac5942f9999bed4f40310c770412ad32f",
+      "derivedFrom": [
+        "brand/split-k/web/app-icon-v2-512.png"
+      ],
+      "dimensions": [
+        512,
+        512
+      ],
+      "opaque": true,
+      "aliasOf": "/app-icon-v2-512.png"
+    },
+    {
+      "route": "/maskable-6cc1895139b5-192.png",
+      "source": "brand/split-k/web/maskable-6cc1895139b5-192.png",
+      "contentType": "image/png",
+      "sha256": "3b5aa9f1c3a030ab6ec233ff98a8231c4491deb5e3d5e8982484b2284da33e5a",
+      "derivedFrom": [
+        "brand/split-k/web/maskable-v2-192.png"
+      ],
+      "dimensions": [
+        192,
+        192
+      ],
+      "opaque": true,
+      "aliasOf": "/maskable-v2-192.png"
+    },
+    {
+      "route": "/maskable-6cc1895139b5-512.png",
+      "source": "brand/split-k/web/maskable-6cc1895139b5-512.png",
+      "contentType": "image/png",
+      "sha256": "269b18242fbcdc065d429a0acdc4656936a2eebaabbc42e1fdb2221eb67e87be",
+      "derivedFrom": [
+        "brand/split-k/web/maskable-v2-512.png"
+      ],
+      "dimensions": [
+        512,
+        512
+      ],
+      "opaque": true,
+      "aliasOf": "/maskable-v2-512.png"
+    },
+    {
       "route": "/favicon-1965faabf6d1.ico",
       "source": "brand/split-k/web/favicon-1965faabf6d1.ico",
       "contentType": "image/x-icon",
-      "sha256": "9ffff913ee67e8cb2afeb08febf01f7486c00de99c72acc19cade9caea9e47c2",
+      "sha256": "fc720b9530e56b9666daae1dcfe36316f27a2820e58073f5700acd2dda7f9573",
       "derivedFrom": [
         "brand/split-k/web/favicon-v2.ico"
       ],
@@ -392,7 +606,7 @@
       "route": "/favicon-1965faabf6d1.svg",
       "source": "brand/split-k/web/favicon-1965faabf6d1.svg",
       "contentType": "image/svg+xml",
-      "sha256": "14a514b7fa94c5dd776e540f01c086a4fc9ae3a471cf2e036814da284c56e399",
+      "sha256": "3fd5a3a11fba4e5eacdaabb22232dadb69456908e85a2aeee4a8b08349a5cd2a",
       "derivedFrom": [
         "brand/split-k/web/favicon-v2.svg"
       ],
@@ -427,7 +641,7 @@
       "route": "/favicon-1965faabf6d1-light.svg",
       "source": "brand/split-k/web/favicon-1965faabf6d1-light.svg",
       "contentType": "image/svg+xml",
-      "sha256": "5a1f3648fc0fc3543c62534117771a6363e55b2d7fabbd6d5ab7e5f604c6bb71",
+      "sha256": "cb89d34446374d956cc39bba6d42f23084d8599f9b6e3515d0089b33113fdfd9",
       "derivedFrom": [
         "brand/split-k/web/favicon-v2-light.svg"
       ],
@@ -437,7 +651,7 @@
       "route": "/favicon-1965faabf6d1-light-16.png",
       "source": "brand/split-k/web/favicon-1965faabf6d1-light-16.png",
       "contentType": "image/png",
-      "sha256": "af648dc270468cccb1097005d2b2e272eb8b9f4e376d7ea0f327d4601bd115d1",
+      "sha256": "f153a7b4349e2907197387623837c4d6b05dfcd37625282a8c842869bc79c4b2",
       "derivedFrom": [
         "brand/split-k/web/favicon-v2-light-16.png"
       ],
@@ -452,7 +666,7 @@
       "route": "/favicon-1965faabf6d1-light-32.png",
       "source": "brand/split-k/web/favicon-1965faabf6d1-light-32.png",
       "contentType": "image/png",
-      "sha256": "06f2d6778c903eac00c778d45963c9113013c90d32f78015b7d570ff8df8ad9a",
+      "sha256": "c6ff0dd1981916620576e4942f8ff9879a6c5e887108b7f683165f429991a9a9",
       "derivedFrom": [
         "brand/split-k/web/favicon-v2-light-32.png"
       ],
@@ -467,7 +681,7 @@
       "route": "/favicon-1965faabf6d1-dark.svg",
       "source": "brand/split-k/web/favicon-1965faabf6d1-dark.svg",
       "contentType": "image/svg+xml",
-      "sha256": "14a514b7fa94c5dd776e540f01c086a4fc9ae3a471cf2e036814da284c56e399",
+      "sha256": "3fd5a3a11fba4e5eacdaabb22232dadb69456908e85a2aeee4a8b08349a5cd2a",
       "derivedFrom": [
         "brand/split-k/web/favicon-v2-dark.svg"
       ],
@@ -477,7 +691,7 @@
       "route": "/favicon-1965faabf6d1-dark-16.png",
       "source": "brand/split-k/web/favicon-1965faabf6d1-dark-16.png",
       "contentType": "image/png",
-      "sha256": "3bcc08c0054682392bf9be0bc62d042cf5ceaf3c054f8ba9c6943506c614507a",
+      "sha256": "458b04c2c50f84ecf20b26cb4a91bacc209f8480771695fcf56709a5fc501ca1",
       "derivedFrom": [
         "brand/split-k/web/favicon-v2-dark-16.png"
       ],
@@ -492,7 +706,7 @@
       "route": "/favicon-1965faabf6d1-dark-32.png",
       "source": "brand/split-k/web/favicon-1965faabf6d1-dark-32.png",
       "contentType": "image/png",
-      "sha256": "433914e92f510c2ed24a1f9c0a5cd244c838bea6fdaa2b99d534664721d03883",
+      "sha256": "d2c6f461611afe184dda02244876f4b88499daa07cc24fb28256ff55b4a85574",
       "derivedFrom": [
         "brand/split-k/web/favicon-v2-dark-32.png"
       ],
@@ -564,6 +778,36 @@
       "aliasOf": "/maskable-v2-512.png"
     },
     {
+      "route": "/favicon-6cc1895139b5-light.ico",
+      "source": "brand/split-k/web/favicon-6cc1895139b5-light.ico",
+      "contentType": "image/x-icon",
+      "sha256": "79473a3d7dd7ca0a76ee47202225b36c102a3dc505907142630570aeb4c02cde",
+      "derivedFrom": [
+        "brand/split-k/web/favicon-v2-light.ico"
+      ],
+      "aliasOf": "/favicon-v2-light.ico"
+    },
+    {
+      "route": "/favicon-6cc1895139b5-dark.ico",
+      "source": "brand/split-k/web/favicon-6cc1895139b5-dark.ico",
+      "contentType": "image/x-icon",
+      "sha256": "fc720b9530e56b9666daae1dcfe36316f27a2820e58073f5700acd2dda7f9573",
+      "derivedFrom": [
+        "brand/split-k/web/favicon-v2-dark.ico"
+      ],
+      "aliasOf": "/favicon-v2-dark.ico"
+    },
+    {
+      "route": "/favicon-theme-6cc1895139b5.js",
+      "source": "brand/split-k/web/favicon-theme-6cc1895139b5.js",
+      "contentType": "text/javascript",
+      "sha256": "438e2c44cada8c2a0ae77ff4000d87f5d943b00afda39a786850f5fe3871140e",
+      "derivedFrom": [
+        "brand/split-k/web/favicon-theme.js"
+      ],
+      "aliasOf": "/favicon-theme.js"
+    },
+    {
       "route": "/social-brand-v2.svg",
       "source": "brand/split-k/web/social-brand-v2.svg",
       "contentType": "image/svg+xml",
@@ -616,16 +860,26 @@
       "route": "/site.webmanifest",
       "source": "brand/split-k/web/site.webmanifest",
       "contentType": "application/manifest+json",
-      "sha256": "7dae3bb3c0394ab3ca94440f96ffbe9e33d0b133366c47c39556d151f592a566",
+      "sha256": "088d9d4006efe48c5d5623be2364b47cf244db5dbb52c73c9c29844f00c15acc",
       "derivedFrom": [
         "brand/split-k/web/derivative-rules.json"
       ]
     },
     {
+      "route": "/site-6cc1895139b5.webmanifest",
+      "source": "brand/split-k/web/site-6cc1895139b5.webmanifest",
+      "contentType": "application/manifest+json",
+      "sha256": "088d9d4006efe48c5d5623be2364b47cf244db5dbb52c73c9c29844f00c15acc",
+      "derivedFrom": [
+        "brand/split-k/web/site.webmanifest"
+      ],
+      "aliasOf": "/site.webmanifest"
+    },
+    {
       "route": "/site-1965faabf6d1.webmanifest",
       "source": "brand/split-k/web/site-1965faabf6d1.webmanifest",
       "contentType": "application/manifest+json",
-      "sha256": "7dae3bb3c0394ab3ca94440f96ffbe9e33d0b133366c47c39556d151f592a566",
+      "sha256": "088d9d4006efe48c5d5623be2364b47cf244db5dbb52c73c9c29844f00c15acc",
       "derivedFrom": [
         "brand/split-k/web/site.webmanifest"
       ],

@@ -4,9 +4,10 @@ The website uses the approved nickel Split K and outlined Inter 780 lockup. The 
 
 | Entry point | Current resource | Approved source |
 | --- | --- | --- |
-| Default browser favicon | `favicon-{iconRevision}.svg`, `favicon-v2.svg`, `favicon.svg` | Dark `applied/favicon-dark.svg` |
-| Explicit themed browser icons | `favicon-v2-light.svg`, `favicon-v2-dark.svg`, and their 16/32px PNGs | Unchanged applied polygons and fills |
-| Browser fallback | `favicon-{iconRevision}.ico`, `favicon-v2.ico`, `favicon.ico` | Dark tile at 16, 32, and 48px |
+| Browser selection | `favicon-theme-{iconRevision}.js` | Shared synchronous theme controller |
+| Themed browser ICOs | `favicon-{iconRevision}-light.ico`, `favicon-{iconRevision}-dark.ico` | Transparent applied marks at 16, 32, and 48px |
+| Browser without JavaScript | Light themed ICO in `noscript` | Ink/Nickel transparent mark |
+| Legacy browser aliases | `favicon.svg`, `favicon.ico`, stable and previous hashed paths | Transparent dark mark; explicit themed resources retain their theme |
 | Apple touch icon | `apple-touch-icon-{iconRevision}.png` | Reversed Split K on a square Ink plate |
 | Installed app icons | `app-icon-v2-192.png`, `app-icon-v2-512.png` | `app-icon-v2.svg` |
 | Maskable app icons | `maskable-v2-192.png`, `maskable-v2-512.png` | `maskable-v2.svg` |
@@ -16,15 +17,17 @@ The website uses the approved nickel Split K and outlined Inter 780 lockup. The 
 
 ## Icon placement
 
-Browser tiles use a 64 by 64px canvas and an 8px corner radius. The visible mark is 48px tall, centered at (32, 32) by its actual polygon bounds. The generator applies one uniform transform to the three original polygons. It preserves every point string and fill. Light tiles use an Ivory `#F7F6F2` plate with Ink `#0B0D0E` primary shapes. Dark tiles reverse those two colors. The lower arm remains Nickel `#8B9096` in both themes. The rounded plate is an external container; it does not round the mark.
+Browser icons use a transparent 64 by 64px canvas. The visible mark is 48px tall, centered at (32, 32) by its actual polygon bounds. The generator applies one uniform transform to the three original polygons. It preserves every point string and fill. Light icons use Ink `#0B0D0E` primary shapes; dark icons use Ivory `#F7F6F2`. The lower arm remains Nickel `#8B9096` in both themes. Browser icons contain no plate, external corner radius, stroke, or baked-in border.
 
-Head links supply explicit light and dark SVGs and 16/32px PNGs with media queries. Every ICO frame and unqualified SVG/PNG alias uses the dark tile. Consumers that ignore media queries or fetch `/favicon.ico` directly therefore receive an Ink plate with Ivory primary shapes and Nickel on the lower arm. Favicon SVGs contain no stylesheet, and their responses require no CSP hash exception. Safari's pinned-tab API applies a single mask color, so its approved monochrome source remains the documented exception.
+The head loads one synchronous classic script from the same origin. It reads `prefers-color-scheme`, creates exactly one typed ICO link before parsing finishes, and updates that same link when the theme changes. The head contains no competing static PNG or SVG favicon links. A single light ICO inside `noscript` supplies the JavaScript-disabled fallback. The theme controller is byte-identical across the product family and its fingerprint is recorded in the rules. It uses the existing `script-src 'self'` CSP; no inline script or policy exception is needed.
+
+Each themed ICO contains exact corresponding PNG pixels at 16, 32, and 48px. The unqualified SVG, PNG and ICO aliases retain a transparent dark compatibility fallback. Explicit themed SVG and PNG resources remain served for direct consumers. Favicon SVGs contain no stylesheet. Safari's pinned-tab API applies a single mask color, so its approved monochrome source remains the documented exception. Native browsers can retain a previously processed icon after new bytes and paths are available; successful resource delivery does not prove an existing profile's cache has changed.
 
 Apple touch and regular app icons use the same 48px visible reversed mark on an opaque, square Ink plate. Maskable icons use a 36px visible mark, centered by the same bounds. The smaller maskable alternate keeps the complete silhouette and antialias pixels inside the central 80%-diameter safe-zone circle. The PWA manifest also uses Ink for its background and theme colors. The platform supplies the final mask. Regular and maskable icons intentionally have different placement.
 
-The raster recipe remains unchanged: `magick -background none -density 384 source.svg -resize WIDTHxHEIGHT! -strip -colorspace sRGB PNG32:output.png`. This fixes the corner antialiasing across product icons. Browser PNG corners retain alpha; square installation icons have alpha 255 throughout.
+The raster recipe remains unchanged: `magick -background none -density 384 source.svg -resize WIDTHxHEIGHT! -strip -colorspace sRGB PNG32:output.png`. The same raster recipe applies across product icons. Both browser themes have alpha zero outside the mark, including all outer edges and corners. Square installation icons have alpha 255 throughout.
 
-Head icon, touch, pinned-mask, and manifest links use fresh filenames containing `iconRevision`, the first 12 hex characters of SHA-256 over sorted icon route/export fingerprints. The PWA manifest references the same hashed app and maskable filenames. The generator derives the identity from actual bytes and synchronizes static `index.html` with `renderBrandHead()`. Stable aliases retain current bytes for older consumers; new hashed paths avoid reusing an older favicon or touch-icon cache.
+Head icon, touch, pinned-mask, and manifest links use fresh filenames containing `iconRevision`, the first 12 hex characters of SHA-256 over sorted icon route/export fingerprints, including the shared controller bytes. The PWA manifest references the same hashed app and maskable filenames. The generator derives the identity from actual bytes and synchronizes static `index.html` with `renderBrandHead()`. The previous `1965faabf6d1` filenames and stable aliases remain public compatibility routes and receive current derivative bytes; new hashed paths avoid reusing an older favicon or touch-icon cache.
 
 ## Sharing card
 
