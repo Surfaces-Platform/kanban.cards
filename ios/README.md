@@ -65,3 +65,15 @@ Recorded physical sign-in used Apple's development association mode with explici
 Simulator unit and workflow tests passed. Private physical installation, launch, existing-owner passkey sign-in, and Workspace Projects reading passed; sign-in was verified in development association mode only. The shared write workflow, regular CDN association, broader accessibility/device coverage, and publication remain open in the [verification record](../docs/iphone-native-app-verification.md).
 
 App Store preparation still needs artwork, privacy and export-compliance declarations, distribution signing, and submission review. No signing credentials, personal profiles, device diagnostics, or owner screenshots are included in source control.
+
+## App icon
+
+The app uses the canonical Nickel Split K artwork in `KanbanCards/AppIcon.icon`. Apple's [Icon Composer](https://developer.apple.com/documentation/xcode/creating-your-app-icon-using-icon-composer) supplies the native icon shape, sizes, and system appearances. The source artwork keeps the approved geometry, Ink background, ivory stem and upper arm, and Nickel lower arm.
+
+To refresh both native icons from [the canonical brand tile](../brand/split-k/app-icons/app-icon-nickel.svg), run from the repository root:
+
+```sh
+python3 scripts/sync-native-app-icons.py
+```
+
+Xcode compiles the checked-in icon documents for both Debug and Release builds. Rebuild and reinstall the app to update an existing installation.
