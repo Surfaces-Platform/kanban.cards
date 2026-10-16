@@ -56,6 +56,17 @@ final class DraftStore {
     }
 
     private func write(_ data: Data, ownerID: String, resourceKey: String) throws {
+        #if DEBUG
+        // Opt-in fault injection for synthetic UI tests; Release and live owners
+        // always use the ordinary filesystem write below.
+        let arguments = ProcessInfo.processInfo.arguments
+        if ownerID == "demo-owner", arguments.contains("--demo"),
+           arguments.contains("--demo-comment-draft-write-failure"), resourceKey.hasSuffix(":comment"),
+           let marker = ProcessInfo.processInfo.environment["KANBAN_CARDS_DEMO_COMMENT_WRITE_FAILURE_FILE"],
+           fileManager.fileExists(atPath: marker) {
+            throw CocoaError(.fileWriteNoPermission)
+        }
+        #endif
         let url = fileURL(ownerID: ownerID, resourceKey: resourceKey)
         let ownerDirectory = url.deletingLastPathComponent()
         try fileManager.createDirectory(at: ownerDirectory, withIntermediateDirectories: true,

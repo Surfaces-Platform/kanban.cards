@@ -1,9 +1,8 @@
 import AppKit
-import CryptoKit
 import Foundation
 import XCTest
 
-/// Fault injection is restricted to demo-owner drafts inside the dedicated pilot VM.
+/// The Debug-only write fault is restricted to demo-owner Comment drafts in the pilot VM.
 /// Card and Comment contents are created through the native interface.
 @MainActor
 final class CommentDraftRecoveryTests: XCTestCase {
@@ -16,14 +15,21 @@ final class CommentDraftRecoveryTests: XCTestCase {
 
     func testCommentWriteFailureKeepsRecoveryUsableWhileCardAndNavigationAreLocked() throws {
         let fileManager = FileManager.default
-        let pilotSource = fileManager.homeDirectoryForCurrentUser
-            .appendingPathComponent("kanban-ui-pilot/source", isDirectory: true)
-        try XCTSkipUnless(fileManager.fileExists(atPath: pilotSource.path),
-                          "This filesystem fault injection runs only in the dedicated pilot VM.")
+        try XCTSkipUnless(fileManager.fileExists(atPath: "/Volumes/My Shared Files/scripts/expected-source-manifest.json"),
+                          "This fault injection runs only in the dedicated pilot VM.")
+        let failureMarker = fileManager.temporaryDirectory
+            .appendingPathComponent("comment-write-failure-\(UUID().uuidString)")
+        defer {
+            if fileManager.fileExists(atPath: failureMarker.path) {
+                do { try fileManager.removeItem(at: failureMarker) }
+                catch { XCTFail("Could not remove the Comment write failure marker: \(error)") }
+            }
+        }
 
         let app = XCUIApplication()
         app.launchArguments = ["--demo", "--reset-demo-drafts", "--reset-demo-window-layout",
-                               "-ApplePersistenceIgnoreState", "YES"]
+                               "--demo-comment-draft-write-failure", "-ApplePersistenceIgnoreState", "YES"]
+        app.launchEnvironment["KANBAN_CARDS_DEMO_COMMENT_WRITE_FAILURE_FILE"] = failureMarker.path
         app.launch()
         runningApp = app
         app.typeKey("0", modifierFlags: .command)
@@ -46,13 +52,9 @@ final class CommentDraftRecoveryTests: XCTestCase {
         XCTAssertTrue(comment.isHittable)
         XCTAssertEqual(app.sheets.count, 0)
 
-        // Block only the synthetic owner's directory. Keep its existing draft files
-        // intact in a sibling directory, and restore them even when an assertion fails.
-        let fault = try DemoOwnerDraftWriteFault(fileManager: fileManager)
-        defer {
-            do { try fault.restore() }
-            catch { XCTFail("Could not restore the demo draft directory: \(error)") }
-        }
+        // The marker enables the Debug-only failure for synthetic Comment writes.
+        // Normal UI interactions still create every Card and Comment value.
+        try Data("Fail demo Comment draft writes".utf8).write(to: failureMarker, options: .atomic)
         let text = "This complete inline Comment survives a failed local write, then posts once."
         replace(comment, with: text)
         let retry = composer.buttons["Retry Saving Local Draft"]
@@ -82,7 +84,7 @@ final class CommentDraftRecoveryTests: XCTestCase {
         XCTAssertFalse(title.isEnabled)
         XCTAssertFalse(save.isEnabled)
 
-        try fault.restore()
+        try fileManager.removeItem(at: failureMarker)
         reveal(retry, in: card)
         retry.click()
         XCTAssertTrue(retry.waitForNonExistence(timeout: 5))
@@ -138,48 +140,5 @@ final class CommentDraftRecoveryTests: XCTestCase {
     private func waitUntil(_ condition: @escaping () -> Bool) {
         let expectation = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in condition() }, object: nil)
         XCTAssertEqual(XCTWaiter.wait(for: [expectation], timeout: 5), .completed)
-    }
-}
-
-/// A regular file at the owner's directory path makes DraftStore's atomic writes
-/// fail without changing permissions or touching another owner's recovery data.
-private final class DemoOwnerDraftWriteFault {
-    private let fileManager: FileManager
-    private let directory: URL
-    private let backup: URL
-    private let marker = Data("Native UI test demo-owner draft write blocker".utf8)
-    private var installed = false
-
-    init(fileManager: FileManager) throws {
-        self.fileManager = fileManager
-        let digest = SHA256.hash(data: Data("demo-owner".utf8)).map { String(format: "%02x", $0) }.joined()
-        let root = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("cards.kanban.macOS/Drafts", isDirectory: true)
-        directory = root.appendingPathComponent(digest, isDirectory: true)
-        backup = root.appendingPathComponent(".comment-recovery-\(UUID().uuidString)", isDirectory: true)
-        let attributes = try fileManager.attributesOfItem(atPath: directory.path)
-        guard attributes[.type] as? FileAttributeType == .typeDirectory else {
-            throw NSError(domain: "CommentDraftRecoveryTests", code: 1,
-                          userInfo: [NSLocalizedDescriptionKey: "Expected the native UI-created demo draft directory."])
-        }
-        try fileManager.moveItem(at: directory, to: backup)
-        do {
-            try marker.write(to: directory, options: .atomic)
-            installed = true
-        } catch {
-            try fileManager.moveItem(at: backup, to: directory)
-            throw error
-        }
-    }
-
-    func restore() throws {
-        guard installed else { return }
-        guard try Data(contentsOf: directory) == marker else {
-            throw NSError(domain: "CommentDraftRecoveryTests", code: 2,
-                          userInfo: [NSLocalizedDescriptionKey: "The draft blocker changed; refusing to remove unexpected content."])
-        }
-        try fileManager.removeItem(at: directory)
-        try fileManager.moveItem(at: backup, to: directory)
-        installed = false
     }
 }
