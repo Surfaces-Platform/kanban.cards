@@ -77,7 +77,7 @@ CI runs these unit tests, a Release build, and the Mac source guard alongside th
 
 Keep signed-account, hosted CI, interactive accessibility, and distribution evidence distinct. Use a dedicated test Project for live edit verification and confirm persistence by server readback and relaunch.
 
-The Tart demo pilot uses synthetic data and a 1920×1080 guest display. Run UI automation inside the dedicated macOS VM. `ColumnLayoutAndInlineCommentTests` covers the default presentation, adaptive header, filtering, navigation, and inline comment drafts and submission. `CardContextMenuAndInlineEditTests` covers native context actions, editable window reuse, shared drafts, Save/Revert at narrow widths, draft recovery, keyboard selection, archived Cards, and ordinary click behavior. Historical inspector and mode-switching receipts remain in the pilot evidence.
+The Tart demo pilot uses synthetic data and a 1920×1080 guest display. Run UI automation inside the dedicated macOS VM. `ColumnLayoutAndInlineCommentTests` covers the default presentation, adaptive header, filtering, navigation, and inline comment drafts and submission. `CardContextMenuAndInlineEditTests` covers native context actions, editable window reuse, shared drafts, Save/Revert at narrow widths, draft recovery, keyboard selection, archived Cards, and ordinary click behavior. Historical inspector and mode-switching receipts remain in the pilot evidence. `CommentDraftRecoveryTests` uses an opt-in Debug demo fixture to verify Copy, Export, and Retry after local write failures. UI-test signing must retain the user-selected file read/write entitlement for the native export panel.
 
 ## App icon
 

@@ -55,14 +55,25 @@ final class CommentDraftRecoveryTests: XCTestCase {
         // The marker enables the Debug-only failure for synthetic Comment writes.
         // Normal UI interactions still create every Card and Comment value.
         try Data("Fail demo Comment draft writes".utf8).write(to: failureMarker, options: .atomic)
-        let text = "This complete inline Comment survives a failed local write, then posts once."
+        var text = "This complete inline Comment survives a failed local write."
         replace(comment, with: text)
         let retry = composer.buttons["Retry Saving Local Draft"]
         XCTAssertTrue(retry.waitForExistence(timeout: 5))
-        XCTAssertTrue(comment.isEnabled, "Recovery must leave the Comment text available.")
-        XCTAssertTrue(composer.buttons["Copy Draft"].isEnabled)
-        XCTAssertTrue(composer.buttons["Export Draft…"].isEnabled)
-        XCTAssertTrue(retry.isEnabled)
+        XCTAssertTrue(composer.buttons["Copy Draft"].isEnabled,
+                      "Copy must remain available during recovery. \(card.debugDescription)")
+        XCTAssertTrue(composer.buttons["Export Draft…"].isEnabled,
+                      "Export must remain available during recovery. \(card.debugDescription)")
+        XCTAssertTrue(retry.isEnabled,
+                      "Retry must remain available during recovery. \(card.debugDescription)")
+        // Native NSTextView's AX Enabled value does not establish editability.
+        // Continue typing after the failure to prove that the text remains usable.
+        reveal(comment, in: card)
+        comment.click()
+        comment.typeKey(XCUIKeyboardKey.downArrow.rawValue, modifierFlags: .command)
+        let suffix = " More text added during recovery, then posted once."
+        comment.typeText(suffix)
+        text += suffix
+        assertValue(text, of: comment)
         waitUntil { !title.isEnabled && !save.isEnabled }
         XCTAssertFalse(card.buttons["editor.revert"].isEnabled)
         XCTAssertFalse(board.buttons["board.card.\(licenses)"].isEnabled,
