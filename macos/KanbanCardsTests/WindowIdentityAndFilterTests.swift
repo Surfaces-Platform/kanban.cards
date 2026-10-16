@@ -46,6 +46,28 @@ final class WindowIdentityAndFilterTests: XCTestCase {
         XCTAssertTrue(filter.includes(card))
     }
 
+    func testClearingRefinementsPreservesSearchAndRestoresDefaultArchiveVisibility() {
+        var filter = CardFilter()
+        filter.actor = "agent"
+        filter.priority = "Low"
+        filter.blocked = "true"
+        filter.includesArchived = true
+        filter.search = "homepage"
+        XCTAssertFalse(filter.includes(makeCard()))
+
+        filter.clearRefinements()
+
+        XCTAssertEqual(filter.search, "homepage")
+        XCTAssertEqual(filter.refinementCount, 0)
+        XCTAssertTrue(filter.active, "Search remains an active constraint after clearing refinements.")
+        XCTAssertTrue(filter.includes(makeCard()))
+        var archived = makeCard()
+        archived.archivedAt = ServerTimestamp.string()
+        XCTAssertFalse(filter.includes(archived))
+        filter.search = "unrelated"
+        XCTAssertFalse(filter.includes(makeCard()), "Clearing filters must not silently erase the search.")
+    }
+
     private func makeCard() -> Card {
         Card(id: "card-a", title: "Review homepage", body: "Preserve Markdown source",
             nextActor: .human, nextAction: "Review the layout", priority: .high,

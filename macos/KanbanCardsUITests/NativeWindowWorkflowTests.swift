@@ -28,7 +28,7 @@ final class NativeWindowWorkflowTests: XCTestCase {
 
         showBoard(app)
         board.buttons["board.card.\(homepage)"].click()
-        XCTAssertEqual(app.windows.containing(.button, identifier: "card.edit.\(homepage)").count, 1)
+        XCTAssertEqual(app.windows.containing(.any, identifier: "card.window.\(homepage)").count, 1)
         XCTAssertTrue(second.exists)
         focus(homepage, in: app)
         first.buttons[XCUIIdentifierCloseWindow].click()
@@ -86,12 +86,11 @@ final class NativeWindowWorkflowTests: XCTestCase {
         attach(app, named: "One Card moved and resized independently")
     }
 
-    func testEditSaveSharesBoardStateAndCancelRetainsDraft() throws {
+    func testSaveSharesBoardStateAndRevertKeepsTheWindowEditable() throws {
         let app = launch()
         let first = viewer(homepage, in: app)
         XCTAssertTrue(first.waitForExistence(timeout: 10))
         focus(homepage, in: app)
-        first.buttons["card.edit.\(homepage)"].click()
         let title = first.textFields["editor.title"]
         XCTAssertTrue(title.waitForExistence(timeout: 5))
         let nextAction = first.textFields.matching(NSPredicate(
@@ -106,7 +105,7 @@ final class NativeWindowWorkflowTests: XCTestCase {
         replace(nextAction, with: "Verify saved labels.")
         replace(body, with: "Saved Card description.")
         first.buttons["editor.save"].click()
-        XCTAssertTrue(title.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(title.exists, "Save keeps the Card editable in its existing window.")
         assertLabel(board(in: app).buttons["board.card.\(homepage)"], contains: "Confirmed homepage title")
         for value in ["Confirmed homepage title", "Verify saved labels.", "Saved Card description."] {
             let savedText = first.descendants(matching: .any).matching(NSPredicate(
@@ -116,24 +115,26 @@ final class NativeWindowWorkflowTests: XCTestCase {
         let staleLabels = first.descendants(matching: .any).matching(NSPredicate(
             format: "label IN %@ OR value IN %@", oldValues, oldValues))
         let labelsUpdated = XCTNSPredicateExpectation(predicate: NSPredicate(format: "count == 0"), object: staleLabels)
-        let updateResult = XCTWaiter.wait(for: [labelsUpdated], timeout: 3)
-        attach(app, named: "Native Card accessibility labels after Save")
-        XCTAssertEqual(updateResult, .completed, "No Card accessibility element may retain an old title, action, or body label after Save.")
-
-        first.buttons["card.edit.\(homepage)"].click()
-        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        XCTAssertEqual(XCTWaiter.wait(for: [labelsUpdated], timeout: 3), .completed,
+                       "No Card accessibility element may retain a superseded saved value.")
         replace(title, with: "Keep this unsaved title")
-        first.buttons["editor.cancel"].click()
-        first.buttons["card.edit.\(homepage)"].click()
-        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        showBoard(app)
+        board(in: app).buttons["board.card.\(homepage)"].click()
         XCTAssertEqual(title.value as? String, "Keep this unsaved title")
-        assertLabel(first.staticTexts["editor.draft-status"], contains: "Recovered draft")
-        first.buttons["editor.cancel"].click()
+        XCTAssertEqual(app.windows.containing(.any, identifier: "card.window.\(homepage)").count, 1)
+        first.buttons["editor.revert"].click()
+        let revert = app.buttons["editor.revert-confirm"].firstMatch
+        XCTAssertTrue(revert.waitForExistence(timeout: 5))
+        revert.click()
+        let reverted = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            title.value as? String == "Confirmed homepage title"
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [reverted], timeout: 5), .completed)
         assertLabel(board(in: app).buttons["board.card.\(homepage)"], contains: "Confirmed homepage title")
-        attach(app, named: "Confirmed changes shared while unsaved draft remains separate")
+        attach(app, named: "Save updates shared data and Revert preserves the editable Card window")
     }
 
-    func testFocusedCardReceivesKeyboardEditAndSignOutClearsAllWindows() throws {
+    func testEveryCardWindowIsEditableAndSignOutClearsAllWindows() throws {
         let app = launch()
         let first = viewer(homepage, in: app)
         let second = viewer(signup, in: app)
@@ -141,18 +142,20 @@ final class NativeWindowWorkflowTests: XCTestCase {
         XCTAssertTrue(second.waitForExistence(timeout: 10))
         for (cardID, window) in [(homepage, first), (signup, second)] {
             focus(cardID, in: app)
-            app.typeKey("e", modifierFlags: [.command, .option])
-            XCTAssertTrue(window.textFields["editor.title"].waitForExistence(timeout: 5))
-            window.buttons["editor.cancel"].click()
+            let title = window.textFields["editor.title"]
+            XCTAssertTrue(title.waitForExistence(timeout: 5))
+            XCTAssertTrue(title.isEnabled)
+            XCTAssertFalse(window.buttons["card.edit.\(cardID)"].exists)
+            XCTAssertFalse(window.buttons["editor.cancel"].exists)
         }
         showBoard(app)
         board(in: app).buttons["session.sign-out"].click()
         XCTAssertTrue(app.buttons["session.sign-in"].waitForExistence(timeout: 5))
         XCTAssertTrue(first.waitForNonExistence(timeout: 5))
         XCTAssertTrue(second.waitForNonExistence(timeout: 5))
-        XCTAssertFalse(app.staticTexts["Review homepage hierarchy"].exists)
-        XCTAssertFalse(app.staticTexts["Simplify the signup introduction"].exists)
-        attach(app, named: "Sign-out removes private data from every window")
+        XCTAssertFalse(app.textFields.matching(NSPredicate(format: "value == %@", "Review homepage hierarchy")).firstMatch.exists)
+        XCTAssertFalse(app.textFields.matching(NSPredicate(format: "value == %@", "Simplify the signup introduction")).firstMatch.exists)
+        attach(app, named: "Sign-out removes private data from every editable Card window")
     }
 
     func testClosingBoardPreservesViewersAndShowBoardReopensOnlyOneBoard() throws {
@@ -184,7 +187,6 @@ final class NativeWindowWorkflowTests: XCTestCase {
         assertMenu(app, named: "File", enabled: ["New Card…", "New Project…", "Show Board"])
         assertMenu(app, named: "Project", enabled: ["Edit Project…", "Activity…", "Archive Project…"])
         assertMenu(app, named: "View", enabled: ["Refresh"])
-
         app.typeKey("n", modifierFlags: [.command, .shift])
         let projectName = board(in: app).textFields["project-name"]
         XCTAssertTrue(projectName.waitForExistence(timeout: 5))
@@ -196,33 +198,43 @@ final class NativeWindowWorkflowTests: XCTestCase {
 
         focus(homepage, in: app)
         let first = viewer(homepage, in: app)
-        assertMenu(app, named: "Card", enabled: ["Edit Card…", "Add Comment…", "Move Card…", "Activity…", "Archive Card…"])
+        assertMenu(app, named: "Card", enabled: ["Add Comment", "Move Card…", "Activity…", "Archive Card…"])
         assertMenu(app, named: "View", enabled: ["Refresh"])
+        let title = first.textFields["editor.title"]
+        XCTAssertTrue(title.exists)
+        let originalTitle = title.value as? String
+        title.click()
+        title.typeKey("a", modifierFlags: .command)
         app.typeKey("e", modifierFlags: .command)
-        XCTAssertFalse(first.textFields["editor.title"].exists,
-                       "Command-E must remain available to the system Find selection command.")
-        app.typeKey("e", modifierFlags: [.command, .option])
-        XCTAssertTrue(first.textFields["editor.title"].waitForExistence(timeout: 5))
-        first.buttons["editor.cancel"].click()
-        attach(app, named: "Focused menu coverage and standard keyboard behavior")
+        XCTAssertEqual(title.value as? String, originalTitle,
+                       "Command-E remains the standard system Find selection command.")
+        XCTAssertEqual(app.sheets.count, 0)
+        replace(title, with: "Saved with the File command")
+        assertMenu(app, named: "File", enabled: ["Save"])
+        app.typeKey("s", modifierFlags: .command)
+        assertLabel(board(in: app).buttons["board.card.\(homepage)"], contains: "Saved with the File command")
+        XCTAssertTrue(title.exists)
+        attach(app, named: "Focused File Save and native Find shortcuts preserve the always-editable Card")
     }
 
-    func testCommentCommandCannotQueueBehindCardEditor() throws {
+    func testCommentCommandRunsInlineAlongsideAnUnfinishedCardDraft() throws {
         let app = launch()
         focus(homepage, in: app)
         let first = viewer(homepage, in: app)
-        app.typeKey("e", modifierFlags: [.command, .option])
-        XCTAssertTrue(first.textFields["editor.title"].waitForExistence(timeout: 5))
-        assertMenu(app, named: "Card", disabled: ["Edit Card…", "Add Comment…", "Move Card…", "Activity…", "Archive Card…"])
-        app.typeKey("m", modifierFlags: [.command, .shift])
-        first.buttons["editor.cancel"].click()
-        XCTAssertTrue(first.textFields["editor.title"].waitForNonExistence(timeout: 5))
-        XCTAssertFalse(first.textViews["comment.body"].waitForExistence(timeout: 1),
-                       "Cancel must return to the viewer without opening a queued Comment sheet.")
+        let title = first.textFields["editor.title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        let unfinished = "Unfinished Card while composing a Comment"
+        replace(title, with: unfinished)
+        assertMenu(app, named: "Card", enabled: ["Add Comment", "Move Card…", "Activity…", "Archive Card…"])
         app.typeKey("m", modifierFlags: [.command, .shift])
         XCTAssertTrue(first.textViews["comment.body"].waitForExistence(timeout: 5))
-        first.buttons["editor.cancel"].click()
-        attach(app, named: "Sheet commands disabled until the active task ends")
+        XCTAssertEqual(app.sheets.count, 0)
+        XCTAssertEqual(title.value as? String, unfinished)
+        first.buttons["comment.cancel"].click()
+        XCTAssertTrue(first.textViews["comment.body"].waitForNonExistence(timeout: 5))
+        XCTAssertTrue(title.exists)
+        XCTAssertEqual(title.value as? String, unfinished)
+        attach(app, named: "Inline Comments coexist with the unfinished Card draft")
     }
 
     func testContextualCommentActionKeepsToolbarCompactAndOpensEditor() throws {
@@ -239,7 +251,7 @@ final class NativeWindowWorkflowTests: XCTestCase {
         assertLabel(commentAction, contains: "Add Comment")
         commentAction.click()
         XCTAssertTrue(first.textViews["comment.body"].waitForExistence(timeout: 5))
-        first.buttons["editor.cancel"].click()
+        first.buttons["comment.cancel"].click()
         XCTAssertTrue(first.textViews["comment.body"].waitForNonExistence(timeout: 5))
         let actions = first.descendants(matching: .any).matching(identifier: "card.actions.\(homepage)").firstMatch
         XCTAssertTrue(actions.exists)
@@ -254,7 +266,7 @@ final class NativeWindowWorkflowTests: XCTestCase {
         XCTAssertTrue(done.waitForExistence(timeout: 5), "The native pull-down action must open Activity.")
         done.click()
         XCTAssertTrue(done.waitForNonExistence(timeout: 5))
-        assertMenu(app, named: "Card", enabled: ["Add Comment…", "Activity…", "Archive Card…"])
+        assertMenu(app, named: "Card", enabled: ["Add Comment", "Activity…", "Archive Card…"])
     }
 
     func testRequiredTitleAndRetainedDraftAreExplained() throws {
@@ -296,9 +308,10 @@ final class NativeWindowWorkflowTests: XCTestCase {
         replace(title, with: createdTitle)
         board.buttons["editor.save"].click()
         XCTAssertTrue(title.waitForNonExistence(timeout: 5))
-        let created = app.windows.containing(.staticText, identifier: createdTitle).firstMatch
-        XCTAssertTrue(created.waitForExistence(timeout: 5), "Creation must reveal the confirmed Card.")
-        XCTAssertTrue(created.staticTexts[createdTitle].exists)
+        let created = app.windows.containing(NSPredicate(
+            format: "identifier == %@ AND value == %@", "editor.title", createdTitle)).firstMatch
+        XCTAssertTrue(created.waitForExistence(timeout: 5), "Creation must reveal the confirmed editable Card.")
+        XCTAssertEqual(created.textFields["editor.title"].value as? String, createdTitle)
         showBoard(app)
         XCTAssertEqual(board.popUpButtons["board.filter.actor"].value as? String, "You")
         XCTAssertEqual(board.popUpButtons["board.filter.priority"].value as? String, "High")
@@ -316,9 +329,10 @@ final class NativeWindowWorkflowTests: XCTestCase {
         let priority = board.popUpButtons["board.filter.priority"]
         let blocked = board.popUpButtons["board.filter.blocked"]
         func assertCount(_ visible: Int, file: StaticString = #filePath, line: UInt = #line) {
-            let summary = "\(visible) of 9 Cards"
-            let count = board.staticTexts.matching(NSPredicate(format: "label == %@ OR value == %@", summary, summary)).firstMatch
-            XCTAssertTrue(count.waitForExistence(timeout: 5), "Expected \(summary)", file: file, line: line)
+            let rows = board.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "board.card."))
+            let updated = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in rows.count == visible }, object: nil)
+            XCTAssertEqual(XCTWaiter.wait(for: [updated], timeout: 5), .completed,
+                           "Expected \(visible) visible Card rows; actual: \(rows.count).", file: file, line: line)
         }
 
         assertCount(9)
@@ -334,7 +348,7 @@ final class NativeWindowWorkflowTests: XCTestCase {
         choose("Blocked", from: blocked, in: app)
         assertCount(0)
         XCTAssertEqual(blocked.value as? String, "Blocked")
-        board.buttons["Clear"].click()
+        board.buttons["board.clear-filters"].click()
         assertCount(9)
         XCTAssertEqual(actor.value as? String, "All actors")
         XCTAssertEqual(priority.value as? String, "All priorities")
@@ -351,7 +365,7 @@ final class NativeWindowWorkflowTests: XCTestCase {
         XCTAssertTrue(board.buttons["board.card.\(homepage)"].exists)
         choose("All", from: blocked, in: app)
         assertCount(9)
-        XCTAssertFalse(board.buttons["Clear"].exists)
+        XCTAssertFalse(board.buttons["board.clear-filters"].exists)
         XCTAssertEqual(workspace.value as? String, "Studio Workspace")
         attach(app, named: "Native board popup bindings and restored filter inventory")
     }
@@ -368,14 +382,14 @@ final class NativeWindowWorkflowTests: XCTestCase {
                                                          "Archived Project", "Archived Project")).firstMatch,
                     contains: "read-only")
         XCTAssertFalse(board.buttons["board.new-card"].isEnabled)
-        XCTAssertFalse(viewer(homepage, in: app).buttons["card.edit.\(homepage)"].isEnabled)
+        XCTAssertFalse(viewer(homepage, in: app).textFields["editor.title"].isEnabled)
         assertMenu(app, named: "Project", enabled: ["Restore Project…"], disabled: ["Edit Project…"])
         clickMenu(app, named: "Project", item: "Restore Project…")
         let restore = board.buttons["project.restore-confirm"]
         XCTAssertTrue(restore.waitForExistence(timeout: 5))
         restore.click()
         assertEnabled(board.buttons["board.new-card"])
-        assertEnabled(viewer(homepage, in: app).buttons["card.edit.\(homepage)"])
+        assertEnabled(viewer(homepage, in: app).textFields["editor.title"])
         app.typeKey("n", modifierFlags: .command)
         XCTAssertTrue(board.textFields["editor.title"].waitForExistence(timeout: 5))
         board.buttons["editor.cancel"].click()
@@ -393,7 +407,7 @@ final class NativeWindowWorkflowTests: XCTestCase {
         // Establish a synthetic initial workspace through the normal UI, without
         // racing forced example opening against the system's restoration transaction.
         for cardID in [homepage, signup] {
-            for window in app.windows.containing(.button, identifier: "card.edit.\(cardID)").allElementsBoundByIndex {
+            for window in app.windows.containing(.any, identifier: "card.window.\(cardID)").allElementsBoundByIndex {
                 window.buttons[XCUIIdentifierCloseWindow].click()
             }
         }
@@ -409,11 +423,9 @@ final class NativeWindowWorkflowTests: XCTestCase {
         focus(homepage, in: app)
         let titlebar = first.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 95, dy: 26))
         titlebar.click(forDuration: 0.4, thenDragTo: titlebar.withOffset(CGVector(dx: 35, dy: -20)))
-        first.buttons["card.edit.\(homepage)"].click()
         let title = first.textFields["editor.title"]
         XCTAssertTrue(title.waitForExistence(timeout: 5))
         replace(title, with: "Draft recovered after normal app relaunch")
-        first.buttons["editor.cancel"].click()
         focus(signup, in: app)
         let rightEdge = second.coordinate(withNormalizedOffset: CGVector(dx: 1, dy: 0.6))
             .withOffset(CGVector(dx: -1, dy: 0))
@@ -431,17 +443,15 @@ final class NativeWindowWorkflowTests: XCTestCase {
         XCTAssertTrue(restoredFirst.waitForExistence(timeout: 10))
         XCTAssertTrue(restoredSecond.waitForExistence(timeout: 10))
         XCTAssertEqual(app.windows.containing(.button, identifier: "session.sign-out").count, 1)
-        XCTAssertEqual(app.windows.containing(.button, identifier: "card.edit.\(homepage)").count, 1)
-        XCTAssertEqual(app.windows.containing(.button, identifier: "card.edit.\(signup)").count, 1)
+        XCTAssertEqual(app.windows.containing(.any, identifier: "card.window.\(homepage)").count, 1)
+        XCTAssertEqual(app.windows.containing(.any, identifier: "card.window.\(signup)").count, 1)
         assertFrame(restoredFirst.frame, equals: firstFrame)
         assertFrame(restoredSecond.frame, equals: secondFrame)
         focus(homepage, in: app)
-        restoredFirst.buttons["card.edit.\(homepage)"].click()
         let recoveredTitle = restoredFirst.textFields["editor.title"]
         XCTAssertTrue(recoveredTitle.waitForExistence(timeout: 5))
         XCTAssertEqual(recoveredTitle.value as? String, "Draft recovered after normal app relaunch")
         assertLabel(restoredFirst.staticTexts["editor.draft-status"], contains: "Recovered draft")
-        restoredFirst.buttons["editor.cancel"].click()
         attach(app, named: "Normal relaunch restores viewers geometry and retained draft")
     }
 
@@ -469,7 +479,7 @@ final class NativeWindowWorkflowTests: XCTestCase {
             XCTAssertEqual(board.popUpButtons["board.filter.actor"].value as? String, "Unassigned")
             XCTAssertEqual(board.popUpButtons["board.filter.priority"].value as? String, "High")
             XCTAssertEqual(board.popUpButtons["board.filter.blocked"].value as? String, "Unblocked")
-            XCTAssertTrue(board.buttons["Clear"].isHittable)
+            XCTAssertTrue(board.buttons["board.clear-filters"].isHittable)
             assertFiltersFit(board)
             for column in ["next", "doing", "done"] {
                 XCTAssertTrue(board.descendants(matching: .any).matching(identifier: "board.column.\(column)").firstMatch.exists)
@@ -500,7 +510,7 @@ final class NativeWindowWorkflowTests: XCTestCase {
             try flow.leave("Leave sidebar", terms: ["Workspaces and Projects"])
             try flow.enterBoardContents()
             try flow.enter("Project name", terms: ["Atlas website"], role: "heading")
-            try flow.forward("Project description", terms: ["Prepare a clear"])
+            try flow.forward("Board information", terms: ["Board information"], role: "button")
             try flow.leave("Leave overview", terms: ["Project overview"])
             try flow.selectPopup("Next actor", identifier: "board.filter.actor", value: "You", expectedCount: 4)
             try flow.selectPopup("Priority", identifier: "board.filter.priority", value: "High", expectedCount: 3)
@@ -531,7 +541,6 @@ final class NativeWindowWorkflowTests: XCTestCase {
             let app = flow.app
             focus(homepage, in: app)
             let first = viewer(homepage, in: app)
-            app.typeKey("e", modifierFlags: [.command, .option])
             let title = first.textFields["editor.title"]
             let action = first.textFields.matching(NSPredicate(
                 format: "value == %@", "Choose the preferred heading order")).firstMatch
@@ -548,7 +557,7 @@ final class NativeWindowWorkflowTests: XCTestCase {
             XCTAssertEqual(title.value as? String, savedTitle)
             XCTAssertEqual(body.value as? String, savedBody)
             first.buttons["editor.save"].click()
-            XCTAssertTrue(title.waitForNonExistence(timeout: 5))
+            XCTAssertTrue(title.exists, "Save leaves the native Title field editable.")
             let setup = XCTAttachment(string: "Native Window-menu focus, editor interaction, and Save establish the synthetic data change as setup; these actions do not prove VoiceOver activation. The following native VoiceOver traversal must speak the newly saved title, action, and description and must not speak the original content. The shared helper retains the actual speech transcript and screenshot.")
             setup.name = "Saved Card setup and actual speech boundary"
             setup.lifetime = .keepAlways
@@ -556,11 +565,9 @@ final class NativeWindowWorkflowTests: XCTestCase {
 
             let firstReadingStep = flow.transcript.count
             try flow.startCardReading()
-            try flow.scan("Updated Card title", terms: [savedTitle], role: "heading", limit: 12)
-            try flow.scan("Next action heading", terms: ["Next action"], role: "heading", limit: 8)
-            try flow.scan("Updated next action", terms: [savedAction], limit: 4)
-            try flow.scan("Description heading", terms: ["Description"], role: "heading", limit: 16)
-            try flow.scan("Updated Description body", terms: [savedBody], limit: 4)
+            try flow.scan("Updated Card Title field", terms: [savedTitle, "Title"], role: "edit text", limit: 20)
+            try flow.scan("Updated Next action field", terms: [savedAction, "Next action"], role: "edit text", limit: 20)
+            try flow.scan("Updated Description field", terms: [savedBody, "Description"], role: "edit text", limit: 16)
             let capturedSpeech = flow.transcript.dropFirst(firstReadingStep).joined(separator: "\n")
             for oldContent in ["Review homepage hierarchy", "Choose the preferred heading order", "Help a first-time visitor"] {
                 XCTAssertFalse(capturedSpeech.localizedCaseInsensitiveContains(oldContent),
@@ -583,13 +590,12 @@ final class NativeWindowWorkflowTests: XCTestCase {
                                 "The Comment must announce a native relative duration immediately after its author: \(speech)")
             }
             try flow.startCardReading()
-            try flow.scan("Card title", terms: ["Review homepage hierarchy"], limit: 12)
-            try flow.scan("Next action", terms: ["Next action"], limit: 8)
-            try flow.scan("Details", terms: ["Details"], limit: 8)
-            try flow.readMetadata("Next actor", value: "You")
-            try flow.readMetadata("Priority", value: "High")
-            try flow.readMetadata("Blocker", value: "None")
-            try flow.scan("Description", terms: ["Description"], limit: 10)
+            try flow.scan("Card Title field", terms: ["Review homepage hierarchy", "Title"], role: "edit text", limit: 20)
+            try flow.scan("Next actor popup", terms: ["Next actor", "You"], role: "pop up button", limit: 12)
+            try flow.scan("Priority popup", terms: ["Priority", "High"], role: "pop up button", limit: 8)
+            try flow.scan("Next action field", terms: ["Next action"], role: "edit text", limit: 8)
+            try flow.scan("Blocker field", terms: ["Blocker"], role: "edit text", limit: 8)
+            try flow.scan("Description field", terms: ["Description"], role: "edit text", limit: 10)
             try flow.scan("Comments", terms: ["Comments (2)"], limit: 10)
             try flow.scan("First Comment author and time", terms: ["Studio assistant"], limit: 8)
             assertCommentDuration(after: "Studio assistant", speech: flow.lastSpeech)
@@ -621,140 +627,77 @@ final class NativeWindowWorkflowTests: XCTestCase {
             try flow.scan("Cancel Comment", terms: ["Cancel"], role: "button", limit: 20)
             try flow.activate("Cancel Comment")
             XCTAssertTrue(first.textViews["comment.body"].waitForNonExistence(timeout: 5))
-            XCTAssertTrue(first.buttons["card.edit.\(homepage)"].isEnabled)
+            XCTAssertTrue(first.textFields["editor.title"].isEnabled)
+            XCTAssertEqual(flow.app.sheets.count, 0)
         }
     }
 
     func testNativeVoiceOverRequiredTitleAndIndependentCardEditing() throws {
         guard #available(macOS 27.0, *) else { XCTFail("Requires the macOS 27 VoiceOver test service."); return }
-        try withVoiceOverDemo("Required Title and independent Card editing",
+        try withVoiceOverDemo("Required Title and independent editable Cards",
                               openExampleCards: true, resetBoardCursor: false) { flow in
             let app = flow.app
-            let setup = XCTAttachment(string: "The demo opens the board and two synthetic Card windows. The native Window menu focuses each Card, and the native Edit keyboard shortcut opens its editor; these are setup actions, not VoiceOver opening proof. Board navigation and Card opening are covered separately. This workflow requires actual field speech, exact initial and draft values, required-field validation, independent focused editors, and native Cancel activation.")
-            setup.name = "Independent Card editor setup and VoiceOver proof boundary"
+            let setup = XCTAttachment(string: "The demo opens the board and two synthetic Card windows. The native Window menu and Title click establish the focused field as setup; actual VoiceOver speech must identify its value, required label, and edit-text role. Native VoiceOver activation must invoke Revert and confirm it. The other Card must keep its original Title.")
+            setup.name = "Independent editable Card setup and VoiceOver proof boundary"
             setup.lifetime = .keepAlways
             add(setup)
-            @MainActor func requireInitialTitle(_ value: String, in field: XCUIElement) throws {
-                // Native sheet entry can initially announce the dialog title
-                // or its selected Title field. Traverse from either position;
-                // a field's presence alone does not prove its spoken identity.
-                if !flow.lastSpeech.localizedCaseInsensitiveContains(value) {
-                    // The sheet can announce only "Edit Card" while its Title
-                    // is already in text interaction. Forward would skip it.
-                    try flow.leave("Leave autofocused Title text interaction")
-                    try flow.beginContentScan("Initial Title after text interaction")
-                }
-                try flow.scan("Initial Title value", terms: [value], limit: 20)
-                try flow.require("Initial Title value", terms: [value])
-                let speech = flow.lastSpeech
-                let fullTitle = speech.range(of: #"\bTitle\b"#, options: [.regularExpression, .caseInsensitive]) != nil
-                let clippedTitle = speech.count == 64
-                    && speech.range(of: #"\bTit(?:l)?$"#, options: [.regularExpression, .caseInsensitive]) != nil
-                XCTAssertTrue(fullTitle || clippedTitle,
-                              "The initial selected field must announce its Title label or the observed 64-character Title prefix: \(speech)")
-                XCTAssertEqual(field.value as? String, value)
-            }
             focus(homepage, in: app)
             let first = viewer(homepage, in: app)
-            XCTAssertTrue(first.exists)
-            app.typeKey("e", modifierFlags: [.command, .option])
             let firstTitle = first.textFields["editor.title"]
             XCTAssertTrue(firstTitle.waitForExistence(timeout: 5))
-            try flow.beginContentScan("Autofocused homepage Title")
-            try requireInitialTitle("Review homepage hierarchy", in: firstTitle)
+            firstTitle.click()
+            try flow.beginContentScan("Focused homepage Title")
+            try flow.scan("Homepage Title field", terms: ["Review homepage hierarchy", "Title"], role: "edit text", limit: 20)
+            try flow.activate("Edit homepage Title")
             app.typeKey("a", modifierFlags: .command)
             app.typeKey(XCUIKeyboardKey.delete.rawValue, modifierFlags: [])
             XCTAssertEqual(firstTitle.value as? String, "")
             XCTAssertFalse(first.buttons["editor.save"].isEnabled)
-
-            // A short draft keeps the complete native label/role within this
-            // host's observed speech capture boundary after empty validation.
             app.typeText("Draft")
             XCTAssertEqual(firstTitle.value as? String, "Draft")
             assertEnabled(first.buttons["editor.save"])
-            try flow.current("Short Title field")
+            try flow.current("Short required Title")
             if !flow.lastSpeech.localizedCaseInsensitiveContains("Title")
                 || !flow.lastSpeech.localizedCaseInsensitiveContains("required")
                 || !flow.lastSpeech.localizedCaseInsensitiveContains("edit text") {
                 try flow.leave("Leave Title text interaction for its complete label")
                 try flow.beginContentScan("Required Title after text interaction")
-                try flow.scan("Complete required Title field", terms: ["Title", "required"],
-                              role: "edit text", limit: 20)
+                try flow.scan("Complete required Title field", terms: ["Title", "required"], role: "edit text", limit: 20)
             }
             try flow.require("Complete required Title field", terms: ["Title", "required"], role: "edit text")
-            let boundary = XCTAttachment(string: "The initial selected Title can combine the dialog, value, label, and role beyond this host's observed 64-character speech boundary. Its actual value and Title prefix are verified first. Empty validation is verified before typing the exact short draft, enabling Save, and requiring complete Title, required, and native edit-text speech. Native Cancel must leave the viewer's original Title unchanged, and the other Card editor must retain its own original value. This workflow does not claim long-title typing verification.")
-            boundary.name = "Required Title speech capture and native role boundary"
-            boundary.lifetime = .keepAlways
-            add(boundary)
-
             try flow.leave("Leave homepage Title text interaction")
-            try flow.beginContentScan("Homepage editor after text interaction")
-            try flow.scan("Cancel homepage editing", terms: ["Cancel"], role: "button", limit: 24)
-            try flow.activate("Cancel homepage editing")
-            XCTAssertTrue(firstTitle.waitForNonExistence(timeout: 5))
-            XCTAssertTrue(first.buttons["card.edit.\(homepage)"].isEnabled)
-            let unchangedHomepage = first.staticTexts.matching(NSPredicate(
-                format: "label == %@ OR value == %@", "Review homepage hierarchy", "Review homepage hierarchy")).firstMatch
-            XCTAssertTrue(unchangedHomepage.exists, "Cancel must leave the original Card Title unchanged.")
-
+            try flow.beginContentScan("Homepage Card actions")
+            try flow.scan("Revert homepage changes", terms: ["Revert"], role: "button", limit: 24)
+            try flow.activate("Request homepage Revert")
+            let confirmation = app.buttons["editor.revert-confirm"].firstMatch
+            XCTAssertTrue(confirmation.waitForExistence(timeout: 5))
+            try flow.beginContentScan("Revert confirmation")
+            try flow.scan("Confirm Revert Changes", terms: ["Revert Changes"], role: "button", limit: 12)
+            try flow.activate("Confirm homepage Revert")
+            let reverted = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                firstTitle.value as? String == "Review homepage hierarchy"
+            }, object: nil)
+            XCTAssertEqual(XCTWaiter.wait(for: [reverted], timeout: 5), .completed)
+            XCTAssertTrue(firstTitle.exists, "Revert preserves the editable Card field.")
             focus(signup, in: app)
             let second = viewer(signup, in: app)
-            XCTAssertTrue(second.exists)
-            XCTAssertEqual(app.windows.containing(.button, identifier: "card.edit.\(homepage)").count, 1)
-            XCTAssertEqual(app.windows.containing(.button, identifier: "card.edit.\(signup)").count, 1)
-            XCTAssertTrue(board(in: app).exists)
-            app.typeKey("e", modifierFlags: [.command, .option])
             let secondTitle = second.textFields["editor.title"]
             XCTAssertTrue(secondTitle.waitForExistence(timeout: 5))
-            XCTAssertFalse(firstTitle.exists)
-            try flow.beginContentScan("Autofocused signup Title")
-            try requireInitialTitle("Simplify the signup introduction", in: secondTitle)
-            try flow.leave("Leave signup Title text interaction")
-            try flow.beginContentScan("Signup editor after text interaction")
-            try flow.scan("Cancel signup editing", terms: ["Cancel"], role: "button", limit: 24)
-            try flow.activate("Cancel signup editing")
-            XCTAssertTrue(secondTitle.waitForNonExistence(timeout: 5))
-            XCTAssertTrue(second.buttons["card.edit.\(signup)"].isEnabled)
-            XCTAssertFalse(second.textViews["comment.body"].exists)
-            let unchangedSignup = second.staticTexts.matching(NSPredicate(
-                format: "label == %@ OR value == %@", "Simplify the signup introduction", "Simplify the signup introduction")).firstMatch
-            XCTAssertTrue(unchangedSignup.exists, "Editing the first Card must not change the second Card's Title.")
-        }
-    }
-
-    func testNativeVoiceOverHomepageLinearHeadingsAndReadingScope() throws {
-        guard #available(macOS 27.0, *) else { XCTFail("Requires the macOS 27 VoiceOver test service."); return }
-        try verifyNativeCardHeadingSpeech(for: homepage, title: "Review homepage hierarchy",
-                                         excluding: "Simplify the signup introduction")
-    }
-
-    func testNativeVoiceOverSignupLinearHeadingsAndReadingScope() throws {
-        guard #available(macOS 27.0, *) else { XCTFail("Requires the macOS 27 VoiceOver test service."); return }
-        try verifyNativeCardHeadingSpeech(for: signup, title: "Simplify the signup introduction",
-                                         excluding: "Review homepage hierarchy")
-    }
-
-    @available(macOS 27.0, *)
-    private func verifyNativeCardHeadingSpeech(for cardID: String, title: String,
-                                              excluding otherTitle: String) throws {
-        try withVoiceOverDemo("Native heading speech for \(title)",
-                              openExampleCards: true, resetBoardCursor: false) { flow in
-            let app = flow.app
-            let setup = XCTAttachment(string: "Both synthetic Card windows and the board are open. The native Window menu focuses this Card for setup; setup is not VoiceOver proof. Native traversal must capture this Card's title, Next action, Details, Description, and Comments and announce each as a heading. All five identities are captured before role assertions; continueAfterFailure=false can stop this case at its first assertion failure, so the other Card has an independent test. Every captured native traversal step is checked for the other Card's title. No rotor or heading-shortcut behavior is claimed.")
-            setup.name = "Card linear heading speech and reading-scope evidence boundary"
-            setup.lifetime = .keepAlways
-            add(setup)
-            focus(cardID, in: app)
-            try flow.startCardReading()
-            try flow.verifyCardLinearHeadings(
-                [title, "Next action", "Details", "Description", "Comments (2)"],
-                excluding: otherTitle)
-            XCTAssertTrue(viewer(homepage, in: app).exists)
-            XCTAssertTrue(viewer(signup, in: app).exists)
+            XCTAssertEqual(secondTitle.value as? String, "Simplify the signup introduction")
+            secondTitle.click()
+            try flow.beginContentScan("Focused signup Title")
+            try flow.scan("Signup Title field", terms: ["Simplify the signup introduction", "Title"], role: "edit text", limit: 20)
+            XCTAssertEqual(app.windows.containing(.any, identifier: "card.window.\(homepage)").count, 1)
+            XCTAssertEqual(app.windows.containing(.any, identifier: "card.window.\(signup)").count, 1)
             XCTAssertTrue(board(in: app).exists)
-            XCTAssertEqual(app.windows.count, 3)
+            XCTAssertTrue(firstTitle.exists)
+            XCTAssertFalse(second.textViews["comment.body"].exists)
+            XCTAssertEqual(app.sheets.count, 0)
         }
     }
+
+    // The former five-heading reader tests were retired with read/edit modes.
+    // Native form labels, values, Save/Revert, and inline Comments are covered above.
 
     @available(macOS 27.0, *)
     private func withVoiceOverDemo(_ name: String, openExampleCards: Bool = false,
@@ -771,7 +714,7 @@ final class NativeWindowWorkflowTests: XCTestCase {
                 }
             }
         }
-        app.launchArguments = ["--demo", "--reset-demo-drafts", "--reset-demo-window-layout",
+        app.launchArguments = ["--demo", "--card-view", "windows", "--reset-demo-drafts", "--reset-demo-window-layout",
                                "-ApplePersistenceIgnoreState", "YES"]
         if openExampleCards { app.launchArguments.append("--open-example-cards") }
         app.launch()
@@ -925,9 +868,10 @@ final class NativeWindowWorkflowTests: XCTestCase {
         }
 
         func assertCount(_ count: Int) {
-            let summary = "\(count) of 9 Cards"
-            let text = test.board(in: app).staticTexts.matching(NSPredicate(format: "label == %@ OR value == %@", summary, summary)).firstMatch
-            XCTAssertTrue(text.waitForExistence(timeout: 5), "Expected \(summary).")
+            let rows = test.board(in: app).buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "board.card."))
+            let updated = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in rows.count == count }, object: nil)
+            XCTAssertEqual(XCTWaiter.wait(for: [updated], timeout: 5), .completed,
+                           "Expected \(count) visible Card rows; actual: \(rows.count).")
         }
 
         func selectPopup(_ label: String, identifier: String, value: String, expectedCount: Int) throws {
@@ -994,38 +938,6 @@ final class NativeWindowWorkflowTests: XCTestCase {
             scanSeen = [Set()]
             entered = []
             climbsWithoutKnownParent = 0
-        }
-
-        func verifyCardLinearHeadings(_ labels: [String], excluding otherCardTitle: String) throws {
-            guard labels.count == 5, Set(labels).count == 5 else {
-                throw failure("The Card heading verification requires five unique target labels.")
-            }
-            let firstStep = transcript.count
-            defer {
-                let scope = transcript.dropFirst(firstStep).joined(separator: "\n")
-                let attachment = XCTAttachment(string: scope)
-                attachment.name = "Card linear headings: actual names, roles, and reading scope"
-                attachment.lifetime = .keepAlways
-                test.add(attachment)
-            }
-            try scan("Card contents group", terms: ["Card contents"], role: "group", limit: 12)
-            try enter("Enter the Card contents group")
-            var capturedHeadings: [(label: String, speech: String)] = []
-            for label in labels {
-                try scan("Native Card heading: \(label)", terms: [label], limit: 20)
-                capturedHeadings.append((label, lastSpeech))
-                for entry in transcript.dropFirst(firstStep) {
-                    if entry.localizedCaseInsensitiveContains(otherCardTitle) {
-                        throw failure("Native reading crossed into the other Card window: \(otherCardTitle).")
-                    }
-                }
-            }
-            for captured in capturedHeadings {
-                let speech = captured.speech
-                XCTAssertNotNil(speech.range(of: #"\bheading\b"#,
-                                             options: [.regularExpression, .caseInsensitive]),
-                                "\(captured.label) must announce its native heading role: \(speech)")
-            }
         }
 
         private var isContainer: Bool {
@@ -1095,7 +1007,7 @@ final class NativeWindowWorkflowTests: XCTestCase {
             let app = XCUIApplication()
             // Audit a single unobstructed window. Other workflows still exercise
             // the board plus two viewers and preserve their separate raw evidence.
-            app.launchArguments = ["--demo", "--reset-demo-drafts", "--reset-demo-window-layout",
+            app.launchArguments = ["--demo", "--card-view", "windows", "--reset-demo-drafts", "--reset-demo-window-layout",
                                    "-ApplePersistenceIgnoreState", "YES", appearance]
             app.launch()
             showBoard(app)
@@ -1232,7 +1144,7 @@ final class NativeWindowWorkflowTests: XCTestCase {
 
     private func launch(restoration: Bool = false, extraArguments: [String] = []) -> XCUIApplication {
         let app = XCUIApplication()
-        app.launchArguments = ["--demo", "--open-example-cards", "--reset-demo-drafts", "--reset-demo-window-layout"]
+        app.launchArguments = ["--demo", "--card-view", "windows", "--open-example-cards", "--reset-demo-drafts", "--reset-demo-window-layout"]
         if restoration {
             app.launchArguments.removeAll { $0 == "--open-example-cards" }
             app.launchArguments += ["-NSQuitAlwaysKeepsWindows", "YES", "-ApplePersistenceIgnoreState", "NO"]
@@ -1240,6 +1152,7 @@ final class NativeWindowWorkflowTests: XCTestCase {
         else { app.launchArguments += ["-ApplePersistenceIgnoreState", "YES"] }
         app.launchArguments += extraArguments
         app.launch()
+        if !restoration { app.typeKey("0", modifierFlags: .command) }
         return app
     }
 
@@ -1248,7 +1161,7 @@ final class NativeWindowWorkflowTests: XCTestCase {
     }
 
     private func viewer(_ cardID: String, in app: XCUIApplication) -> XCUIElement {
-        app.windows.containing(.button, identifier: "card.edit.\(cardID)").firstMatch
+        app.windows.containing(.any, identifier: "card.window.\(cardID)").firstMatch
     }
 
     private func showBoard(_ app: XCUIApplication) {
@@ -1506,12 +1419,12 @@ private final class ReviewedBoardContainerDiagnostics {
 
     private static func isDetail(_ child: Snapshot) -> Bool {
         guard child.elementType == .group, child.identifier.isEmpty, child.label == "Project board contents",
-              child.isEnabled, child.children.count == 10 else { return false }
+              child.isEnabled, child.children.count == 9 else { return false }
         let nodes = child.children
         guard nodes[0].elementType == .group, nodes[0].label == "Project overview",
               nodes[0].identifier.isEmpty, nodes[0].children.count == 2,
               isLeafHeading(nodes[0].children[0], label: "Atlas website"),
-              isText(nodes[0].children[1], text: "Prepare a clear, accessible launch experience."),
+              isButton(nodes[0].children[1], id: "board.info", label: "Board information"),
               isText(nodes[1], text: "Next actor"),
               isPopup(nodes[2], id: "board.filter.actor", label: "Next actor", value: "All actors"),
               isText(nodes[3], text: "Priority"),
@@ -1520,9 +1433,8 @@ private final class ReviewedBoardContainerDiagnostics {
               isPopup(nodes[6], id: "board.filter.blocked", label: "Blocked", value: "All"),
               nodes[7].elementType == .checkBox, nodes[7].label == "Include archived",
               nodes[7].isEnabled, isZeroValue(nodes[7]),
-              isText(nodes[8], text: "9 of 9 Cards"),
-              isUnnamedDisabled(nodes[9], type: .scrollView), nodes[9].children.count == 1 else { return false }
-        let split = nodes[9].children[0]
+              isUnnamedDisabled(nodes[8], type: .scrollView), nodes[8].children.count == 1 else { return false }
+        let split = nodes[8].children[0]
         guard split.elementType == .splitGroup, split.children.count == 5,
               split.children[1].elementType == .splitter, split.children[3].elementType == .splitter
         else { return false }

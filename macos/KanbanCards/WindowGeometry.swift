@@ -146,19 +146,28 @@ final class CardWindowGeometryView: NSView {
 
 struct NativeWindowAccessibility: NSViewRepresentable {
     let label: String
-    func makeNSView(context: Context) -> WindowAccessibilityView { WindowAccessibilityView(label: label) }
+    var identifier: String? = nil
+    func makeNSView(context: Context) -> WindowAccessibilityView { WindowAccessibilityView(label: label, identifier: identifier) }
     func updateNSView(_ view: WindowAccessibilityView, context: Context) {
         view.contextLabel = label
-        view.window?.contentView?.setAccessibilityLabel(label)
+        view.contextIdentifier = identifier
+        view.updateAccessibility()
     }
 }
 
 final class WindowAccessibilityView: NSView {
     var contextLabel: String
-    init(label: String) { contextLabel = label; super.init(frame: .zero) }
+    var contextIdentifier: String?
+    init(label: String, identifier: String? = nil) {
+        contextLabel = label; contextIdentifier = identifier; super.init(frame: .zero)
+    }
     required init?(coder: NSCoder) { nil }
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        updateAccessibility()
+    }
+    func updateAccessibility() {
         window?.contentView?.setAccessibilityLabel(contextLabel)
+        if let contextIdentifier { window?.contentView?.setAccessibilityIdentifier(contextIdentifier) }
     }
 }
