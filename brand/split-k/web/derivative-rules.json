@@ -1,0 +1,66 @@
+{
+  "version": 5,
+  "authority": "Implements Mike\u2019s October 15 requests to align product icons and remove favicon borders in dark themes.",
+  "palette": {
+    "ink": "#0B0D0E",
+    "ivory": "#F7F6F2",
+    "nickel": "#8B9096"
+  },
+  "browserIcon": {
+    "canvas": 64,
+    "visibleMarkHeight": 48,
+    "center": [
+      32,
+      32
+    ],
+    "background": "transparent",
+    "legacyFallbackTheme": "dark",
+    "noScriptTheme": "light"
+  },
+  "regularAppIcon": {
+    "canvas": 64,
+    "cornerRadius": 0,
+    "visibleMarkHeight": 48,
+    "theme": "dark"
+  },
+  "maskableIcon": {
+    "canvas": 64,
+    "cornerRadius": 0,
+    "visibleMarkHeight": 36,
+    "safeZoneRadiusRatio": 0.4,
+    "theme": "dark"
+  },
+  "socialCard": {
+    "width": 1200,
+    "height": 630,
+    "background": "#0B0D0E",
+    "source": "lockups/horizontal-reversed.svg",
+    "maximumScale": 2.8,
+    "maximumLockupWidth": 960,
+    "taglineInArtwork": false
+  },
+  "iconRaster": {
+    "renderer": "ImageMagick",
+    "density": 384,
+    "resize": "target dimensions with !",
+    "stripMetadata": true,
+    "colorspace": "sRGB",
+    "format": "PNG32",
+    "command": "magick -background none -density 384 source.svg -resize WIDTHxHEIGHT! -strip -colorspace sRGB PNG32:output.png"
+  },
+  "cacheIdentity": {
+    "algorithm": "SHA-256",
+    "length": 12,
+    "input": "Sorted browser and installation icon route/export SHA-256 pairs, including the shared controller bytes, before manifest and social assets.",
+    "placement": "Generated filenames in head and PWA manifest"
+  },
+  "compatibilityIconRevisions": [
+    "1965faabf6d1"
+  ],
+  "browserController": {
+    "source": "favicon-theme.js",
+    "sha256": "438e2c44cada8c2a0ae77ff4000d87f5d943b00afda39a786850f5fe3871140e",
+    "head": "One synchronous classic script selects one typed ICO with matchMedia and updates the same link on theme changes.",
+    "scriptDisabledFallback": "One light ICO inside noscript."
+  }
+}

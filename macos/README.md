@@ -78,3 +78,15 @@ CI runs these unit tests, a Release build, and the Mac source guard alongside th
 Keep signed-account, hosted CI, interactive accessibility, and distribution evidence distinct. Use a dedicated test Project for live edit verification and confirm persistence by server readback and relaunch.
 
 The Tart demo pilot uses synthetic data and a 1920×1080 guest display. Run UI automation inside the dedicated macOS VM. `ColumnLayoutAndInlineCommentTests` covers the default presentation, adaptive header, filtering, navigation, and inline comment drafts and submission. `CardContextMenuAndInlineEditTests` covers native context actions, editable window reuse, shared drafts, Save/Revert at narrow widths, draft recovery, keyboard selection, archived Cards, and ordinary click behavior. Historical inspector and mode-switching receipts remain in the pilot evidence.
+
+## App icon
+
+The app uses the canonical Nickel Split K artwork in `KanbanCards/AppIcon.icon`. Apple's [Icon Composer](https://developer.apple.com/documentation/xcode/creating-your-app-icon-using-icon-composer) supplies the native icon shape, sizes, and system appearances. The source artwork keeps the approved geometry, Ink background, ivory stem and upper arm, and Nickel lower arm.
+
+To refresh both native icons from [the canonical brand tile](../brand/split-k/app-icons/app-icon-nickel.svg), run from the repository root:
+
+```sh
+python3 scripts/sync-native-app-icons.py
+```
+
+Xcode compiles the checked-in icon documents for both Debug and Release builds. Rebuild and reinstall the app to update an existing installation.
