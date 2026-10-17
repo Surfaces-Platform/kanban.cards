@@ -173,8 +173,6 @@ body.public-website {
 }
 
 .public-website .website-hero .website-eyebrow {
-  padding-inline-start: 10px;
-  border-inline-start: 2px solid var(--website-nickel);
   color: var(--website-ivory);
 }
 
