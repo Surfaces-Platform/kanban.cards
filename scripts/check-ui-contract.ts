@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { renderBrandHead } from "../src/brand";
+import { validatePublicWebsiteCss } from "./public-website-contract";
 
 interface Violation {
   file: string;
@@ -842,6 +843,11 @@ async function main(): Promise<void> {
   checkStaticShell(html, violations);
   const declaredTokens = checkJudgmentKitSource(tokens, violations);
   checkApplicationStyles(styles, declaredTokens, violations);
+  const website = await readSource(path.resolve(__dirname, "../website.css"), "website.css", violations);
+  for (const reason of validatePublicWebsiteCss(website.source)) violations.push({ file: website.file, line: 1, reason, code: "body.public-website" });
+  if (!html.source.includes('href="website.css"') || html.source.indexOf('href="website.css"') < html.source.indexOf('href="styles.css"')) {
+    violations.push({ file: html.file, line: 1, reason: "static shell must load scoped website.css after the unchanged Workbench styles", code: 'href="website.css"' });
+  }
 
   if (violations.length) report(violations);
   console.log("V2 Context Dock UI contract check passed.");

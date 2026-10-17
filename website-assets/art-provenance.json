@@ -1,0 +1,28 @@
+{
+  "asset": "kanban-card-cascade.webp",
+  "sha256": "07322bbc443588bb9b4fd9ae5c2567ea67b58d9e93dca591b3b92c862842a699",
+  "bytes": 102742,
+  "width": 1983,
+  "height": 793,
+  "tool": "built-in image_gen",
+  "mode": "new concepts using JudgmentKit and Surfaces only as rendering style references",
+  "prompt": "Use case: stylized-concept. Asset type: kanban.cards full-width website hero. Image1 JudgmentKit and Image2 Surfaces are references for high-end CINEMATIC3D RENDERING, tangible materials, controlled light and shadow, and environmental depth only. Retain that same family rendering language; do not repeat their subjects. Distinct concept: a graceful stream of THIN CARD-SHAPED ivory ceramic and satin-nickel rectangles suspended in a gentle S-shaped progression, beginning as a loose slightly rotated group near the upper-right middle and resolving into three ordered short card queues at the lower far-right. One or two midstream cards are caught in the moment of aligning. Card edges are slim and finely beveled, with shallow inset horizontal grooves suggesting workitems without literal text. Premium product sculpture against a deep charcoal studio environment with a matte graphite ground, directional rim light and soft physically realistic shadows. Spatial and dynamic, neither a flat illustration nor a massive architectural slab installation. Main subject occupies right55percent; left45percent remains quiet dark Ink for HTML copy. Very wide2.5:1 landscape approximately2400x960. No glass lens, rocks, Surfaces slab stack, large architectural walls, software screen, explicit board/window frame, words, numbers, arrows, logos, hands, people or watermark. Render only the wide cinematic3D hero asset.",
+  "source": {
+    "generatedSource": "/Users/mike/.codex/generated_images/01a13b5a-6f01-7672-93d6-35d262864bba/exec-80f667c3-b549-4052-a589-ab00cba94871.png",
+    "durablePng": "/Users/mike/SurfacesBrand/output/website-family-alignment-2026-10-16/revision-2/kanban-rendered-options/cascade.png",
+    "selectedWebp": "/Users/mike/SurfacesBrand/output/website-family-alignment-2026-10-16/revision-2/kanban-rendered-options/cascade.webp"
+  },
+  "use": "Full-width decorative public homepage environment. HTML supplies all copy, controls, and branding; CSS supplies the readability overlay.",
+  "selection": {
+    "authority": "Mike explicitly selected B \u00b7 Card cascade in this task on October 16, 2026.",
+    "option": "B \u00b7 Card cascade",
+    "key": "cascade",
+    "status": "user-selected"
+  },
+  "crop": {
+    "method": "CSS background-size:cover, uniform image scale only; source bytes unchanged",
+    "desktop": "center center",
+    "compact": "80% center",
+    "reason": "Retain the stream and front ordered Card queues in the narrow image-backed hero; root owns final rendered crop acceptance."
+  }
+}

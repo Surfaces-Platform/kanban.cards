@@ -38,7 +38,7 @@ async function authenticator(context: BrowserContext, page: Page): Promise<Authe
 
 async function signup(page: Page, harness: Harness, slug: string): Promise<string> {
   await page.goto(harness.rootOrigin);
-  await page.getByRole("button", { name: "Start free", exact: true }).click();
+  await page.getByRole("button", { name: "Create account", exact: true }).click();
   await expect(page).toHaveURL(`${harness.authOrigin}/sign-up`);
   await page.getByLabel("Workspace name", { exact: true }).fill(`${slug} Workspace`);
   await page.getByLabel("Workspace address", { exact: true }).fill(slug);
@@ -148,7 +148,7 @@ test("recovery replaces a lost passkey, rotates the code, and preserves owner da
     await device.cdp.send("WebAuthn.clearCredentials", { authenticatorId: device.id });
     await page.getByRole("button", { name: "Recover access", exact: true }).click();
     await page.getByLabel("Recovery code", { exact: true }).fill(originalCode);
-    await page.getByRole("button", { name: "Create passkey", exact: true }).click();
+    await page.getByRole("button", { name: "Replace passkeys", exact: true }).click();
     await expect(page.locator("#recovery-code")).toBeVisible();
     const replacementCode = await page.locator("#recovery-code").innerText();
     expect(replacementCode).not.toBe(originalCode);
@@ -164,7 +164,7 @@ test("recovery replaces a lost passkey, rotates the code, and preserves owner da
     await signout(page, harness);
     await page.getByRole("button", { name: "Recover access", exact: true }).click();
     await page.getByLabel("Recovery code", { exact: true }).fill(originalCode);
-    await page.getByRole("button", { name: "Create passkey", exact: true }).click();
+    await page.getByRole("button", { name: "Replace passkeys", exact: true }).click();
     await expect(page.getByText("Passkey access did not complete", { exact: true })).toBeVisible();
     await expect(page.locator("#recovery-code")).toHaveCount(0);
   } finally { await harness.stop(); }

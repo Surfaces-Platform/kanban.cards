@@ -3,6 +3,9 @@ dist/
 public/app.js
 public/judgmentkit.css
 public/styles.css
+public/website.css
+public/fonts/
+public/images/
 public/robots.txt
 public/branding/
 .DS_Store

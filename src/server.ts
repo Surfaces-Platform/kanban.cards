@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { BRAND_PUBLIC_ASSETS, renderBrandHead, renderProductName } from "./brand";
+import { DEFAULT_PAGE_TITLE, PUBLIC_WEBSITE_ASSETS, publicPageTitle } from "./public-website";
 import fs from "node:fs/promises";
 import { createServer } from "node:http";
 import { isIP } from "node:net";
@@ -141,6 +142,7 @@ ${renderBrandHead()}
   <title>kanban.cards</title>
   <link rel="stylesheet" href="judgmentkit.css">
   <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="website.css">
 </head>
 <body>
   <div id="app"><main class="centered-view">${renderProductName("strong")}<p>Opening your projects…</p></main></div>
@@ -571,10 +573,21 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     res.json({ connection: publicAgentConnection(connection) });
   }));
 
-  app.get("/", serveIndex(staticDir));
-  app.get("/index.html", serveIndex(staticDir));
-  app.get("/sign-in", serveIndex(staticDir));
-  app.get("/sign-up", serveIndex(staticDir));
+  const indexHandler = serveIndex(staticDir, req => {
+    if (!passkeyAuthConfig) return DEFAULT_PAGE_TITLE;
+    const host = requestHost(req, trustForwardedHost);
+    if (host === authHost) return publicPageTitle({ context: "auth", authenticated: false, resolved: true, authMode: readAuthIntent(req, passkeyAuthConfig)?.mode });
+    // Give anonymous crawlers the homepage title without interpreting credentials or private shells.
+    // The client resolves cookies, query-driven receipts and authenticated views before applying task titles.
+    if (hostFamilies.some(family => family.rootHost === host) && !req.get("cookie") && !req.get("authorization") && !req.originalUrl.includes("?")) {
+      return publicPageTitle({ context: "root", authenticated: false, resolved: true });
+    }
+    return DEFAULT_PAGE_TITLE;
+  });
+  app.get("/", indexHandler);
+  app.get("/index.html", indexHandler);
+  app.get("/sign-in", indexHandler);
+  app.get("/sign-up", indexHandler);
   app.get("/app.js", sendStaticFile(staticDir, "public/app.js", "application/javascript; charset=utf-8"));
   app.get("/judgmentkit.css", sendStaticFile(staticDir, "public/judgmentkit.css", "text/css; charset=utf-8"));
   app.get("/styles.css", sendStaticFile(staticDir, "public/styles.css", "text/css; charset=utf-8"));
@@ -585,7 +598,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     }
     return sendStaticFile(staticDir, "public/robots.txt", "text/plain; charset=utf-8")(req, res, next);
   });
-  for (const [route, asset, contentType] of BRAND_PUBLIC_ASSETS) app.get(route, sendStaticFile(staticDir, asset, contentType));
+  for (const [route, asset, contentType] of [...BRAND_PUBLIC_ASSETS, ...PUBLIC_WEBSITE_ASSETS]) app.get(route, sendStaticFile(staticDir, asset, contentType));
 
   app.use("/api/projects", (req, _res, next) => {
     void (async () => {
@@ -1138,7 +1151,7 @@ function authHostSurfaceAllows(req: Request): boolean {
   if (req.path.startsWith("/api/passkeys/")) return true;
   if (req.path.startsWith("/api/native-auth/")) return true;
   if ((req.method === "GET" || req.method === "HEAD") && req.path === "/.well-known/apple-app-site-association") return true;
-  return (req.method === "GET" || req.method === "HEAD") && new Set(["/sign-in", "/sign-up", "/app.js", "/judgmentkit.css", "/styles.css", "/robots.txt", ...BRAND_PUBLIC_ASSETS.map(([route]) => route), "/api/session"]).has(req.path);
+  return (req.method === "GET" || req.method === "HEAD") && new Set(["/sign-in", "/sign-up", "/app.js", "/judgmentkit.css", "/styles.css", "/robots.txt", ...BRAND_PUBLIC_ASSETS.map(([route]) => route), ...PUBLIC_WEBSITE_ASSETS.map(([route]) => route), "/api/session"]).has(req.path);
 }
 
 function validateHostFamilies(families: readonly HostFamily[]): void {
@@ -1629,14 +1642,18 @@ function noStore(res: Response): void {
   res.setHeader("Cache-Control", "private, no-store");
 }
 
-function serveIndex(staticDir: string): RequestHandler {
-  return asyncHandler(async (_req, res) => {
+function serveIndex(staticDir: string, titleForRequest: (req: Request) => string): RequestHandler {
+  return asyncHandler(async (req, res) => {
+    const title = titleForRequest(req);
+    noStore(res);
+    let html: string;
     try {
-      res.type("html").send(await fs.readFile(path.join(staticDir, "index.html"), "utf8"));
+      html = await fs.readFile(path.join(staticDir, "index.html"), "utf8");
     } catch (error) {
       if (!isNodeError(error) || error.code !== "ENOENT") throw error;
-      res.type("html").send(FALLBACK_INDEX_HTML);
+      html = FALLBACK_INDEX_HTML;
     }
+    res.type("html").send(html.replace(/<title>[^<]*<\/title>/, `<title>${title}</title>`));
   });
 }
 

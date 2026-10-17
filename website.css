@@ -1,0 +1,682 @@
+@font-face {
+  font-family: "Inter Website";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("/fonts/inter-latin.woff2") format("woff2");
+}
+
+body.public-website {
+  --website-canvas: #F7F6F2;
+  --website-surface: #FFFFFF;
+  --website-ink: #0B0D0E;
+  --website-ivory: #F7F6F2;
+  --website-nickel: #8B9096;
+  --website-rule: #DAD7CF;
+  --website-text: #0B0D0E;
+  --website-muted: #555B60;
+  --website-action: #0B0D0E;
+  --website-action-fg: #F7F6F2;
+  background: var(--website-canvas);
+  color: var(--website-text);
+  font-family: "Inter Website", system-ui, sans-serif;
+  font-size: 16px;
+  font-weight: 400;
+  line-height: 1.45;
+  letter-spacing: 0;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.public-website .website-frame {
+  min-block-size: 100vh;
+  min-block-size: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+
+.public-website .website-shell {
+  inline-size: min(1120px, calc(100% - 48px));
+  margin-inline: auto;
+}
+
+.public-website .website-header,
+.public-website .website-footer {
+  background: var(--website-ink);
+  color: var(--website-ivory);
+}
+
+.public-website .website-header-inner {
+  min-block-size: 72px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.public-website .website-brand {
+  display: block;
+  inline-size: 232.205908957px;
+  max-inline-size: calc(100% - 72px);
+  flex: 0 1 auto;
+}
+
+.public-website .website-brand img {
+  display: block;
+  inline-size: 100%;
+  block-size: auto;
+}
+
+.public-website .website-navigation {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+}
+
+.public-website .website-navigation a,
+.public-website .website-menu a,
+.public-website .website-menu summary {
+  display: inline-flex;
+  align-items: center;
+  min-block-size: 44px;
+  color: var(--website-rule);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.45;
+  text-decoration: none;
+}
+
+.public-website .website-navigation a:hover,
+.public-website .website-menu a:hover {
+  color: var(--website-ivory);
+}
+
+.public-website .website-menu {
+  display: none;
+  position: relative;
+}
+
+.public-website .website-menu summary {
+  box-sizing: border-box;
+  min-block-size: 44px;
+  padding: 10px 12px;
+  gap: 10px;
+  border: 1px solid var(--website-ivory);
+  border-radius: 4px;
+  color: var(--website-ivory);
+  cursor: pointer;
+  list-style: none;
+}
+
+.public-website .website-menu-icon {
+  display: grid;
+  gap: 3px;
+  inline-size: 14px;
+}
+
+.public-website .website-menu-icon span {
+  display: block;
+  block-size: 1px;
+  background: currentColor;
+}
+
+.public-website .website-menu summary::-webkit-details-marker {
+  display: none;
+}
+
+.public-website .website-menu:not([open]) nav {
+  display: none;
+}
+
+.public-website .website-menu nav {
+  position: absolute;
+  inset-inline-end: 0;
+  inset-block-start: 100%;
+  z-index: 40;
+  display: grid;
+  min-inline-size: 160px;
+  padding: 8px 16px;
+  background: var(--website-ink);
+  border: 1px solid var(--website-nickel);
+  border-radius: 4px;
+}
+
+.public-website .website-home {
+  inline-size: 100%;
+  padding: 0;
+}
+
+.public-website .website-hero {
+  min-block-size: 560px;
+  display: flex;
+  align-items: flex-start;
+  background-color: var(--website-ink);
+  background-image: linear-gradient(90deg, rgba(11, 13, 14, .94) 0%, rgba(11, 13, 14, .78) 39%, rgba(11, 13, 14, .16) 100%), url("/images/kanban-card-cascade.webp");
+  background-size: cover;
+  background-position: center;
+  color: var(--website-ivory);
+}
+
+.public-website .website-hero-copy {
+  max-inline-size: 560px;
+  padding-block: 80px;
+}
+
+.public-website .website-eyebrow {
+  color: var(--website-muted);
+  margin: 0 0 16px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.45;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.public-website .website-hero .website-eyebrow {
+  padding-inline-start: 10px;
+  border-inline-start: 2px solid var(--website-nickel);
+  color: var(--website-ivory);
+}
+
+.public-website .website-problem .website-eyebrow,
+.public-website .website-workflow .website-eyebrow {
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.public-website .website-hero h1 {
+  margin: 0;
+  color: var(--website-ivory);
+}
+
+.public-website .website-lead {
+  max-inline-size: 510px;
+  margin: 24px 0 32px;
+  color: var(--website-ivory);
+  font-size: 20px;
+  line-height: 1.45;
+}
+
+.public-website .website-hero-actions {
+  display: flex;
+  gap: 12px;
+}
+
+.public-website .website-hero .jk-button {
+  box-shadow: none;
+  color: var(--website-ivory);
+  border-color: var(--website-ivory);
+  background: transparent;
+}
+
+.public-website .website-hero .jk-button[data-priority="primary"] {
+  color: var(--website-ink);
+  border-color: var(--website-ivory);
+  background: var(--website-ivory);
+}
+
+.public-website .website-hero .jk-button:hover:not(:disabled) {
+  background: rgba(247, 246, 242, .12);
+}
+
+.public-website .website-hero .jk-button[data-priority="primary"]:hover:not(:disabled) {
+  background: #FFFFFF;
+}
+
+.public-website .website-hero .jk-button:disabled {
+  opacity: .6;
+}
+
+.public-website .website-hero .jk-status {
+  margin-block-start: 24px;
+}
+
+.public-website .website-problem {
+  padding-block: 80px 56px;
+  background: var(--website-surface);
+}
+
+.public-website .website-problem h2 {
+  max-inline-size: 800px;
+  margin: 0 0 40px;
+}
+
+.public-website .website-problem-row,
+.public-website .website-workflow-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0;
+  padding: 0;
+  border-block: 1px solid var(--website-rule);
+  list-style: none;
+}
+
+.public-website .website-problem-row li,
+.public-website .website-workflow-step {
+  position: relative;
+  min-inline-size: 0;
+  padding: 24px;
+}
+
+.public-website .website-problem-row li + li,
+.public-website .website-workflow-step + .website-workflow-step {
+  border-inline-start: 1px solid var(--website-rule);
+}
+
+.public-website .website-problem-row li:not(:last-child)::after,
+.public-website .website-workflow-step:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  z-index: 2;
+  inset-block-start: 50%;
+  inset-inline-end: -6px;
+  inline-size: 10px;
+  block-size: 10px;
+  border-block-start: 1px solid var(--website-muted);
+  border-inline-end: 1px solid var(--website-muted);
+  background: var(--website-surface);
+  transform: translateY(-50%) rotate(45deg);
+}
+
+.public-website .website-ordinal {
+  display: block;
+  color: var(--website-muted);
+  font-size: 12px;
+  line-height: 1.45;
+  font-variant-numeric: tabular-nums;
+}
+
+.public-website .website-problem-row h3,
+.public-website .website-workflow-step h3 {
+  margin: 16px 0 12px;
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.15;
+}
+
+.public-website .website-problem-row p,
+.public-website .website-workflow-step p {
+  margin: 0;
+  color: var(--website-muted);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.public-website .website-workflow {
+  padding-block: 96px;
+  background: var(--website-canvas);
+}
+
+.public-website .website-workflow h2 {
+  margin: 0 0 40px;
+}
+
+.public-website .website-workflow-row {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.public-website .website-workflow-step {
+  padding: 24px 20px 28px;
+}
+
+.public-website .website-workflow-step:not(:last-child)::after {
+  background: var(--website-canvas);
+}
+
+.public-website .website-step-marker {
+  display: flex;
+  flex-direction: column;
+  align-items: start;
+  gap: 12px;
+}
+
+.public-website .website-step-marker svg {
+  box-sizing: border-box;
+  inline-size: 44px;
+  block-size: 44px;
+  padding: 10px;
+  border: 1px solid var(--website-nickel);
+  border-radius: 4px;
+  color: var(--website-text);
+}
+
+.public-website .website-support {
+  margin: 32px 0 0;
+  color: var(--website-muted);
+  font-size: 16px;
+}
+
+.public-website .access-view {
+  display: flex;
+  flex: 1 0 auto;
+  align-items: center;
+  justify-content: center;
+  padding: 72px 24px;
+}
+
+.public-website .access-card {
+  inline-size: min(100%, 29rem);
+  margin-inline: auto;
+  gap: 24px;
+  padding: 32px;
+  background: var(--website-surface);
+  border-color: var(--website-rule);
+  border-radius: 8px;
+}
+
+.public-website .access-card > .product-name {
+  display: none;
+}
+
+.public-website h1,
+.public-website h2,
+.public-website h3 {
+  font-weight: 600;
+  line-height: 1.15;
+  letter-spacing: 0;
+}
+
+.public-website h1 {
+  margin-block-end: 0;
+  font-size: 40px;
+}
+
+.public-website h2 {
+  font-size: 32px;
+}
+
+.public-website h3 {
+  font-size: 24px;
+}
+
+.public-website .access-card p {
+  margin-block-end: 0;
+}
+
+.public-website .access-description,
+.public-website .quiet,
+.public-website .jk-help {
+  color: var(--website-muted);
+}
+
+.public-website .access-form {
+  gap: 20px;
+}
+
+.public-website .jk-field > label {
+  color: var(--website-text);
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+.public-website .form-control {
+  min-block-size: 48px;
+  padding: 10px 12px;
+  background: var(--website-canvas);
+  border-color: var(--website-rule);
+  border-radius: 4px;
+  color: var(--website-text);
+}
+
+.public-website .form-control[aria-invalid="true"] {
+  border-color: var(--jk-color-risk);
+}
+
+.public-website .jk-button {
+  min-block-size: 48px;
+  padding: 10px 18px;
+  border: 1px solid var(--website-text);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--website-text);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.45;
+  transition: background 120ms linear, color 120ms linear, border-color 120ms linear;
+}
+
+.public-website .access-card .jk-button {
+  box-shadow: none;
+}
+
+.public-website .jk-button:hover:not(:disabled) {
+  background: var(--website-canvas);
+}
+
+.public-website .jk-button[data-priority="primary"] {
+  background: var(--website-action);
+  border-color: var(--website-action);
+  color: var(--website-action-fg);
+}
+
+.public-website .jk-button[data-priority="primary"]:hover:not(:disabled) {
+  background: var(--website-text);
+}
+
+.public-website .jk-button:disabled {
+  border-color: var(--website-rule);
+  color: var(--website-muted);
+  background: var(--website-canvas);
+}
+
+.public-website .jk-actions {
+  gap: 12px;
+}
+
+.public-website .jk-actions > .jk-button {
+  flex: 1 1 auto;
+}
+
+.public-website .recovery-code {
+  background: var(--website-canvas);
+  border-color: var(--website-rule);
+  border-radius: 4px;
+}
+
+.public-website .website-footer-inner {
+  min-block-size: 84px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding-block: 28px;
+}
+
+.public-website .website-footer-copy {
+  margin-inline-end: auto;
+}
+
+.public-website .website-footer-copy p + p {
+  margin-block-start: 8px;
+}
+
+.public-website .website-footer-utilities {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.public-website .website-footer .jk-button {
+  padding-inline: 0;
+  box-shadow: none;
+  border-color: transparent;
+  background: transparent;
+  color: var(--website-rule);
+  font-size: 12px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.public-website .website-footer .jk-button:hover:not(:disabled) {
+  background: transparent;
+  color: var(--website-ivory);
+}
+
+.public-website .website-footer p {
+  margin: 0;
+  color: var(--website-nickel);
+  font-size: 12px;
+}
+
+.public-website .website-skip-link {
+  position: fixed;
+  z-index: 100;
+  inset-block-start: 8px;
+  inset-inline-start: 8px;
+  padding: 12px 16px;
+  transform: translateY(-160%);
+  border-radius: 4px;
+  background: var(--website-surface);
+  color: var(--website-text);
+}
+
+.public-website .website-skip-link:focus {
+  transform: translateY(0);
+}
+
+.public-website .access-card .jk-button:focus-visible,
+.public-website :where(a, button, input, summary):focus-visible {
+  box-shadow: 0 0 0 2px var(--website-canvas), 0 0 0 5px var(--website-text);
+}
+
+.public-website .website-header :where(a, summary):focus-visible,
+.public-website .website-footer :where(a, button):focus-visible,
+.public-website .website-footer .jk-button:focus-visible,
+.public-website .website-hero .jk-button:focus-visible {
+  box-shadow: 0 0 0 2px var(--website-ink), 0 0 0 5px var(--website-ivory);
+}
+
+@media (prefers-color-scheme: dark) {
+  body.public-website {
+    --website-canvas: #0B0D0E;
+    --website-surface: #24282b;
+    --website-text: #F7F6F2;
+    --website-muted: #DAD7CF;
+    --website-rule: #8B9096;
+    --website-action: #F7F6F2;
+    --website-action-fg: #0B0D0E;
+  }
+
+  .public-website .website-eyebrow {
+    color: var(--website-nickel);
+  }
+}
+
+@media (max-width: 820px) {
+  .public-website .website-shell {
+    inline-size: calc(100% - 32px);
+  }
+
+  .public-website .website-navigation {
+    display: none;
+  }
+
+  .public-website .website-menu {
+    display: block;
+  }
+
+  .public-website .access-view {
+    padding: 48px 16px;
+  }
+
+  .public-website .access-card {
+    padding: 24px;
+  }
+
+  .public-website .website-hero {
+    min-block-size: 528px;
+    background-position: 80% center;
+    background-image: linear-gradient(90deg, rgba(11, 13, 14, .90), rgba(11, 13, 14, .55)), url("/images/kanban-card-cascade.webp");
+  }
+
+  .public-website .website-hero-copy {
+    padding-block: 52px;
+  }
+
+  .public-website .website-hero-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .public-website .website-problem,
+  .public-website .website-workflow {
+    padding-block: 52px;
+  }
+
+  .public-website .website-problem-row,
+  .public-website .website-workflow-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .public-website .website-problem-row li,
+  .public-website .website-workflow-step {
+    padding: 20px;
+  }
+
+  .public-website .website-workflow-step {
+    display: grid;
+    grid-template-columns: 44px minmax(0, 1fr);
+    column-gap: 16px;
+  }
+
+  .public-website .website-workflow-step h3 {
+    margin-block-start: 0;
+  }
+
+  .public-website .website-problem-row li + li,
+  .public-website .website-workflow-step + .website-workflow-step {
+    border-inline-start: 0;
+    border-block-start: 1px solid var(--website-rule);
+  }
+
+  .public-website .website-problem-row li:not(:last-child)::after,
+  .public-website .website-workflow-step:not(:last-child)::after {
+    inset-block-start: auto;
+    inset-inline-end: auto;
+    inset-block-end: -6px;
+    inset-inline-start: 24px;
+    transform: rotate(135deg);
+  }
+
+  .public-website .website-footer-inner {
+    align-items: start;
+    flex-direction: column;
+    gap: 16px;
+  }
+}
+
+@media (max-width: 620px) {
+  .public-website h1 {
+    font-size: 32px;
+  }
+
+  .public-website h2 {
+    font-size: 24px;
+  }
+
+  .public-website h3 {
+    font-size: 20px;
+  }
+
+  .public-website .website-lead {
+    font-size: 18px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .public-website .jk-button {
+    transition: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .public-website .access-card .jk-button:focus-visible,
+  .public-website .website-footer .jk-button:focus-visible,
+  .public-website .website-hero .jk-button:focus-visible,
+  .public-website :where(a, button, input, summary):focus-visible {
+    box-shadow: none;
+    outline: 2px solid Highlight;
+    outline-offset: 2px;
+  }
+}
