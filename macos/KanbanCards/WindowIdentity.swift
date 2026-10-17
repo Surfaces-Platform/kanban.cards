@@ -3,6 +3,31 @@ import SwiftUI
 
 enum BoardWindowID: String, Codable, Hashable, Sendable { case main }
 
+/// A local presentation preference; every mode reads and edits the same Cards.
+enum CardInteractionMode: String, CaseIterable, Identifiable {
+    case windows, inspector, columnList
+    static var current: Self {
+        #if DEBUG
+        let arguments = ProcessInfo.processInfo.arguments
+        if arguments.contains("--demo"), let index = arguments.firstIndex(of: "--card-view"),
+           arguments.indices.contains(index + 1), let mode = Self(rawValue: arguments[index + 1]) {
+            return mode
+        }
+        #endif
+        return .columnList
+    }
+
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .windows: "A: Card windows"
+        case .inspector: "B: Right inspector"
+        case .columnList: "C: Column list + detail"
+        }
+    }
+}
+
+
 /// Codable values let SwiftUI restore viewers and reuse an existing window for a Card.
 /// Owner and Workspace are part of the identity because server resource IDs are scoped.
 struct CardWindowID: Codable, Hashable, Sendable {
@@ -18,7 +43,18 @@ struct CardFilter: Equatable {
     var blocked = "all"
     var search = ""
     var includesArchived = false
-    var active: Bool { self != CardFilter() }
+    var refinementCount: Int {
+        (actor == "all" ? 0 : 1) + (priority == "all" ? 0 : 1)
+        + (blocked == "all" ? 0 : 1) + (includesArchived ? 1 : 0)
+    }
+    var active: Bool { refinementCount > 0 || !search.isEmpty }
+
+    mutating func clearRefinements() {
+        actor = "all"
+        priority = "all"
+        blocked = "all"
+        includesArchived = false
+    }
 
     func includes(_ card: Card) -> Bool {
         (includesArchived || card.archivedAt == nil)
@@ -36,7 +72,6 @@ struct CardWindowActions {
     var canShowActivity: Bool
     var canArchive: Bool
     var archived: Bool
-    var edit: () -> Void
     var comment: () -> Void
     var move: () -> Void
     var activity: () -> Void

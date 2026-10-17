@@ -16,6 +16,48 @@ struct PendingCardDraft: Codable, Equatable {
 }
 
 struct CardEditor: View {
+    enum Presentation: String, Equatable { case sheet, inline, window }
+    @Environment(AppModel.self) private var model
+    let workspace: Workspace
+    let projectID: String
+    let card: Card?
+    var columnID: String? = nil
+    var onCreated: ((Card) -> Void)? = nil
+    var onRefreshFailure: ((String) -> Void)? = nil
+    var presentation: Presentation = .sheet
+    var onClose: (() -> Void)? = nil
+    var onInteractionLockChanged: ((Bool) -> Void)? = nil
+    var cardEditingDisabled = false
+    var additionalContent: AnyView? = nil
+    var additionalContentFocusRequest: UUID? = nil
+    @State private var editingSession: SharedCardEditingSession?
+
+    var body: some View {
+        Group {
+            if let card {
+                if let editingSession, editingSession.sessionIsCurrent {
+                    SharedCardEditorView(session: editingSession, presentation: presentation,
+                        onInteractionLockChanged: onInteractionLockChanged,
+                        cardEditingDisabled: cardEditingDisabled, additionalContent: additionalContent,
+                        additionalContentFocusRequest: additionalContentFocusRequest)
+                } else {
+                    ProgressView("Opening Card")
+                }
+            } else {
+                NewCardEditor(workspace: workspace, projectID: projectID, card: nil,
+                    columnID: columnID, onCreated: onCreated, onRefreshFailure: onRefreshFailure,
+                    onClose: onClose, onInteractionLockChanged: onInteractionLockChanged)
+            }
+        }
+        .task(id: [model.sessionID.uuidString, workspace.id, workspace.url.absoluteString, projectID, card?.id ?? "new"]) {
+            guard let card, model.signedIn else { return }
+            editingSession = model.cardEditingSession(workspace: workspace, projectID: projectID, card: card)
+        }
+    }
+}
+
+private struct NewCardEditor: View {
+    enum Presentation: String, Equatable { case sheet, inline, window }
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     let workspace: Workspace
@@ -23,6 +65,9 @@ struct CardEditor: View {
     let card: Card?
     let onCreated: ((Card) -> Void)?
     let onRefreshFailure: ((String) -> Void)?
+    let presentation: Presentation
+    let onClose: (() -> Void)?
+    let onInteractionLockChanged: ((Bool) -> Void)?
     @State private var pending: PendingCardDraft
     @State private var saving = false
     @State private var errorMessage: String?
@@ -43,18 +88,28 @@ struct CardEditor: View {
     @State private var persistenceError: String?
     @State private var refreshError: String?
 
-    init(workspace: Workspace, projectID: String, card: Card?, columnID: String? = nil, onCreated: ((Card) -> Void)? = nil, onRefreshFailure: ((String) -> Void)? = nil) {
+    init(workspace: Workspace, projectID: String, card: Card?, columnID: String? = nil, onCreated: ((Card) -> Void)? = nil, onRefreshFailure: ((String) -> Void)? = nil,
+         presentation: Presentation = .sheet, onClose: (() -> Void)? = nil,
+         onInteractionLockChanged: ((Bool) -> Void)? = nil) {
         self.workspace = workspace
         self.projectID = projectID
         self.card = card
         self.onCreated = onCreated
         self.onRefreshFailure = onRefreshFailure
+        self.presentation = presentation
+        self.onClose = onClose
+        self.onInteractionLockChanged = onInteractionLockChanged
         var draft = card.map(CardDraft.init(card:)) ?? CardDraft(columnId: columnID ?? "")
         if card == nil { draft.externalKey = "native-macos-draft:\(UUID().uuidString)" }
         _pending = State(initialValue: PendingCardDraft(draft: draft, key: UUID().uuidString))
     }
 
-    private var resourceKey: String { "workspace:\(workspace.id):project:\(projectID):card:\(card?.id ?? "new")" }
+    private var resourceKey: String {
+        let base = "workspace:\(workspace.id):project:\(projectID):card:\(card?.id ?? "new")"
+        // Independent edit surfaces retain independent drafts. Card versions still
+        // require conflict review if another surface saves the same Card first.
+        return card != nil && presentation != .sheet ? "\(base):editor:\(presentation.rawValue)" : base
+    }
     private var columns: [Column] { (model.project(id: projectID, in: workspace)?.columns ?? []).sorted { $0.position < $1.position } }
     private var hasProminentDraftStatus: Bool { recoveredDraft || persistenceError != nil }
 
@@ -70,163 +125,229 @@ struct CardEditor: View {
         return current.archivedAt != nil
     }
 
+    private var interactionLocked: Bool {
+        saving || reviewingConflict || discarding || replacingDraft || persistenceFailed
+            || errorMessage != nil || (pending.confirmed != nil && !receiptPersisted)
+    }
+
+    private var submissionDisabled: Bool {
+        !sessionIsCurrent || saving || reviewingConflict || draftLoadFailed
+            || (pending.confirmed == nil && (isReadOnly || pending.requiresConflictReview == true
+                || pending.draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || !columns.contains(where: { $0.id == pending.draft.columnId })))
+    }
+
     var body: some View {
+        Group {
+            if presentation == .inline { inlineEditor }
+            else { navigationEditor }
+        }
+        .interactiveDismissDisabled(interactionLocked)
+        .task {
+            guard !loadedDraft, model.signedIn else { return }
+            draftOwnerID = model.ownerID
+            draftSessionID = model.sessionID
+            loadedDraft = true
+            do {
+                if let saved = try model.drafts.load(ownerID: draftOwnerID, resourceKey: resourceKey, as: PendingCardDraft.self) {
+                    pending = saved
+                    recoveredDraft = true
+                    receiptPersisted = saved.confirmed != nil && !model.drafts.hasRecovery(ownerID: draftOwnerID, resourceKey: resourceKey)
+                    createdCard = saved.confirmed?.createdCard
+                }
+                if pending.draft.columnId.isEmpty { pending.draft.columnId = columns.first?.id ?? "" }
+            } catch { draftLoadFailed = true; errorMessage = "The retained draft could not be opened. Cancel and retry, or explicitly discard the draft. \(error.localizedDescription)" }
+            if pending.requiresConflictReview == true { await reviewConflict() }
+        }
+        .onChange(of: interactionLocked, initial: true) { _, locked in onInteractionLockChanged?(locked) }
+        .onDisappear {
+            persist()
+            onInteractionLockChanged?(false)
+        }
+        .onChange(of: model.sessionID) { _, _ in invalidateSession() }
+        .onChange(of: model.signedIn) { _, signedIn in if !signedIn { invalidateSession() } }
+        .onChange(of: model.ownerID) { _, _ in if !sessionIsCurrent { invalidateSession() } }
+        .onChange(of: pending) { _, _ in if loadedDraft && !cleanupComplete { persist() } }
+        .alert(pending.confirmed != nil ? "Unable to remove local draft" : "Unable to save Card", isPresented: Binding(get: { errorMessage != nil && sessionIsCurrent }, set: { if !$0 { errorMessage = nil } })) {
+            Button("OK", role: .cancel) { errorMessage = nil }
+        } message: { Text(errorMessage ?? "") }
+        .confirmationDialog("Replace this local draft with the saved Card?", isPresented: $replacingDraft, titleVisibility: .visible) {
+            Button("Replace Local Draft", role: .destructive) {
+                guard sessionIsCurrent, let latest else { return }
+                pending = PendingCardDraft(draft: CardDraft(card: latest), key: UUID().uuidString)
+                self.latest = nil
+                persist()
+            }
+            Button("Keep Local Draft", role: .cancel) {}
+        } message: {
+            Text("Your local edits will be discarded. The saved Card on the server will stay unchanged.")
+        }
+        .confirmationDialog("Discard this local draft?", isPresented: $discarding, titleVisibility: .visible) {
+            Button("Discard draft", role: .destructive) {
+                guard sessionIsCurrent else { return }
+                do { try model.drafts.remove(ownerID: draftOwnerID, resourceKey: resourceKey); cleanupComplete = true; close() }
+                catch { errorMessage = error.localizedDescription }
+            }
+        } message: {
+            Text(pending.submitted == nil ? "The saved Card will remain unchanged." : "A previous request may already have saved changes on the server.")
+        }
+    }
+
+    private var navigationEditor: some View {
         NavigationStack {
-            Form {
-                if hasProminentDraftStatus { draftStatus }
-                if saving {
-                    Section { ProgressView(pending.confirmed == nil ? "Saving Card…" : "Card saved. Finishing…") }
-                } else if pending.confirmed != nil {
-                    Section { Text(cleanupComplete ? "Card saved." : "Card saved. Finish removing the local draft.") }
-                } else if pending.submitted != nil {
-                    Section { Text("The save result is uncertain. Retry the same save to confirm whether it reached the server.") }
-                }
-                refreshStatus
-                if isReadOnly && pending.confirmed == nil {
-                    Section { Text(model.canEditProject(id: projectID, in: workspace)
-                        ? "This Card is unavailable or archived, or its Project is archived. Your local draft is retained."
-                        : "This board is read-only in this session. Your local draft is retained.") }
-                }
-                Section {
-                    TextField("Title (required)", text: $pending.draft.title)
-                        .accessibilityIdentifier("editor.title")
-                    Picker("Column", selection: $pending.draft.columnId) {
-                        if !columns.contains(where: { $0.id == pending.draft.columnId }) {
-                            Text(pending.draft.columnId.isEmpty ? "Choose a Column" : "Unavailable Column").tag(pending.draft.columnId)
-                        }
-                        ForEach(columns) { Text($0.name).tag($0.id) }
-                    }
-                    Picker("Next actor", selection: $pending.draft.nextActor) {
-                        Text("Unassigned").tag(CardNextActor?.none)
-                        ForEach(CardNextActor.allCases) { Text($0.label).tag(Optional($0)) }
-                    }
-                    Picker("Priority", selection: $pending.draft.priority) {
-                        Text("Unset").tag(CardPriority?.none)
-                        ForEach(CardPriority.allCases) { Text($0.rawValue).tag(Optional($0)) }
-                    }
-                    TextField("Next action", text: $pending.draft.nextAction, axis: .vertical)
-                    TextField("Blocker", text: $pending.draft.blockedReason, axis: .vertical)
-                    if let validationMessage, pending.confirmed == nil {
-                        Text(validationMessage)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .accessibilityIdentifier("editor.validation")
-                    }
-                } header: {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Card")
-                        Text("\(model.project(id: projectID, in: workspace)?.name ?? "Unavailable") · \(workspace.name)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .disabled(saving || draftLoadFailed || isReadOnly || pending.submitted != nil || pending.confirmed != nil)
-                Section {
-                    TextEditor(text: $pending.draft.body)
-                        .frame(minHeight: 180)
-                        .accessibilityLabel("Description")
-                        .accessibilityIdentifier("editor.body")
-                } header: {
-                    Text("Description")
-                } footer: {
-                    if !hasProminentDraftStatus && pending.confirmed == nil {
-                        Text("Cancel keeps a draft on this Mac. Discard Draft removes it.")
-                            .accessibilityIdentifier("editor.draft-status")
-                    }
-                }.disabled(saving || draftLoadFailed || isReadOnly || pending.submitted != nil || pending.confirmed != nil)
-                if pending.requiresConflictReview == true {
-                    Section("Review saved changes") {
-                        Text("This Card changed after your draft began. Your draft is above; the saved values are below. Keeping your draft means the next save replaces every editable field, including fields you did not change locally.")
-                        if let latest {
-                            Text("Different fields: \(CardDraftComparison.differingFields(pending.draft, from: latest).joined(separator: ", ")).")
-                            SavedCardValues(card: latest, columns: columns)
-                            Button("Keep My Draft for Next Save") {
-                                guard sessionIsCurrent else { return }
-                                pending.draft.version = latest.version
-                                pending.draft.archivedAt = latest.archivedAt
-                                pending.draft.externalKey = latest.externalKey
-                                if pending.draft.columnId == latest.columnId {
-                                    pending.draft.position = latest.position
-                                }
-                                pending.submitted = nil
-                                pending.key = UUID().uuidString
-                                pending.requiresConflictReview = false
-                                self.latest = nil
-                                persist()
-                            }.accessibilityIdentifier("editor.keep-draft").disabled(isReadOnly)
-                            Button("Use Saved Card…") { replacingDraft = true }
-                                .accessibilityIdentifier("editor.use-saved")
+            editorForm
+                .frame(minWidth: 500, idealWidth: 600, minHeight: 540, idealHeight: 720)
+                .navigationTitle(presentation == .window ? "Edit \(card?.title ?? "Card")" : (card == nil ? "New Card" : "Edit Card"))
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) { cancelButton }
+                    ToolbarItem(placement: .confirmationAction) {
+                        if presentation == .window {
+                            saveButton.keyboardShortcut("s", modifiers: .command)
                         } else {
-                            Button("Load Latest Saved Card") { Task { await reviewConflict() } }
-                                .accessibilityIdentifier("editor.load-conflict")
+                            saveButton.keyboardShortcut(.defaultAction)
                         }
-                    }.disabled(saving || reviewingConflict)
-                }
-                if pending.confirmed == nil {
-                    Section { Button("Discard draft", role: .destructive) { discarding = true }.disabled(saving) }
-                }
-            }
-            .formStyle(.grouped)
-            .frame(minWidth: 500, idealWidth: 600, minHeight: 540, idealHeight: 720)
-            .navigationTitle(card == nil ? "New Card" : "Edit Card")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button(cleanupComplete ? "Done" : "Cancel") {
-                        persist()
-                        if draftLoadFailed || !persistenceFailed { dismiss() }
-                    }.keyboardShortcut(.cancelAction).accessibilityIdentifier("editor.cancel").disabled(saving)
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button(confirmationLabel) { Task { await save() } }
-                        .keyboardShortcut(.defaultAction).accessibilityIdentifier("editor.save")
-                        .disabled(!sessionIsCurrent || saving || reviewingConflict || draftLoadFailed || (pending.confirmed == nil && (isReadOnly || pending.requiresConflictReview == true || pending.draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !columns.contains(where: { $0.id == pending.draft.columnId }))))
-                }
-            }
-            .interactiveDismissDisabled(saving || persistenceFailed || (pending.confirmed != nil && !receiptPersisted))
-            .task {
-                guard !loadedDraft, model.signedIn else { return }
-                draftOwnerID = model.ownerID
-                draftSessionID = model.sessionID
-                loadedDraft = true
-                do {
-                    if let saved = try model.drafts.load(ownerID: draftOwnerID, resourceKey: resourceKey, as: PendingCardDraft.self) {
-                        pending = saved
-                        recoveredDraft = true
-                        receiptPersisted = saved.confirmed != nil && !model.drafts.hasRecovery(ownerID: draftOwnerID, resourceKey: resourceKey)
-                        createdCard = saved.confirmed?.createdCard
                     }
-                    if pending.draft.columnId.isEmpty { pending.draft.columnId = columns.first?.id ?? "" }
-                } catch { draftLoadFailed = true; errorMessage = "The retained draft could not be opened. Cancel and retry, or explicitly discard the draft. \(error.localizedDescription)" }
-                if pending.requiresConflictReview == true { await reviewConflict() }
-            }
-            .onChange(of: model.sessionID) { _, _ in invalidateSession() }
-            .onChange(of: model.signedIn) { _, signedIn in if !signedIn { invalidateSession() } }
-            .onChange(of: model.ownerID) { _, _ in if !sessionIsCurrent { invalidateSession() } }
-            .onChange(of: pending) { _, _ in if loadedDraft && !cleanupComplete { persist() } }
-            .alert(pending.confirmed != nil ? "Unable to remove local draft" : "Unable to save Card", isPresented: Binding(get: { errorMessage != nil && sessionIsCurrent }, set: { if !$0 { errorMessage = nil } })) {
-                Button("OK", role: .cancel) { errorMessage = nil }
-            } message: { Text(errorMessage ?? "") }
-            .confirmationDialog("Replace this local draft with the saved Card?", isPresented: $replacingDraft, titleVisibility: .visible) {
-                Button("Replace Local Draft", role: .destructive) {
-                    guard sessionIsCurrent, let latest else { return }
-                    pending = PendingCardDraft(draft: CardDraft(card: latest), key: UUID().uuidString)
-                    self.latest = nil
-                    persist()
                 }
-                Button("Keep Local Draft", role: .cancel) {}
-            } message: {
-                Text("Your local edits will be discarded. The saved Card on the server will stay unchanged.")
+        }
+    }
+
+    private var inlineEditor: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Edit Card").font(.headline)
+                Spacer(minLength: 8)
+                cancelButton
+                saveButton.keyboardShortcut("s", modifiers: .command)
             }
-            .confirmationDialog("Discard this local draft?", isPresented: $discarding, titleVisibility: .visible) {
-                Button("Discard draft", role: .destructive) {
-                    guard sessionIsCurrent else { return }
-                    do { try model.drafts.remove(ownerID: draftOwnerID, resourceKey: resourceKey); cleanupComplete = true; dismiss() }
-                    catch { errorMessage = error.localizedDescription }
+            .padding()
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("Card edit controls")
+            Divider()
+            editorForm.frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Edit Card")
+        .accessibilityIdentifier("card.inline-editor.\(card?.id ?? "new")")
+    }
+
+    private var editorForm: some View {
+        Form {
+            if hasProminentDraftStatus { draftStatus }
+            if saving {
+                Section { ProgressView(pending.confirmed == nil ? "Saving Card…" : "Card saved. Finishing…") }
+            } else if pending.confirmed != nil {
+                Section { Text(cleanupComplete ? "Card saved." : "Card saved. Finish removing the local draft.") }
+            } else if pending.submitted != nil {
+                Section { Text("The save result is uncertain. Retry the same save to confirm whether it reached the server.") }
+            }
+            refreshStatus
+            if isReadOnly && pending.confirmed == nil {
+                Section { Text(model.canEditProject(id: projectID, in: workspace)
+                    ? "This Card is unavailable or archived, or its Project is archived. Your local draft is retained."
+                    : "This board is read-only in this session. Your local draft is retained.") }
+            }
+            Section {
+                TextField("Title (required)", text: $pending.draft.title)
+                    .accessibilityIdentifier("editor.title")
+                Picker("Column", selection: $pending.draft.columnId) {
+                    if !columns.contains(where: { $0.id == pending.draft.columnId }) {
+                        Text(pending.draft.columnId.isEmpty ? "Choose a Column" : "Unavailable Column").tag(pending.draft.columnId)
+                    }
+                    ForEach(columns) { Text($0.name).tag($0.id) }
                 }
-            } message: {
-                Text(pending.submitted == nil ? "The saved Card will remain unchanged." : "A previous request may already have saved changes on the server.")
+                Picker("Next actor", selection: $pending.draft.nextActor) {
+                    Text("Unassigned").tag(CardNextActor?.none)
+                    ForEach(CardNextActor.allCases) { Text($0.label).tag(Optional($0)) }
+                }
+                Picker("Priority", selection: $pending.draft.priority) {
+                    Text("Unset").tag(CardPriority?.none)
+                    ForEach(CardPriority.allCases) { Text($0.rawValue).tag(Optional($0)) }
+                }
+                TextField("Next action", text: $pending.draft.nextAction, axis: .vertical)
+                TextField("Blocker", text: $pending.draft.blockedReason, axis: .vertical)
+                if let validationMessage, pending.confirmed == nil {
+                    Text(validationMessage)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("editor.validation")
+                }
+            } header: {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Card")
+                    Text("\(model.project(id: projectID, in: workspace)?.name ?? "Unavailable") · \(workspace.name)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .disabled(saving || draftLoadFailed || isReadOnly || pending.submitted != nil || pending.confirmed != nil)
+            Section {
+                TextEditor(text: $pending.draft.body)
+                    .frame(minHeight: 180)
+                    .accessibilityLabel("Description")
+                    .accessibilityIdentifier("editor.body")
+            } header: {
+                Text("Description")
+            } footer: {
+                if !hasProminentDraftStatus && pending.confirmed == nil {
+                    Text("Cancel keeps a draft on this Mac. Discard Draft removes it.")
+                        .accessibilityIdentifier("editor.draft-status")
+                }
+            }.disabled(saving || draftLoadFailed || isReadOnly || pending.submitted != nil || pending.confirmed != nil)
+            if pending.requiresConflictReview == true {
+                Section("Review saved changes") {
+                    Text("This Card changed after your draft began. Your draft is above; the saved values are below. Keeping your draft means the next save replaces every editable field, including fields you did not change locally.")
+                    if let latest {
+                        Text("Different fields: \(CardDraftComparison.differingFields(pending.draft, from: latest).joined(separator: ", ")).")
+                        SavedCardValues(card: latest, columns: columns)
+                        Button("Keep My Draft for Next Save") {
+                            guard sessionIsCurrent else { return }
+                            pending.draft.version = latest.version
+                            pending.draft.archivedAt = latest.archivedAt
+                            pending.draft.externalKey = latest.externalKey
+                            if pending.draft.columnId == latest.columnId {
+                                pending.draft.position = latest.position
+                            }
+                            pending.submitted = nil
+                            pending.key = UUID().uuidString
+                            pending.requiresConflictReview = false
+                            self.latest = nil
+                            persist()
+                        }.accessibilityIdentifier("editor.keep-draft").disabled(isReadOnly)
+                        Button("Use Saved Card…") { replacingDraft = true }
+                            .accessibilityIdentifier("editor.use-saved")
+                    } else {
+                        Button("Load Latest Saved Card") { Task { await reviewConflict() } }
+                            .accessibilityIdentifier("editor.load-conflict")
+                    }
+                }.disabled(saving || reviewingConflict)
+            }
+            if pending.confirmed == nil {
+                Section { Button("Discard draft", role: .destructive) { discarding = true }.disabled(saving) }
             }
         }
+        .formStyle(.grouped)
+    }
+
+    private var cancelButton: some View {
+        Button(cleanupComplete ? "Done" : "Cancel") {
+            persist()
+            if draftLoadFailed || !persistenceFailed { close() }
+        }
+        .keyboardShortcut(.cancelAction)
+        .accessibilityIdentifier("editor.cancel")
+        .disabled(saving)
+    }
+
+    private var saveButton: some View {
+        Button(confirmationLabel) { Task { await save() } }
+            .accessibilityIdentifier("editor.save")
+            .disabled(submissionDisabled)
+    }
+
+    private func close() {
+        if let onClose { onClose() }
+        else { dismiss() }
     }
 
     private var validationMessage: String? {
@@ -296,7 +417,7 @@ struct CardEditor: View {
         persistenceError = nil
         refreshError = nil
         errorMessage = nil
-        dismiss()
+        close()
     }
 
     private func persist() {
@@ -334,7 +455,7 @@ struct CardEditor: View {
         guard sessionIsCurrent, !saving, !draftLoadFailed else { return }
         saving = true
         defer { saving = false }
-        if cleanupComplete { dismiss(); return }
+        if cleanupComplete { close(); return }
         if pending.confirmed != nil { cleanupConfirmedDraft(); return }
         guard !isReadOnly, pending.requiresConflictReview != true else { return }
         let retryingUncertainRequest = pending.submitted != nil
@@ -392,7 +513,7 @@ struct CardEditor: View {
         do {
             try model.drafts.remove(ownerID: draftOwnerID, resourceKey: resourceKey)
             cleanupComplete = true
-            if refreshError == nil || onRefreshFailure != nil { dismiss() }
+            if refreshError == nil || onRefreshFailure != nil { close() }
             if let createdCard, !creationRevealed {
                 creationRevealed = true
                 onCreated?(createdCard)
@@ -747,12 +868,18 @@ struct PendingCommentDraft: Codable, Equatable {
 }
 
 struct CommentEditor: View {
+    enum Presentation: Equatable { case sheet, inline }
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     let workspace: Workspace
     let projectID: String
     let cardID: String
     var onRefreshFailure: ((String) -> Void)? = nil
+    var presentation: Presentation = .sheet
+    var focusRequest: UUID? = nil
+    var onClose: (() -> Void)? = nil
+    var onInteractionLockChanged: ((Bool) -> Void)? = nil
+    @FocusState private var commentFocused: Bool
     @State private var pending = PendingCommentDraft()
     @State private var saving = false
     @State private var loadedDraft = false
@@ -781,7 +908,64 @@ struct CommentEditor: View {
         return current.archivedAt != nil
     }
 
+    private var interactionLocked: Bool {
+        saving || persistenceFailed || discarding || errorMessage != nil
+            || (pending.confirmed != nil && !receiptPersisted)
+    }
+    private var submissionDisabled: Bool {
+        !sessionIsCurrent || saving || draftLoadFailed
+            || (pending.confirmed == nil && (isReadOnly || pending.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
+    }
+    private var editingDisabled: Bool {
+        saving || draftLoadFailed || isReadOnly || pending.submitted != nil || pending.confirmed != nil
+    }
+
     var body: some View {
+        Group {
+            if presentation == .inline { inlineEditor }
+            else { sheetEditor }
+        }
+        .interactiveDismissDisabled(saving || persistenceFailed || (pending.confirmed != nil && !receiptPersisted))
+        .task {
+            guard !loadedDraft, model.signedIn else { return }
+            draftOwnerID = model.ownerID
+            draftSessionID = model.sessionID
+            loadedDraft = true
+            do {
+                if let saved = try model.drafts.load(ownerID: draftOwnerID, resourceKey: resourceKey, as: PendingCommentDraft.self) {
+                    pending = saved
+                    recoveredDraft = true
+                    receiptPersisted = saved.confirmed != nil && !model.drafts.hasRecovery(ownerID: draftOwnerID, resourceKey: resourceKey)
+                }
+            }
+            catch { draftLoadFailed = true; errorMessage = "The retained draft could not be opened. Cancel and retry, or explicitly discard the draft. \(error.localizedDescription)" }
+            if presentation == .inline { commentFocused = true }
+        }
+        .onChange(of: focusRequest) { _, _ in if presentation == .inline { commentFocused = true } }
+        .onChange(of: interactionLocked, initial: true) { _, locked in onInteractionLockChanged?(locked) }
+        .onDisappear {
+            persist()
+            onInteractionLockChanged?(false)
+        }
+        .onChange(of: model.sessionID) { _, _ in invalidateSession() }
+        .onChange(of: model.signedIn) { _, signedIn in if !signedIn { invalidateSession() } }
+        .onChange(of: model.ownerID) { _, _ in if !sessionIsCurrent { invalidateSession() } }
+        .onChange(of: pending) { _, _ in if loadedDraft && !cleanupComplete { persist() } }
+        .alert(pending.confirmed != nil ? "Unable to remove local draft" : "Unable to add Comment", isPresented: Binding(get: { errorMessage != nil && sessionIsCurrent }, set: { if !$0 { errorMessage = nil } })) {
+            Button("OK", role: .cancel) { errorMessage = nil }
+        } message: { Text(errorMessage ?? "") }
+        .confirmationDialog("Discard this local draft?", isPresented: $discarding, titleVisibility: .visible) {
+            Button("Discard draft", role: .destructive) {
+                guard sessionIsCurrent else { return }
+                do { try model.drafts.remove(ownerID: draftOwnerID, resourceKey: resourceKey); cleanupComplete = true; finish() }
+                catch { errorMessage = error.localizedDescription }
+            }
+        } message: {
+            Text(pending.submitted == nil ? "The saved Card will remain unchanged." : "A previous request may already have added the Comment on the server.")
+        }
+    }
+
+    private var sheetEditor: some View {
         NavigationStack {
             Form {
                 if hasProminentDraftStatus { draftStatus }
@@ -795,7 +979,7 @@ struct CommentEditor: View {
                         : "This board is read-only in this session. Your local draft is retained.") }
                 }
                 Section {
-                    TextEditor(text: $pending.body).frame(minHeight: 180).accessibilityLabel("Comment").accessibilityIdentifier("comment.body")
+                    commentBody.frame(minHeight: 180)
                 } header: {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Comment (required)")
@@ -809,7 +993,7 @@ struct CommentEditor: View {
                         Text("Cancel keeps a draft on this Mac. Discard Draft removes it.")
                             .accessibilityIdentifier("editor.draft-status")
                     }
-                }.disabled(saving || draftLoadFailed || isReadOnly || pending.submitted != nil || pending.confirmed != nil)
+                }.disabled(editingDisabled)
                 if pending.confirmed == nil {
                     Section {
                         Button("Discard draft", role: .destructive) { discarding = true }
@@ -821,45 +1005,79 @@ struct CommentEditor: View {
             .frame(minWidth: 480, idealWidth: 560, minHeight: 380, idealHeight: 480)
             .navigationTitle("Add Comment")
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button(cleanupComplete ? "Done" : "Cancel") { persist(); if draftLoadFailed || !persistenceFailed { dismiss() } }.keyboardShortcut(.cancelAction).accessibilityIdentifier("editor.cancel").disabled(saving) }
+                ToolbarItem(placement: .cancellationAction) { cancelButton }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(confirmationLabel) { Task { await send() } }
-                        .keyboardShortcut(.defaultAction).accessibilityIdentifier("comment.save")
-                        .disabled(!sessionIsCurrent || saving || draftLoadFailed || (pending.confirmed == nil && (isReadOnly || pending.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)))
+                    submitButton.keyboardShortcut(.defaultAction)
                 }
-            }
-            .interactiveDismissDisabled(saving || persistenceFailed || (pending.confirmed != nil && !receiptPersisted))
-            .task {
-                guard !loadedDraft, model.signedIn else { return }
-                draftOwnerID = model.ownerID
-                draftSessionID = model.sessionID
-                loadedDraft = true
-                do {
-                    if let saved = try model.drafts.load(ownerID: draftOwnerID, resourceKey: resourceKey, as: PendingCommentDraft.self) {
-                        pending = saved
-                        recoveredDraft = true
-                        receiptPersisted = saved.confirmed != nil && !model.drafts.hasRecovery(ownerID: draftOwnerID, resourceKey: resourceKey)
-                    }
-                }
-                catch { draftLoadFailed = true; errorMessage = "The retained draft could not be opened. Cancel and retry, or explicitly discard the draft. \(error.localizedDescription)" }
-            }
-            .onChange(of: model.sessionID) { _, _ in invalidateSession() }
-            .onChange(of: model.signedIn) { _, signedIn in if !signedIn { invalidateSession() } }
-            .onChange(of: model.ownerID) { _, _ in if !sessionIsCurrent { invalidateSession() } }
-            .onChange(of: pending) { _, _ in if loadedDraft && !cleanupComplete { persist() } }
-            .alert(pending.confirmed != nil ? "Unable to remove local draft" : "Unable to add Comment", isPresented: Binding(get: { errorMessage != nil && sessionIsCurrent }, set: { if !$0 { errorMessage = nil } })) {
-                Button("OK", role: .cancel) { errorMessage = nil }
-            } message: { Text(errorMessage ?? "") }
-            .confirmationDialog("Discard this local draft?", isPresented: $discarding, titleVisibility: .visible) {
-                Button("Discard draft", role: .destructive) {
-                    guard sessionIsCurrent else { return }
-                    do { try model.drafts.remove(ownerID: draftOwnerID, resourceKey: resourceKey); cleanupComplete = true; dismiss() }
-                    catch { errorMessage = error.localizedDescription }
-                }
-            } message: {
-                Text(pending.submitted == nil ? "The saved Card will remain unchanged." : "A previous request may already have added the Comment on the server.")
             }
         }
+    }
+
+    private var inlineEditor: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if hasProminentDraftStatus { draftStatusContent }
+            if saving { ProgressView(pending.confirmed == nil ? "Adding Comment…" : "Comment added. Finishing…") }
+            else if pending.confirmed != nil { Text(cleanupComplete ? "Comment added." : "Comment added. Finish removing the local draft.") }
+            else if pending.submitted != nil { Text("The Comment result is uncertain. Retry the same Comment to confirm whether it reached the server.") }
+            if let refreshError, onRefreshFailure == nil {
+                Text("Comment added; refresh failed.").font(.headline)
+                Text(refreshError)
+                Button("Retry Refresh") { Task { await retryRefresh() } }.disabled(saving)
+            }
+            if isReadOnly && pending.confirmed == nil {
+                Text("This Card is read-only. Your local draft is retained.")
+            }
+            Text("Comment (required)").font(.subheadline)
+            commentBody.frame(minHeight: 120, idealHeight: 140, maxHeight: 180)
+                .disabled(editingDisabled)
+            if !hasProminentDraftStatus && pending.confirmed == nil {
+                Text("Cancel keeps a draft on this Mac. Discard Draft removes it.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("editor.draft-status")
+            }
+            HStack {
+                if pending.confirmed == nil {
+                    Button("Discard draft", role: .destructive) { discarding = true }
+                        .accessibilityIdentifier("comment.discard").disabled(saving)
+                }
+                Spacer(minLength: 8)
+                cancelButton
+                submitButton.keyboardShortcut(.return, modifiers: .command)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Add Comment")
+        .accessibilityIdentifier("card.comment-composer.\(cardID)")
+    }
+
+    private var commentBody: some View {
+        TextEditor(text: $pending.body)
+            .focused($commentFocused)
+            .accessibilityLabel("Comment")
+            .accessibilityIdentifier("comment.body")
+    }
+
+    private var cancelButton: some View {
+        Button(cleanupComplete ? "Done" : "Cancel") {
+            persist()
+            if draftLoadFailed || !persistenceFailed { finish() }
+        }
+        .keyboardShortcut(.cancelAction)
+        .accessibilityIdentifier(presentation == .inline ? "comment.cancel" : "editor.cancel")
+        .disabled(saving)
+    }
+
+    private var submitButton: some View {
+        Button(confirmationLabel) { Task { await send() } }
+            .accessibilityIdentifier("comment.save")
+            .disabled(submissionDisabled)
+    }
+
+    private func finish() {
+        commentFocused = false
+        if presentation == .inline { onClose?() }
+        else { dismiss() }
     }
 
     private var confirmationLabel: String {
@@ -869,17 +1087,19 @@ struct CommentEditor: View {
         return pending.submitted == nil ? ("Add Comment") : "Retry Comment"
     }
 
-    @ViewBuilder private var draftStatus: some View {
-        Section {
-            Text(recoveredDraft ? "Recovered draft. Cancel retains your draft for this account; it does not add a Comment." : "Cancel keeps a draft on this Mac without adding a Comment. Use Discard Draft to remove it.")
-                .accessibilityIdentifier("editor.draft-status")
-            if let persistenceError {
-                Text(persistenceError)
-                DraftRecoveryActions(text: pending.body, filename: "comment-draft", isActive: sessionIsCurrent) { errorMessage = $0 }
-                Button("Retry Saving Local Draft") { persist() }.disabled(saving)
-            }
-        }
+    private var draftStatus: some View {
+        Section { draftStatusContent }
     }
+
+    @ViewBuilder private var draftStatusContent: some View {
+        Text(recoveredDraft ? "Recovered draft. Cancel retains your draft for this account; it does not add a Comment." : "Cancel keeps a draft on this Mac without adding a Comment. Use Discard Draft to remove it.")
+            .accessibilityIdentifier("editor.draft-status")
+        if let persistenceError {
+            Text(persistenceError)
+            DraftRecoveryActions(text: pending.body, filename: "comment-draft", isActive: sessionIsCurrent) { errorMessage = $0 }
+            Button("Retry Saving Local Draft") { persist() }.disabled(saving)
+        }
+}
 
     @ViewBuilder private var refreshStatus: some View {
         if let refreshError, onRefreshFailure == nil {
@@ -918,7 +1138,7 @@ struct CommentEditor: View {
         persistenceError = nil
         refreshError = nil
         errorMessage = nil
-        dismiss()
+        finish()
     }
 
     private func persist() {
@@ -940,7 +1160,7 @@ struct CommentEditor: View {
         guard sessionIsCurrent, !saving, !draftLoadFailed else { return }
         saving = true
         defer { saving = false }
-        if cleanupComplete { dismiss(); return }
+        if cleanupComplete { finish(); return }
         if pending.confirmed != nil { cleanupConfirmedDraft(); return }
         guard !isReadOnly else { return }
         let retryingUncertainRequest = pending.submitted != nil
@@ -973,14 +1193,14 @@ struct CommentEditor: View {
         do {
             try model.drafts.remove(ownerID: draftOwnerID, resourceKey: resourceKey)
             cleanupComplete = true
-            if refreshError == nil || onRefreshFailure != nil { dismiss() }
+            if refreshError == nil || onRefreshFailure != nil { finish() }
         } catch {
             errorMessage = "Comment added. The local draft could not be removed. Retry cleanup. \(error.localizedDescription)"
         }
     }
 }
 
-private struct SavedCardValues: View {
+struct SavedCardValues: View {
     let card: Card
     let columns: [Column]
     var body: some View {
@@ -1019,7 +1239,7 @@ enum ProjectDraftComparison {
     }
 }
 
-private struct DraftRecoveryActions: View {
+struct DraftRecoveryActions: View {
     let text: String
     let filename: String
     let isActive: Bool

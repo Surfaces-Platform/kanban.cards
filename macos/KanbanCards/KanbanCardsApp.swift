@@ -7,7 +7,7 @@ struct KanbanCardsApp: App {
     @NSApplicationDelegateAdaptor(DraftRecoveryApplicationDelegate.self) private var recoveryDelegate
 
     init() {
-        // Cards are independent document-like viewers, never automatically combined into tabs.
+        // Cards are independent document-like windows, never automatically combined into tabs.
         NSWindow.allowsAutomaticWindowTabbing = false
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--appearance-light") { NSApplication.shared.appearance = NSAppearance(named: .aqua) }
@@ -42,6 +42,8 @@ struct KanbanCardsApp: App {
         .defaultSize(width: 590, height: 700)
         .windowResizability(.contentMinSize)
         .commandsRemoved()
+
+
     }
 }
 
@@ -49,6 +51,7 @@ struct KanbanCommands: Commands {
     let model: AppModel
     @Environment(\.openWindow) private var openWindow
     @FocusedValue(\.cardWindowActions) private var cardActions
+    @FocusedValue(\.cardDraftActions) private var draftActions
     @FocusedValue(\.boardWindowActions) private var boardActions
     @FocusedValue(\.projectWindowActions) private var projectActions
 
@@ -64,6 +67,13 @@ struct KanbanCommands: Commands {
             Button("Show Board") { openWindow(id: "board", value: BoardWindowID.main) }
                 .keyboardShortcut("0")
         }
+        CommandGroup(replacing: .saveItem) {
+            Button("Save") { draftActions?.save() }
+                .keyboardShortcut("s")
+                .disabled(draftActions?.canSave != true)
+            Button("Revert to Saved…") { draftActions?.revert() }
+                .disabled(draftActions?.canRevert != true)
+        }
         CommandMenu("Project") {
             Button("Edit Project…") { projectActions?.edit() }.disabled(projectActions?.canEdit != true)
             Button("Activity…") { projectActions?.activity() }.disabled(projectActions?.canShowActivity != true)
@@ -71,10 +81,7 @@ struct KanbanCommands: Commands {
                 .disabled(projectActions?.canArchive != true)
         }
         CommandMenu("Card") {
-            Button("Edit Card…") { cardActions?.edit() }
-                .keyboardShortcut("e", modifiers: [.command, .option])
-                .disabled(cardActions?.canEdit != true)
-            Button("Add Comment…") { cardActions?.comment() }
+            Button("Add Comment") { cardActions?.comment() }
                 .keyboardShortcut("m", modifiers: [.command, .shift])
                 .disabled(cardActions?.canEdit != true)
             Button("Move Card…") { cardActions?.move() }.disabled(cardActions?.canEdit != true)

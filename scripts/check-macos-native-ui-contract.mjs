@@ -31,7 +31,7 @@ for (const file of swiftFiles) {
     if (forbidden.some(pattern => pattern.test(line))) failures.push(`${path.relative(process.cwd(), file)}:${index + 1}: prohibited custom or web UI path`);
     const nativeBridges = [path.join(root, "WindowGeometry.swift"), path.join(root, "UI/NativePopUpPicker.swift")];
     if (/\bNSViewRepresentable\b/.test(line) && !nativeBridges.includes(file)) {
-      failures.push(`${path.relative(process.cwd(), file)}:${index + 1}: only native window integration and the standard AppKit popup control bridges are allowed`);
+      failures.push(`${path.relative(process.cwd(), file)}:${index + 1}: only native window and popup control integration bridges are allowed`);
     }
   });
 }

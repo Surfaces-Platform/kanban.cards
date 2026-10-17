@@ -8,6 +8,7 @@ final class AppModel {
     private static let signOutIntentKey = "macOSNativeSignOutPending"
     let api: KanbanAPIClient
     let drafts: DraftStore
+    @ObservationIgnored private var cardEditingSessions: [String: SharedCardEditingSession] = [:]
     private let defaults: UserDefaults
     private let passkeys = PasskeySignInCoordinator()
     private var projectMutationGenerations: [String: UUID] = [:]
@@ -30,7 +31,11 @@ final class AppModel {
     private(set) var signOutPending = false
     private(set) var workspaces: [Workspace] = []
     private var projectLists: [String: [ProjectSummary]] = [:]
-    private var loadedProjects: [String: Project] = [:]
+    private var loadedProjects: [String: Project] = [:] {
+        didSet {
+            for session in cardEditingSessions.values { session.synchronizeIfClean() }
+        }
+    }
     private var fullSnapshotRevisions: [String: Int] = [:]
     private var loadingProjectLists = Set<String>()
     private var projectListErrors: [String: String] = [:]
@@ -111,6 +116,17 @@ final class AppModel {
     func project(id: String, in workspace: Workspace) -> Project? {
         guard canAccess(workspace) else { return nil }
         return loadedProjects[projectKey(id, in: workspace)]
+    }
+
+    func cardEditingSession(workspace: Workspace, projectID: String, card: Card) -> SharedCardEditingSession {
+        let key = [ownerID, workspace.id, workspace.url.absoluteString, projectID, card.id]
+            .map { "\($0.utf8.count):\($0)" }.joined()
+        if let existing = cardEditingSessions[key], existing.sessionIsCurrent { return existing }
+        cardEditingSessions[key]?.invalidate()
+        let session = SharedCardEditingSession(model: self, workspace: workspace, projectID: projectID, card: card)
+        cardEditingSessions[key] = session
+        session.load()
+        return session
     }
 
     func restore() async {
@@ -651,6 +667,8 @@ final class AppModel {
     }
 
     private func clearPrivateState() {
+        for session in cardEditingSessions.values { session.invalidate() }
+        cardEditingSessions.removeAll()
         sessionExpiryTask?.cancel()
         sessionExpiryTask = nil
         workspaceLoadID = nil

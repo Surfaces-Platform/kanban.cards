@@ -6,12 +6,20 @@ struct CardWindowView: View {
     @Environment(\.openWindow) private var openWindow
     @Environment(\.scenePhase) private var scenePhase
     let identity: CardWindowID
-    private enum CardSheetKind { case edit, comment, move, activity }
+    var embedded = false
+    var interactionDisabled = false
+    var onClose: (() -> Void)? = nil
+    var onInteractionLockChanged: ((Bool) -> Void)? = nil
+    private enum CardSheetKind { case move, activity }
     private struct CardSheet: Identifiable {
         var id = UUID()
         var kind: CardSheetKind
     }
     @State private var activeSheet: CardSheet?
+    @State private var editorInteractionLocked = false
+    @State private var composingComment = false
+    @State private var commentFocusRequest = UUID()
+    @State private var commentInteractionLocked = false
     @State private var confirmingArchive = false
     @State private var mutating = false
     @State private var loading = false
@@ -28,145 +36,126 @@ struct CardWindowView: View {
     private var card: Card? { project?.cards.first { $0.id == identity.cardID } }
     private var hasSheet: Bool { activeSheet != nil || confirmingArchive }
     private var canWrite: Bool { workspace.map { model.canEditProject(id: identity.projectID, in: $0) } == true }
-    private var canEdit: Bool { model.signedIn && card?.archivedAt == nil && project?.archivedAt == nil && card != nil && !mutating && !hasSheet && canWrite }
-    private var canRefresh: Bool { workspace != nil && !loading && !mutating && !hasSheet }
+    private var canEdit: Bool { !interactionDisabled && model.signedIn && card?.archivedAt == nil && project?.archivedAt == nil && card != nil && !interactionLocked && canWrite }
+    private var canRefresh: Bool { !interactionDisabled && workspace != nil && !loading && !interactionLocked }
     private var canShowActivity: Bool { card != nil && canRefresh }
-    private var canArchive: Bool { card != nil && project != nil && project?.archivedAt == nil && !hasSheet && !mutating && canWrite }
+    private var canArchive: Bool { !interactionDisabled && card != nil && project != nil && project?.archivedAt == nil && !interactionLocked && canWrite }
+    private var interactionLocked: Bool { hasSheet || mutating || commentInteractionLocked || editorInteractionLocked }
 
     var body: some View {
-        VStack(spacing: 0) {
-            NativeCardWindowGeometry(identity: identity, resetDemoLayout: model.isDemo && ProcessInfo.processInfo.arguments.contains("--reset-demo-window-layout"))
-                .frame(width: 1, height: 1)
-                .accessibilityHidden(true)
-            content
-        }
-        .frame(minWidth: 460, minHeight: 480)
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("Card details")
-        .accessibilityIdentifier("card.viewer.\(identity.cardID)")
-        .navigationTitle(card?.title ?? "Card")
-        .navigationSubtitle([workspace?.name, project?.name].compactMap { $0 }.joined(separator: " / "))
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button("Edit") { activeSheet = CardSheet(kind: .edit) }.disabled(!canEdit)
-                    .accessibilityIdentifier("card.edit.\(identity.cardID)")
-            }
-            ToolbarItem { Button("Move…") { activeSheet = CardSheet(kind: .move) }.disabled(!canEdit) }
-            ToolbarItem { Button("Refresh", systemImage: "arrow.clockwise") { Task { await refresh() } }.disabled(!canRefresh) }
-            ToolbarItem {
-                NativePullDownMenu(title: "Card actions", systemImage: "ellipsis", label: "More Card actions",
-                    identifier: "card.actions.\(identity.cardID)", actions: [
-                    NativeMenuAction(title: "Activity…", systemImage: "clock", isEnabled: canShowActivity) {
-                        guard canShowActivity else { return }
-                        activeSheet = CardSheet(kind: .activity)
-                    },
-                    NativeMenuAction(title: card?.archivedAt == nil ? "Archive Card…" : "Restore Card…",
-                        isEnabled: canArchive, beginsGroup: true) {
-                        guard canArchive else { return }
-                        confirmingArchive = true
+        Group {
+            if embedded { viewer }
+            else {
+                viewer
+                    .frame(minWidth: 460, minHeight: 480)
+                    .navigationTitle(card?.title ?? "Card")
+                    .navigationSubtitle([workspace?.name, project?.name].compactMap { $0 }.joined(separator: " / "))
+                    .toolbar {
+                        ToolbarItem { moveAction }
+                        ToolbarItem { refreshAction }
+                        ToolbarItem { moreActions }
                     }
-                ])
+            }
+        }
+        .contextMenu {
+            if let card {
+                CardContextMenu(archived: card.archivedAt != nil,
+                    canOpen: canRefresh, canEdit: canEdit, canArchive: canArchive,
+                    open: { openWindow(id: "card", value: identity) },
+                    move: { if canEdit { activeSheet = CardSheet(kind: .move) } },
+                    activity: { if canShowActivity { activeSheet = CardSheet(kind: .activity) } },
+                    archive: { if canArchive { confirmingArchive = true } })
             }
         }
         .focusedSceneValue(\.cardWindowActions, CardWindowActions(
-            canEdit: canEdit, canRefresh: canRefresh,
-            canShowActivity: canShowActivity,
-            canArchive: canArchive,
-            archived: card?.archivedAt != nil,
-            edit: { if canEdit { activeSheet = CardSheet(kind: .edit) } },
-            comment: { if canEdit { activeSheet = CardSheet(kind: .comment) } },
+            canEdit: canEdit, canRefresh: canRefresh, canShowActivity: canShowActivity,
+            canArchive: canArchive, archived: card?.archivedAt != nil,
+            comment: { if canEdit { beginComment() } },
             move: { if canEdit { activeSheet = CardSheet(kind: .move) } },
             activity: { if canShowActivity { activeSheet = CardSheet(kind: .activity) } },
             archive: { if canArchive { confirmingArchive = true } },
             refresh: { if canRefresh { Task { await refresh() } } }))
         .task { await model.restore(); await refresh(); closeIfUnauthorized() }
-        .onChange(of: card?.id) { _, id in if id == nil { activeSheet = nil; confirmingArchive = false } }
+        .onChange(of: interactionLocked, initial: true) { _, locked in onInteractionLockChanged?(locked) }
+        .onDisappear { onInteractionLockChanged?(false) }
+        .onChange(of: card?.id) { _, id in
+            if id == nil { activeSheet = nil; confirmingArchive = false; composingComment = false }
+        }
         .onChange(of: model.signedIn) { _, _ in closeIfUnauthorized() }
         .onChange(of: model.sessionID) { _, _ in
-            activeSheet = nil; confirmingArchive = false
+            activeSheet = nil; confirmingArchive = false; composingComment = false
             closeIfUnauthorized()
         }
         .onChange(of: scenePhase) { _, phase in if phase == .active { model.validateSession(); Task { await refresh() } } }
+    }
+
+    private var viewer: some View {
+        VStack(spacing: 0) {
+            if !embedded {
+                NativeCardWindowGeometry(identity: identity, resetDemoLayout: model.isDemo && ProcessInfo.processInfo.arguments.contains("--reset-demo-window-layout"))
+                    .frame(width: 1, height: 1).accessibilityHidden(true)
+            }
+            if embedded {
+                HStack {
+                    moveAction
+                    refreshAction.labelStyle(.iconOnly).help("Refresh Card")
+                    moreActions
+                    Spacer(minLength: 0)
+                    Button("Close Card", systemImage: "xmark") { close() }
+                        .labelStyle(.iconOnly).help("Close Card")
+                        .disabled(interactionLocked || interactionDisabled)
+                        .accessibilityIdentifier("card.close.\(identity.cardID)")
+                }
+                .padding()
+                .accessibilityElement(children: .contain)
+                .accessibilityLabel("Card controls")
+                Divider()
+            }
+            content
+        }
+        .background {
+            if !embedded {
+                NativeWindowAccessibility(label: "Card", identifier: "card.window.\(identity.cardID)")
+                    .frame(width: 1, height: 1).accessibilityHidden(true)
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Card")
+        .accessibilityIdentifier("card.viewer.\(identity.cardID)")
+    }
+
+    private var moveAction: some View {
+        Button("Move…") { activeSheet = CardSheet(kind: .move) }.disabled(!canEdit)
+    }
+    private var refreshAction: some View {
+        Button("Refresh", systemImage: "arrow.clockwise") { Task { await refresh() } }.disabled(!canRefresh)
+    }
+    private var moreActions: some View {
+        NativePullDownMenu(title: "Card actions", systemImage: "ellipsis", label: "More Card actions",
+            identifier: "card.actions.\(identity.cardID)", actions: [
+            NativeMenuAction(title: "Activity…", systemImage: "clock", isEnabled: canShowActivity) {
+                guard canShowActivity else { return }; activeSheet = CardSheet(kind: .activity)
+            },
+            NativeMenuAction(title: card?.archivedAt == nil ? "Archive Card…" : "Restore Card…",
+                isEnabled: canArchive, beginsGroup: true) {
+                guard canArchive else { return }; confirmingArchive = true
+            }
+        ])
     }
 
     private var content: some View {
         Group {
             if model.restoring { ProgressView("Opening Card") }
             else if let workspace, let project, let card {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text(project.columns.first { $0.id == card.columnId }?.name ?? "Column unavailable")
-                                .font(.caption).foregroundStyle(.primary)
-                            Text(card.title).font(.title2).fontWeight(.semibold).textSelection(.enabled)
-                                .accessibilityAddTraits(.isHeader)
-                                .accessibilityHeading(.h1)
-                                .accessibilityValue(Text(verbatim: card.title))
-                            if card.archivedAt != nil { Label("Archived Card", systemImage: "archivebox") }
-                            if project.archivedAt != nil { Text("Archived Project. This Card is read-only.") }
-                            else if !canWrite { Label("Read-only", systemImage: "lock") }
-                            if loading { ProgressView("Refreshing Card") }
-                            if mutating { ProgressView("Updating Card") }
-                            if let loadError {
-                                Text(loadError).foregroundStyle(.secondary)
-                                Button("Retry refresh") { Task { await refresh() } }
-                            }
-                            sectionHeader("Next action").padding(.top, 8)
-                            Text(verbatim: card.nextAction.isEmpty ? "No next action yet" : card.nextAction)
-                                .font(.body).textSelection(.enabled)
-                                .accessibilityValue(Text(verbatim: card.nextAction.isEmpty ? "No next action yet" : card.nextAction))
-                            sectionHeader("Details").padding(.top, 8)
-                            metadataRow("Next actor", value: card.nextActor?.label ?? "Unassigned")
-                            metadataRow("Priority", value: card.priority?.rawValue ?? "Unset")
-                            metadataRow("Blocker", value: card.blockedReason.isEmpty ? "None" : card.blockedReason)
-                        }
-                        .padding(.vertical, 3)
-
-                        VStack(alignment: .leading, spacing: 8) {
-                            sectionHeader("Description")
-                            Text(verbatim: card.body.isEmpty ? "No description" : card.body)
-                                .foregroundStyle(card.body.isEmpty ? Color.secondary : Color.primary)
-                                .textSelection(.enabled)
-                                .accessibilityValue(Text(verbatim: card.body.isEmpty ? "No description" : card.body))
-                        }
-
-                        VStack(alignment: .leading, spacing: 8) {
-                            sectionHeader(card.comments.isEmpty ? "Comments" : "Comments (\(card.comments.count))")
-                            ForEach(card.comments) { comment in
-                                VStack(alignment: .leading, spacing: 6) {
-                                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                        Text(comment.author).font(.body).fontWeight(.semibold).foregroundStyle(.primary)
-                                        if let date = ServerTimestamp.date(from: comment.createdAt) {
-                                            Text(date, style: .relative).font(.subheadline).foregroundStyle(.secondary)
-                                        }
-                                    }
-                                    .accessibilityElement(children: .combine)
-                                    Text(verbatim: comment.body).font(.body).textSelection(.enabled)
-                                }.padding(.vertical, 4)
-                                Divider()
-                            }
-                            if card.comments.isEmpty {
-                                Text("No comments yet").foregroundStyle(.secondary)
-                            }
-                            Button("Add Comment…") { activeSheet = CardSheet(kind: .comment) }
-                                .disabled(!canEdit)
-                                .accessibilityIdentifier("card.add-comment.\(identity.cardID)")
-                                .padding(.vertical, 4)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(16)
-                    .accessibilityElement(children: .contain)
-                    .accessibilityLabel("Card contents")
-                }
+                CardEditor(workspace: workspace, projectID: project.id, card: card,
+                    onRefreshFailure: { loadError = $0 }, presentation: .inline,
+                    onInteractionLockChanged: { editorInteractionLocked = $0 },
+                    cardEditingDisabled: commentInteractionLocked, additionalContent: AnyView(cardComments(card, workspace: workspace, project: project)),
+                    additionalContentFocusRequest: composingComment ? commentFocusRequest : nil)
+                    .environment(model)
+                    .disabled(interactionDisabled || hasSheet || mutating)
                 .sheet(item: $activeSheet) { sheet in
                     switch sheet.kind {
-                    case .edit:
-                        CardEditor(workspace: workspace, projectID: project.id, card: card,
-                            onRefreshFailure: { loadError = $0 }).environment(model).id(sheet.id)
-                    case .comment:
-                        CommentEditor(workspace: workspace, projectID: project.id, cardID: card.id,
-                            onRefreshFailure: { loadError = $0 }).environment(model).id(sheet.id)
                     case .move:
                         MoveCardSheet(workspace: workspace, projectID: project.id, card: card,
                             onRefreshFailure: { loadError = $0 }).environment(model).id(sheet.id)
@@ -184,60 +173,76 @@ struct CardWindowView: View {
                 ContentUnavailableView {
                     Label("Card unavailable", systemImage: "rectangle")
                 } description: {
-                    Text(workspace == nil
-                        ? "This Workspace is no longer available. Open the board to choose another Project."
+                    Text(workspace == nil ? "This Workspace is no longer available. Open the board to choose another Project."
                         : loadError ?? "The Card is no longer available. Refresh to check its current state.")
                 } actions: {
-                    if workspace != nil {
-                        Button("Refresh") { Task { await refresh() } }.disabled(!canRefresh)
-                    } else {
-                        Button("Show Board") { openWindow(id: "board", value: BoardWindowID.main) }
-                    }
-                    Button("Close Window") { dismissWindow(id: "card", value: identity) }
+                    if workspace != nil { Button("Refresh") { Task { await refresh() } }.disabled(!canRefresh) }
+                    else { Button("Show Board") { openWindow(id: "board", value: BoardWindowID.main) } }
+                    Button(embedded ? "Close Card" : "Close Window") { close() }
                 }
             }
         }
     }
 
-    private func metadataRow(_ label: String, value: String) -> some View {
-        LabeledContent(label) {
-            Text(verbatim: value)
-                .foregroundStyle(.primary)
-                .fixedSize(horizontal: false, vertical: true)
-        }.font(.body)
-    }
-
-    private func sectionHeader(_ title: String) -> some View {
-        Text(title)
-            .font(.headline)
-            .foregroundStyle(.primary)
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel(title)
-            .accessibilityAddTraits(.isHeader)
-            .accessibilityHeading(.h2)
-    }
-
-    private func closeIfUnauthorized() {
-        if !model.restoring && (!model.signedIn || model.ownerID != identity.ownerID) {
-            dismissWindow(id: "card", value: identity)
+    private func cardComments(_ card: Card, workspace: Workspace, project: Project) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if loading { ProgressView("Refreshing Card") }
+            if mutating { ProgressView("Updating Card") }
+            if let loadError {
+                Text(loadError).foregroundStyle(.secondary)
+                Button("Retry refresh") { Task { await refresh() } }.disabled(!canRefresh)
+            }
+            Text(card.comments.isEmpty ? "Comments" : "Comments (\(card.comments.count))")
+                .font(.headline).accessibilityAddTraits(.isHeader).accessibilityHeading(.h2)
+            ForEach(card.comments) { comment in
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(comment.author).fontWeight(.semibold)
+                        if let date = ServerTimestamp.date(from: comment.createdAt) {
+                            Text(date, style: .relative).font(.subheadline).foregroundStyle(.secondary)
+                        }
+                    }.accessibilityElement(children: .combine)
+                    Text(verbatim: comment.body).textSelection(.enabled)
+                }.padding(.vertical, 4)
+                Divider()
+            }
+            if card.comments.isEmpty { Text("No comments yet").foregroundStyle(.secondary) }
+            if composingComment {
+                CommentEditor(workspace: workspace, projectID: project.id, cardID: card.id,
+                    onRefreshFailure: { loadError = $0 }, presentation: .inline,
+                    focusRequest: commentFocusRequest,
+                    onClose: { composingComment = false; commentInteractionLocked = false },
+                    onInteractionLockChanged: { commentInteractionLocked = $0 })
+                    .environment(model)
+                    .disabled(interactionDisabled || hasSheet || mutating)
+                    .id("comment-composer")
+            } else {
+                Button("Add Comment") { beginComment() }
+                    .disabled(!canEdit).accessibilityIdentifier("card.add-comment.\(identity.cardID)")
+                    .padding(.vertical, 4)
+            }
         }
     }
 
+    private func beginComment() {
+        guard canEdit else { return }; composingComment = true; commentFocusRequest = UUID()
+    }
+    private func close() {
+        if embedded { onClose?() } else { dismissWindow(id: "card", value: identity) }
+    }
+    private func closeIfUnauthorized() {
+        if !model.restoring && (!model.signedIn || model.ownerID != identity.ownerID) { close() }
+    }
     private func refresh() async {
-        guard let workspace else { return }
-        loading = true
-        defer { loading = false }
+        guard let workspace else { return }; loading = true; defer { loading = false }
         do { try await model.loadProject(id: identity.projectID, in: workspace); loadError = nil }
         catch {
-            guard !(error is CancellationError) else { return }
-            loadError = error.localizedDescription
+            guard !(error is CancellationError) else { return }; loadError = error.localizedDescription
             if (error as? APIError)?.isUnauthorized == true { model.handle(error) }
         }
     }
-
     private func archive(_ card: Card, workspace: Workspace, archived: Bool) async {
-        mutating = true
-        defer { mutating = false }
+        mutating = true; defer { mutating = false }
         do {
             try await model.archive(card, projectID: identity.projectID, in: workspace, archived: archived,
                 onRefreshFailure: { loadError = $0 })
@@ -249,7 +254,7 @@ struct CardWindowView: View {
     }
 }
 
-private struct MoveCardSheet: View {
+struct MoveCardSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     let workspace: Workspace
