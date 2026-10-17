@@ -88,6 +88,7 @@ struct NativePopUpPicker<Value: Hashable>: NSViewRepresentable {
     @Binding var selection: Value
     let options: [NativePopUpOption<Value>]
     let identifier: String
+    var actions: [NativeMenuAction] = []
 
     func makeNSView(context: Context) -> NSPopUpButton {
         let button = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -95,17 +96,36 @@ struct NativePopUpPicker<Value: Hashable>: NSViewRepresentable {
         button.autoenablesItems = false
         button.target = context.coordinator
         button.action = #selector(Coordinator.selectionChanged(_:))
+        context.coordinator.button = button
         return button
     }
 
     func updateNSView(_ button: NSPopUpButton, context: Context) {
         context.coordinator.parent = self
-        if context.coordinator.options != options {
+        let actionStates = actions.map(Coordinator.ActionState.init)
+        if context.coordinator.options != options || context.coordinator.actionStates != actionStates {
             button.removeAllItems()
+            button.menu?.autoenablesItems = false
             for option in options {
                 button.menu?.addItem(NSMenuItem(title: option.title, action: nil, keyEquivalent: ""))
             }
+            for (index, action) in actions.enumerated() {
+                if (index == 0 && !options.isEmpty) || (index > 0 && action.beginsGroup) {
+                    button.menu?.addItem(.separator())
+                }
+                let item = NSMenuItem(title: action.title,
+                    action: #selector(Coordinator.performAction(_:)), keyEquivalent: "")
+                item.target = context.coordinator
+                item.tag = index
+                item.isEnabled = action.isEnabled
+                item.setAccessibilityIdentifier("\(identifier).action.\(index)")
+                if let image = action.systemImage {
+                    item.image = NSImage(systemSymbolName: image, accessibilityDescription: nil)
+                }
+                button.menu?.addItem(item)
+            }
             context.coordinator.options = options
+            context.coordinator.actionStates = actionStates
         }
         if let index = options.firstIndex(where: { $0.value == selection }) {
             button.selectItem(at: index)
@@ -118,7 +138,7 @@ struct NativePopUpPicker<Value: Hashable>: NSViewRepresentable {
         case .large: button.controlSize = .large
         default: button.controlSize = .regular
         }
-        button.isEnabled = context.environment.isEnabled && !options.isEmpty
+        button.isEnabled = context.environment.isEnabled && (!options.isEmpty || actions.contains { $0.isEnabled })
         button.setAccessibilityLabel(label)
         button.setAccessibilityIdentifier(identifier)
         button.invalidateIntrinsicContentSize()
@@ -134,12 +154,37 @@ struct NativePopUpPicker<Value: Hashable>: NSViewRepresentable {
 
     @MainActor
     final class Coordinator: NSObject {
+        struct ActionState: Equatable {
+            let title: String
+            let systemImage: String?
+            let isEnabled: Bool
+            let beginsGroup: Bool
+            init(_ action: NativeMenuAction) {
+                title = action.title
+                systemImage = action.systemImage
+                isEnabled = action.isEnabled
+                beginsGroup = action.beginsGroup
+            }
+        }
         var parent: NativePopUpPicker
         var options: [NativePopUpOption<Value>] = []
+        var actionStates: [ActionState] = []
+        weak var button: NSPopUpButton?
         init(_ parent: NativePopUpPicker) { self.parent = parent }
         @objc func selectionChanged(_ button: NSPopUpButton) {
             guard options.indices.contains(button.indexOfSelectedItem) else { return }
             parent.selection = options[button.indexOfSelectedItem].value
+        }
+        @objc func performAction(_ item: NSMenuItem) {
+            // Commands do not represent a selection. Restore the actual value
+            // before opening another native presentation from the menu action.
+            if let index = options.firstIndex(where: { $0.value == parent.selection }) {
+                button?.selectItem(at: index)
+            } else {
+                button?.select(nil)
+            }
+            guard parent.actions.indices.contains(item.tag), parent.actions[item.tag].isEnabled else { return }
+            parent.actions[item.tag].perform()
         }
     }
 }

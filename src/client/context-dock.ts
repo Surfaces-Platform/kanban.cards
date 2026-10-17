@@ -271,6 +271,12 @@ let agentNeedsVerification = false;
 let passkeyDraft = { workspaceName: "", workspaceSlug: "", displayName: "" };
 let workspaceHandoffPending = false;
 let workspaceChoices: WorkspaceAccess[] = [];
+let workspaceMenuOpen = false;
+let workspaceCreationOpen = false;
+let workspaceCreationReturnSlug = "";
+let workspaceDraft = { name: "", slug: "" };
+let createdWorkspace: WorkspaceAccess | null = null;
+const uncertainWorkspaceCreations = new Map<string, Set<string>>();
 let accessFailure: AccessFailure | null = null;
 let agentConnections: AgentConnection[] = [];
 let agentPanelOpen = false;
@@ -990,31 +996,43 @@ function renderSignIn(): string {
   })}<p id="owner-key-help" class="jk-help">The key is never stored in the browser.</p><button class="jk-button" data-priority="primary" type="submit"${disabledAttribute()}>${mutationKind === "sign-in" ? "Opening…" : "Open workspace"}</button></form></section></main>`;
 }
 
+function renderWorkspaceForm(): string {
+  if (createdWorkspace) {
+    return `<div><h1 id="workspace-route-title" tabindex="-1">Workspace created</h1><p>${escapeHtml(createdWorkspace.name)} is ready.</p></div>${renderButton("Open Workspace", "open-workspace", { priority: "primary", data: `data-workspace-slug="${escapeHtml(createdWorkspace.slug)}"` })}`;
+  }
+  const addressHost = new URL(rootUrl).host;
+  return `<div><p class="eyebrow">${workspaceChoices.length ? "New Workspace" : "Your first Workspace"}</p><h1 id="workspace-route-title" tabindex="-1">Create a Workspace</h1><p class="access-description">Give this private work surface a name and address.</p></div><form data-form="workspace" class="access-form" novalidate>${renderField({
+    id: "workspace-name", label: "Workspace name",
+    control: renderTextInput({ id: "workspace-name", name: "name", value: workspaceDraft.name, required: true, autofocus: true })
+  })}${renderField({
+    id: "workspace-slug", label: "Workspace address",
+    control: renderTextInput({ id: "workspace-slug", name: "slug", value: workspaceDraft.slug, required: true, placeholder: "example" }),
+    hint: `Your address will be example.${addressHost}. Use lowercase letters, numbers, and hyphens.`
+  })}<div class="jk-actions"><button class="jk-button" data-priority="primary" type="submit"${disabledAttribute()}>${mutationKind === "workspace" ? "Creating…" : "Create Workspace"}</button>${workspaceChoices.length ? renderButton("Cancel", "cancel-workspace") : ""}</div></form>`;
+}
+
 function renderWorkspaceRoute(): string {
-  const failure = accessFailure ? renderStatus({ tone: "error", ...accessFailure }, "workspace-route-status") : renderStatus(null, "workspace-route-status");
+  const failure = renderStatus(accessFailure ? { tone: "error", ...accessFailure } : null, "workspace-route-status");
   const choices = workspaceChoices.map((workspace) => `<li class="workspace-choice"><div><strong>${escapeHtml(workspace.name)}</strong><p class="quiet">${escapeHtml(workspace.slug)}</p></div>${renderButton("Open", "open-workspace", {
-    disabled: mutationInFlight,
-    data: `data-workspace-slug="${escapeHtml(workspace.slug)}"`
+    disabled: mutationInFlight, data: `data-workspace-slug="${escapeHtml(workspace.slug)}"`
   })}</li>`).join("");
-  const chooser = choices
-    ? `<div><p class="eyebrow">Your Workspaces</p><h1 id="workspace-route-title">Choose a Workspace</h1><p class="access-description">Each Workspace has its own private address and stored Projects.</p></div><ul class="workspace-choices">${choices}</ul>`
-    : `<div><p class="eyebrow">Your first Workspace</p><h1 id="workspace-route-title">Create a Workspace</h1><p class="access-description">Give this private work surface a name and address.</p></div><form data-form="workspace" class="access-form" novalidate>${renderField({
-      id: "workspace-name",
-      label: "Workspace name",
-      control: renderTextInput({ id: "workspace-name", name: "name", required: true, autofocus: true })
-    })}${renderField({
-      id: "workspace-slug",
-      label: "Workspace address",
-      control: renderTextInput({ id: "workspace-slug", name: "slug", required: true, placeholder: "example" }),
-      hint: "Use lowercase letters, numbers, and hyphens."
-    })}<button class="jk-button" data-priority="primary" type="submit"${disabledAttribute()}>${mutationKind === "workspace" ? "Creating…" : "Create Workspace"}</button></form>`;
+  const chooser = workspaceCreationOpen || !choices
+    ? renderWorkspaceForm()
+    : `<div><p class="eyebrow">Your Workspaces</p><h1 id="workspace-route-title" tabindex="-1">Choose a Workspace</h1><p class="access-description">Each Workspace has its own private address and stored Projects.</p></div><ul class="workspace-choices">${choices}</ul><div class="workspace-create-action">${renderButton("New Workspace…", "new-workspace")}</div>`;
   return `<main class="access-view"><section class="access-card workspace-route-card jk-panel" aria-labelledby="workspace-route-title">${renderProductName()}${chooser}${failure}<div class="workspace-route-footer"><span>${escapeHtml(ownerName())}</span>${renderButton("Manage access", "manage-access")}${renderButton("Sign out", "sign-out")}</div></section></main>`;
+}
+
+function renderWorkspaceSwitcher(): string {
+  const workspace = session?.workspace;
+  if (accessContext !== "workspace" || !workspace) return "";
+  const locked = workspaceLocked();
+  return `<div class="header-workspace-switcher"><button id="workspace-switcher-trigger" class="jk-button workspace-switcher-trigger" type="button" data-action="toggle-workspace-menu" aria-label="Workspace: ${escapeHtml(workspace.name)}" aria-expanded="${workspaceMenuOpen}" aria-controls="workspace-switcher-panel"${disabledAttribute(locked)}><span>${escapeHtml(workspace.name)}</span><span aria-hidden="true">⌄</span></button>${workspaceMenuOpen ? `<section id="workspace-switcher-panel" class="menu-panel workspace-switcher-panel" aria-labelledby="workspace-switcher-trigger"><p class="workspace-current"><span aria-hidden="true">✓ </span>${escapeHtml(workspace.name)}<span class="jk-visually-hidden">, current Workspace</span></p>${renderButton("Switch Workspace…", "choose-workspace", { disabled: locked })}<hr>${renderButton("New Workspace…", "new-workspace", { disabled: locked })}</section>` : ""}</div>`;
 }
 
 function renderHeader(): string {
   const name = ownerName();
   const editingProject = projectEditorMode !== null || addColumnPreparing || addColumnCommitted || addColumnDraft !== null;
-  return `<header class="app-header"><div class="header-primary">${renderProductName("span")}${renderProjectContext()}</div><div class="profile-menu"><button class="avatar-button" type="button" data-action="toggle-account-panel" aria-label="${accountPanelOpen ? "Close" : "Open"} account panel" aria-expanded="${accountPanelOpen ? "true" : "false"}" aria-controls="account-panel"${disabledAttribute(editingProject)}><span aria-hidden="true">${escapeHtml(ownerInitial())}</span></button>${accountPanelOpen ? `<section id="account-panel" class="menu-panel account-panel" aria-labelledby="account-name"><strong id="account-name">${escapeHtml(name)}</strong>${accessContext === "workspace" ? renderButton("Agent connections", "manage-agents", { disabled: editingProject }) : ""}${accessContext !== "local" ? renderButton("Manage access", "manage-access", { disabled: editingProject }) : ""}${renderButton("Sign out", "sign-out", { disabled: editingProject })}</section>` : ""}</div></header>`;
+  return `<header class="app-header"><div class="header-primary">${renderProductName("span")}${renderWorkspaceSwitcher()}${renderProjectContext()}</div><div class="profile-menu"><button class="avatar-button" type="button" data-action="toggle-account-panel" aria-label="${accountPanelOpen ? "Close" : "Open"} account panel" aria-expanded="${accountPanelOpen ? "true" : "false"}" aria-controls="account-panel"${disabledAttribute(editingProject)}><span aria-hidden="true">${escapeHtml(ownerInitial())}</span></button>${accountPanelOpen ? `<section id="account-panel" class="menu-panel account-panel" aria-labelledby="account-name"><strong id="account-name">${escapeHtml(name)}</strong>${accessContext === "workspace" ? renderButton("Agent connections", "manage-agents", { disabled: editingProject }) : ""}${accessContext !== "local" ? renderButton("Manage access", "manage-access", { disabled: editingProject }) : ""}${renderButton("Sign out", "sign-out", { disabled: editingProject })}</section>` : ""}</div></header>`;
 }
 
 function renderAccessSettings(): string {
@@ -1061,7 +1079,7 @@ function renderProjectContext(): string {
   const choices = projects.length
     ? projects.map((candidate) => ({ value: candidate.id, label: candidate.name }))
     : [{ value: "", label: "No Projects yet" }];
-  const workspaceLabel = !projects.length && session?.workspace?.name
+  const workspaceLabel = accessContext !== "workspace" && !projects.length && session?.workspace?.name
     ? `<span class="header-workspace-label"><span class="jk-visually-hidden">Current Workspace: </span>${escapeHtml(session.workspace.name)}</span>`
     : "";
   return `${workspaceLabel}<div class="header-project-switcher jk-field"><label class="jk-visually-hidden" for="project-select">Project</label>${renderSelect({
@@ -1518,16 +1536,14 @@ function restorePendingContext(): void {
   pendingFocusId = null;
   pendingFocusRestore = null;
   pendingScrollRestore = null;
-  window.requestAnimationFrame(() => {
-    if (scrollTop !== null) window.scrollTo({ top: scrollTop });
-    let target = focusId ? document.getElementById(focusId) : focusTarget ? findFocusTarget(focusTarget) : null;
-    if (!target && focusTarget?.action === "open-card" && activeProject) {
-      const card = activeProject.cards.find((candidate) => candidate.id === focusTarget.cardId);
-      const heading = document.getElementById(`column-${safeId(card?.columnId || selectedMobileColumn(activeProject))}`);
-      target = heading?.getClientRects().length ? heading : document.getElementById("board-filter-next-actor");
-    }
-    target?.focus();
-  });
+  if (scrollTop !== null) window.scrollTo({ top: scrollTop });
+  let target = focusId ? document.getElementById(focusId) : focusTarget ? findFocusTarget(focusTarget) : null;
+  if (!target && focusTarget?.action === "open-card" && activeProject) {
+    const card = activeProject.cards.find((candidate) => candidate.id === focusTarget.cardId);
+    const heading = document.getElementById(`column-${safeId(card?.columnId || selectedMobileColumn(activeProject))}`);
+    target = heading?.getClientRects().length ? heading : document.getElementById("board-filter-next-actor");
+  }
+  target?.focus();
 }
 
 function render(): void {
@@ -1548,6 +1564,10 @@ function render(): void {
   const utilities = publicWebsite && accessContext === "root" && authNotice?.kind !== "signed-out"
     ? (setupAvailable ? renderButton("Set up existing account", "start-setup", { disabled: !loginUrl }) : "") + (authNotice?.kind === "sign-out-incomplete" ? renderButton("Retry sign out", "retry-global-sign-out") : "")
     : "";
+  const activeElement = document.activeElement;
+  if (!pendingFocusId && !pendingFocusRestore && activeElement instanceof HTMLElement && root.contains(activeElement) && activeElement.id) {
+    pendingFocusId = activeElement.id;
+  }
   root.innerHTML = publicWebsite ? renderPublicWebsite(content, rootUrl, utilities) : content;
   restoreDescriptionSelection();
   restorePendingContext();
@@ -1665,6 +1685,13 @@ function clearPrivateState(notice: AuthNotice | null): void {
   session = null;
   workspaceHandoffPending = false;
   workspaceChoices = [];
+  workspaceMenuOpen = false;
+  workspaceCreationOpen = false;
+  workspaceCreationReturnSlug = "";
+  workspaceDraft = { name: "", slug: "" };
+  createdWorkspace = null;
+  uncertainWorkspaceCreations.clear();
+  window.sessionStorage.removeItem("kanban.cards:workspace-route");
   agentConnections = [];
   agentPanelOpen = false;
   issuedAgentCredential = "";
@@ -1759,6 +1786,7 @@ async function openWorkspace(slug: string, selectedWorkspace?: WorkspaceAccess):
     const parsed = new URL(safeDestination);
     workspaceHandoffPending = true;
     render();
+    window.sessionStorage.removeItem("kanban.cards:workspace-route");
     submitWorkspaceHandoff(parsed, token);
   } catch (error) {
     workspaceHandoffPending = false;
@@ -1787,25 +1815,103 @@ function submitWorkspaceHandoff(destination: URL, token: string): void {
   }
 }
 
-async function createWorkspace(form: HTMLFormElement): Promise<void> {
-  const data = formData(form);
-  const name = cleanValue(formValue(data, "name"));
-  const slug = cleanValue(formValue(data, "slug")).toLowerCase();
-  if (!name || !slug) {
-    accessFailure = { title: "Workspace details needed", message: "Enter a Workspace name and lowercase address." };
+async function showWorkspaceRoute(create: boolean): Promise<void> {
+  if (workspaceLocked()) return;
+  workspaceMenuOpen = false;
+  accountPanelOpen = false;
+  projectActionsOpen = false;
+  if (accessContext === "root") {
+    workspaceCreationOpen = create;
+    createdWorkspace = null;
+    workspaceDraft = { name: "", slug: "" };
+    accessFailure = null;
+    window.sessionStorage.setItem("kanban.cards:workspace-route", JSON.stringify({ create, returnSlug: workspaceCreationReturnSlug }));
+    pendingFocusId = create ? "workspace-name" : "workspace-route-title";
     render();
     return;
   }
+  if (accessContext !== "workspace" || !session?.workspace) return;
+  const form = document.querySelector<HTMLFormElement>("form[data-form='card']");
+  if (form) {
+    captureCardDraft(form);
+    if (form.dataset.autosave === "true") queueCardAutosave(form);
+  }
   setWorkspaceMutationsDisabled(true, "workspace");
   render();
+  await flushCardAutosaves();
+  if (!session) return;
+  if (retainedDrafts.size || commentDrafts.size || pendingIdempotencyKeys.size || cardConflict || moveConflict) {
+    setWorkspaceMutationsDisabled(false);
+    projectStatus = { tone: "warning", title: "Workspace change paused", message: "Save or discard unsaved Card changes and Comments before leaving this Workspace." };
+    pendingFocusId = "project-status";
+    render();
+    return;
+  }
+  const destination = new URL("/", rootUrl);
+  destination.searchParams.set(create ? "new-workspace" : "workspaces", "1");
+  destination.searchParams.set("return-workspace", session.workspace.slug);
+  window.location.assign(destination.toString());
+}
+
+async function cancelWorkspaceCreation(): Promise<void> {
+  if (mutationInFlight) return;
+  workspaceCreationOpen = false;
+  workspaceDraft = { name: "", slug: "" };
+  createdWorkspace = null;
+  uncertainWorkspaceCreations.clear();
+  accessFailure = null;
+  window.sessionStorage.removeItem("kanban.cards:workspace-route");
+  const previous = workspaceChoices.find((workspace) => workspace.slug === workspaceCreationReturnSlug);
+  if (previous) await openWorkspace(previous.slug, previous);
+  else { pendingFocusRestore = { action: "new-workspace", occurrence: 0 }; render(); }
+}
+
+async function createWorkspace(form: HTMLFormElement): Promise<void> {
+  if (accessContext !== "root" || mutationInFlight || createdWorkspace) return;
+  const data = formData(form);
+  workspaceDraft = { name: formValue(data, "name"), slug: formValue(data, "slug") };
+  const name = cleanValue(workspaceDraft.name);
+  const slug = cleanValue(workspaceDraft.slug).toLowerCase();
+  if (!name || name.length > 120 || !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(slug)) {
+    accessFailure = { title: "Workspace details needed", message: "Enter a name of 120 characters or fewer and an address using letters, numbers, and hyphens, starting and ending with a letter or number." };
+    pendingFocusId = !name || name.length > 120 ? "workspace-name" : "workspace-slug";
+    render();
+    return;
+  }
+  workspaceCreationOpen = true;
+  const intent = JSON.stringify({ name, slug });
+  const knownWorkspaceIds = uncertainWorkspaceCreations.get(intent) || new Set(workspaceChoices.map((workspace) => workspace.id));
+  setWorkspaceMutationsDisabled(true, "workspace");
+  accessFailure = null;
+  render();
   try {
-    accessFailure = null;
-    const payload = objectValue(await api("/workspaces", { method: "POST", body: { name, slug } }));
-    const workspace = normalizeWorkspaceAccess(payload.workspace);
-    await openWorkspace(workspace.slug, workspace);
+    try {
+      const payload = objectValue(await api("/workspaces", { method: "POST", body: { name, slug } }));
+      const workspace = normalizeWorkspaceAccess(payload.workspace);
+      if (!workspace.id || workspace.slug !== slug || !workspace.url) throw new Error("The Workspace creation response was incomplete.");
+      createdWorkspace = workspace;
+      workspaceChoices = [...workspaceChoices.filter((candidate) => candidate.id !== workspace.id), workspace];
+    } catch (error) {
+      const previouslyUnconfirmed = uncertainWorkspaceCreations.has(intent);
+      if (outcomeIsUnconfirmed(error)) uncertainWorkspaceCreations.set(intent, knownWorkspaceIds);
+      if (!outcomeIsUnconfirmed(error) && !(previouslyUnconfirmed && error instanceof ApiError && error.status === 409)) throw error;
+      try { await loadWorkspaceChoices(); }
+      catch (inventoryError) {
+        if (inventoryError instanceof ApiError && inventoryError.status === 401) throw inventoryError;
+        throw new Error("Workspace creation could not be confirmed. Retry the same name and address when your connection is available.");
+      }
+      createdWorkspace = workspaceChoices.find((workspace) => !knownWorkspaceIds.has(workspace.id) && workspace.slug === slug && workspace.name === name) || null;
+      if (!createdWorkspace) throw error;
+    }
+    uncertainWorkspaceCreations.delete(intent);
+    await openWorkspace(createdWorkspace.slug, createdWorkspace);
   } catch (error) {
-    accessFailure = { title: "Workspace was not created", message: error instanceof Error ? error.message : "Try again." };
-    throw error;
+    if (handlePrivateError(error)) return;
+    accessFailure = {
+      title: createdWorkspace ? "Workspace created; opening failed" : outcomeIsUnconfirmed(error) ? "Workspace creation could not be confirmed" : "Workspace was not created",
+      message: outcomeIsUnconfirmed(error) && !createdWorkspace ? "Retry with the same address to check or finish creation. " + (error instanceof Error ? error.message : "Try again.") : error instanceof Error ? error.message : "Try again."
+    };
+    pendingFocusId = "workspace-route-status";
   } finally {
     setWorkspaceMutationsDisabled(false);
     render();
@@ -3041,6 +3147,7 @@ async function switchProject(projectId: string): Promise<void> {
   cardConflict = null;
   resetMoveContext();
   inspectorTab = "card";
+  workspaceMenuOpen = false;
   accountPanelOpen = false;
   projectActionsOpen = false;
   projectStatus = { tone: "neutral", title: "Opening Project", message: "Loading the selected Project without exposing stale workspace data." };
@@ -3079,6 +3186,9 @@ async function handleAction(button: HTMLElement): Promise<void> {
     render();
     return;
   }
+  if (action === "new-workspace") return showWorkspaceRoute(true);
+  if (action === "choose-workspace") return showWorkspaceRoute(false);
+  if (action === "cancel-workspace") return cancelWorkspaceCreation();
   if (action === "passkey-sign-in") return beginPasskeyFlow("signin");
   if (action === "start-signup") return beginPasskeyFlow("signup");
   if (action === "start-recovery") return beginPasskeyFlow("recover");
@@ -3125,7 +3235,16 @@ async function handleAction(button: HTMLElement): Promise<void> {
   if (mutationInFlight) return;
   if (projectEditorMode && !button.closest("#project-editor")) return;
   if (addColumnDraft && !button.closest("#add-column-editor")) return;
+  if (action === "toggle-workspace-menu") {
+    workspaceMenuOpen = !workspaceMenuOpen;
+    accountPanelOpen = false;
+    projectActionsOpen = false;
+    pendingFocusRestore = { action: workspaceMenuOpen ? "choose-workspace" : "toggle-workspace-menu", occurrence: 0 };
+    render();
+    return;
+  }
   if (action === "toggle-account-panel") {
+    workspaceMenuOpen = false;
     accountPanelOpen = !accountPanelOpen;
     projectActionsOpen = false;
     pendingFocusRestore = accountPanelOpen
@@ -3162,6 +3281,7 @@ async function handleAction(button: HTMLElement): Promise<void> {
     return;
   }
   if (action === "toggle-project-actions") {
+    workspaceMenuOpen = false;
     projectActionsOpen = !projectActionsOpen;
     accountPanelOpen = false;
     pendingFocusRestore = projectActionsOpen
@@ -3181,6 +3301,7 @@ async function handleAction(button: HTMLElement): Promise<void> {
   if (action === "cancel-move") return cancelMove();
   if (action === "move-card") return moveCard(button.dataset.columnId || "");
   if (action === "retry-move") return moveCard(button.dataset.columnId || "", true);
+  workspaceMenuOpen = false;
   accountPanelOpen = false;
   projectActionsOpen = false;
   if (action === "new-project") return openProjectEditor("create", button);
@@ -3209,7 +3330,8 @@ root.addEventListener("click", (event) => {
   const target = event.target as HTMLElement;
   const action = target.closest<HTMLElement>("[data-action]");
   if (!action) {
-    if ((accountPanelOpen || projectActionsOpen) && !target.closest(".menu-panel")) {
+    if ((accountPanelOpen || projectActionsOpen || workspaceMenuOpen) && !target.closest(".menu-panel")) {
+      workspaceMenuOpen = false;
       accountPanelOpen = false;
       projectActionsOpen = false;
       render();
@@ -3229,6 +3351,10 @@ root.addEventListener("input", (event) => {
   const target = event.target as HTMLElement;
   const form = target.closest<HTMLFormElement>("form");
   if (!form || mutationInFlight) return;
+  if (form.dataset.form === "workspace") {
+    const data = formData(form);
+    workspaceDraft = { name: formValue(data, "name"), slug: formValue(data, "slug") };
+  }
   if (form.dataset.form === "project") captureProjectDraft(form);
   if (form.dataset.form === "add-column") {
     captureAddColumnDraft(form);
@@ -3341,6 +3467,18 @@ root.addEventListener("keydown", (event) => {
     return;
   }
   if (event.key !== "Escape") return;
+  if (accessContext === "root" && workspaceCreationOpen && workspaceChoices.length) {
+    event.preventDefault();
+    if (!mutationInFlight) void cancelWorkspaceCreation();
+    return;
+  }
+  if (workspaceMenuOpen) {
+    event.preventDefault();
+    workspaceMenuOpen = false;
+    pendingFocusRestore = { action: "toggle-workspace-menu", occurrence: 0 };
+    render();
+    return;
+  }
   if (addColumnPreparing || addColumnCommitted) {
     event.preventDefault();
     return;
@@ -3395,6 +3533,8 @@ cardOnlyQuery.addEventListener("change", () => {
 
 async function boot(): Promise<void> {
   const currentUrl = new URL(window.location.href);
+  const requestedWorkspaceRoute = currentUrl.searchParams.get("new-workspace") === "1" || currentUrl.searchParams.get("workspaces") === "1";
+  if (requestedWorkspaceRoute) window.sessionStorage.setItem("kanban.cards:workspace-route", JSON.stringify({ create: currentUrl.searchParams.get("new-workspace") === "1", returnSlug: currentUrl.searchParams.get("return-workspace") || "" }));
   render();
   try {
     await loadSession();
@@ -3426,11 +3566,28 @@ async function boot(): Promise<void> {
         return;
       }
       await loadWorkspaceChoices();
+      let workspaceRouteRequested = requestedWorkspaceRoute;
+      try {
+        const intent = JSON.parse(window.sessionStorage.getItem("kanban.cards:workspace-route") || "null");
+        const validReturnSlug = typeof intent?.returnSlug === "string" && (intent.returnSlug === "" || /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(intent.returnSlug));
+        if (intent && !Array.isArray(intent) && typeof intent.create === "boolean" && validReturnSlug && (!intent.returnSlug || workspaceChoices.some((workspace) => workspace.slug === intent.returnSlug))) {
+          workspaceRouteRequested = true;
+          workspaceCreationOpen = intent.create;
+          workspaceCreationReturnSlug = intent.returnSlug;
+        } else {
+          workspaceRouteRequested = false;
+          window.sessionStorage.removeItem("kanban.cards:workspace-route");
+        }
+      } catch { window.sessionStorage.removeItem("kanban.cards:workspace-route"); }
+      if (workspaceRouteRequested) {
+        window.history.replaceState(null, "", "/");
+        pendingFocusId = workspaceCreationOpen ? "workspace-name" : "workspace-route-title";
+      }
       if (currentUrl.searchParams.get("access") === "1" || window.sessionStorage.getItem("kanban.cards:open-access") === "1") {
         window.sessionStorage.removeItem("kanban.cards:open-access");
         accessPanelOpen = true; await loadAccessSettings();
         window.history.replaceState(null, "", "/");
-      } else if (workspaceChoices.length === 1) await openWorkspace(workspaceChoices[0].slug);
+      } else if (!workspaceRouteRequested && workspaceChoices.length === 1) await openWorkspace(workspaceChoices[0].slug);
     } else if (session) {
       await loadProjects();
       if (window.sessionStorage.getItem("kanban.cards:open-agents") === "1") {

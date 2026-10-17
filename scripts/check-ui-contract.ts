@@ -240,7 +240,7 @@ function checkApplicationSource(app: SourceFile, violations: Violation[]): void 
     const storageCall = line.match(/(?:window\.)?(localStorage|sessionStorage)\.(?:getItem|setItem|removeItem)\(([^)]*)/);
     if (storageCall) {
       const literalKey = storageCall[2].match(/^\s*["']([^"']+)["']/)?.[1];
-      if (!(storageCall[1] === "localStorage" && literalKey === "kanban.cards:project-id") && !(storageCall[1] === "sessionStorage" && ["kanban.cards:open-agents", "kanban.cards:open-access", "kanban.cards:add-passkey-after-verify"].includes(literalKey || ""))) {
+      if (!(storageCall[1] === "localStorage" && literalKey === "kanban.cards:project-id") && !(storageCall[1] === "sessionStorage" && ["kanban.cards:open-agents", "kanban.cards:open-access", "kanban.cards:add-passkey-after-verify", "kanban.cards:workspace-route"].includes(literalKey || ""))) {
         violations.push({
           file: app.file,
           line: index + 1,

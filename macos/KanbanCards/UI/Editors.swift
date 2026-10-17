@@ -30,6 +30,8 @@ struct CardEditor: View {
     var cardEditingDisabled = false
     var additionalContent: AnyView? = nil
     var additionalContentFocusRequest: UUID? = nil
+    var headerLeadingContent: AnyView? = nil
+    var headerTrailingContent: AnyView? = nil
     @State private var editingSession: SharedCardEditingSession?
 
     var body: some View {
@@ -39,7 +41,8 @@ struct CardEditor: View {
                     SharedCardEditorView(session: editingSession, presentation: presentation,
                         onInteractionLockChanged: onInteractionLockChanged,
                         cardEditingDisabled: cardEditingDisabled, additionalContent: additionalContent,
-                        additionalContentFocusRequest: additionalContentFocusRequest)
+                        additionalContentFocusRequest: additionalContentFocusRequest,
+                        headerLeadingContent: headerLeadingContent, headerTrailingContent: headerTrailingContent)
                 } else {
                     ProgressView("Opening Card")
                 }
@@ -602,7 +605,6 @@ struct ProjectEditor: View {
                     : "This board is read-only in this session. Your local draft is retained.") } }
                 Section {
                     TextField("Name (required)", text: $pending.draft.name).accessibilityIdentifier("project-name")
-                    TextField("Description", text: $pending.draft.description, axis: .vertical)
                 } header: {
                     Text(workspace.name)
                         .font(.caption)

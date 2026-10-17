@@ -443,9 +443,14 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
 
   app.post("/api/workspaces", asyncHandler(async (req, res) => {
     const family = requireRootRequest(req, hostFamilies, trustForwardedHost);
-    assertRequestOrigin(req, true, trustForwardedHost);
     if (!passkeyAuthConfig) throw httpError(404, "API route not found.");
-    const identity = await verifiedRootIdentity(req, passkeyAuthConfig, trustForwardedHost, accessStore);
+    let identity: RootSession | null;
+    if (req.get("authorization")) {
+      identity = (await resolveAccessContext(req, contextConfig)).identity;
+    } else {
+      assertRequestOrigin(req, true, trustForwardedHost);
+      identity = await verifiedRootIdentity(req, passkeyAuthConfig, trustForwardedHost, accessStore);
+    }
     if (!identity) throw httpError(401, "Owner sign-in required.");
     rejectWorkspaceSelectors(req, true);
     const body = asRecord(req.body);
@@ -463,6 +468,9 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     } catch (error) {
       if (error instanceof AccessStoreError && error.code === "ACCESS_CONFLICT") {
         throw httpError(409, "Workspace address is already in use.");
+      }
+      if (error instanceof AccessStoreError && error.code === "ACCESS_FORBIDDEN") {
+        throw httpError(403, error.message);
       }
       throw error;
     }

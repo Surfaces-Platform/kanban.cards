@@ -8,6 +8,8 @@ struct SharedCardEditorView: View {
     var cardEditingDisabled = false
     var additionalContent: AnyView? = nil
     var additionalContentFocusRequest: UUID? = nil
+    var headerLeadingContent: AnyView? = nil
+    var headerTrailingContent: AnyView? = nil
     @State private var confirmingRevert = false
     @State private var confirmingAlternativeRemoval = false
 
@@ -21,24 +23,34 @@ struct SharedCardEditorView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                if session.isDirty { Text("Unsaved changes").font(.caption).foregroundStyle(.secondary) }
-                else if let savedMessage = session.savedMessage { Text(savedMessage).font(.caption).foregroundStyle(.secondary) }
-                Spacer(minLength: 8)
-                Button("Revert") { confirmingRevert = true }
-                    .disabled(!commandsEnabled || !session.canRevert)
-                    .accessibilityIdentifier("editor.revert")
-                Button(session.confirmationLabel) { Task { await session.save() } }
-                    .disabled(!commandsEnabled || !session.canSave)
-                    .accessibilityIdentifier("editor.save")
+            if hasHeaderContent {
+                ViewThatFits(in: .horizontal) {
+                    combinedHeader(compact: false)
+                    combinedHeader(compact: true)
+                }
+                .controlSize(.small)
+                .frame(minHeight: 24)
+                .padding(.horizontal)
+                .padding(.vertical, 12)
+                .accessibilityElement(children: .contain)
+                .accessibilityLabel("Card controls")
+                .accessibilityIdentifier("card.control-strip.\(session.cardID)")
+            } else {
+                HStack {
+                    draftStatus
+                    Spacer(minLength: 8)
+                    revertButton(compact: false)
+                    saveButton(compact: false)
+                }
+                .padding()
+                .accessibilityElement(children: .contain)
+                .accessibilityLabel("Card edit controls")
             }
-            .padding()
-            .accessibilityElement(children: .contain)
-            .accessibilityLabel("Card edit controls")
             Divider()
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
+                        if hasHeaderContent { draftStatus }
                         editorForm
                         if let additionalContent {
                             additionalContent
@@ -89,6 +101,45 @@ struct SharedCardEditorView: View {
         } message: {
             Text("The draft shown in this editor will remain. The other retained local drafts will be removed without changing the saved Card.")
         }
+    }
+
+    private var hasHeaderContent: Bool { headerLeadingContent != nil || headerTrailingContent != nil }
+
+    private func combinedHeader(compact: Bool) -> some View {
+        HStack(spacing: 6) {
+            if let headerLeadingContent { headerLeadingContent }
+            Spacer(minLength: 8)
+            revertButton(compact: compact).fixedSize()
+            saveButton(compact: compact).fixedSize()
+            if let headerTrailingContent { headerTrailingContent.fixedSize() }
+        }
+    }
+
+    @ViewBuilder private var draftStatus: some View {
+        if session.isDirty { Text("Unsaved changes").font(.caption).foregroundStyle(.secondary) }
+        else if let savedMessage = session.savedMessage { Text(savedMessage).font(.caption).foregroundStyle(.secondary) }
+    }
+
+    private func revertButton(compact: Bool) -> some View {
+        Button { confirmingRevert = true } label: {
+            if compact { Label("Revert", systemImage: "arrow.uturn.backward").labelStyle(.iconOnly) }
+            else { Text("Revert") }
+        }
+            .help("Revert Card Changes")
+            .accessibilityLabel("Revert")
+            .disabled(!commandsEnabled || !session.canRevert)
+            .accessibilityIdentifier("editor.revert")
+    }
+
+    private func saveButton(compact: Bool) -> some View {
+        Button { Task { await session.save() } } label: {
+            if compact { Label(session.confirmationLabel, systemImage: "square.and.arrow.down").labelStyle(.iconOnly) }
+            else { Text(session.confirmationLabel) }
+        }
+            .help(session.confirmationLabel)
+            .accessibilityLabel(session.confirmationLabel)
+            .disabled(!commandsEnabled || !session.canSave)
+            .accessibilityIdentifier("editor.save")
     }
 
     private var editorForm: some View {

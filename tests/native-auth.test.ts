@@ -215,3 +215,125 @@ test("concurrent native verification consumes one ceremony once and revoked keys
   assert.equal((await h.request(AUTH_HOST, "/api/native-auth/verify", { method: "POST", body: { ...next, response: h.assertion(next.challenge) } })).status, 401);
   assert.equal((await h.accessStore.read()).nativeSessions.length, 1);
 }));
+
+test("native owners create Workspaces on the root and immediately use their isolated tenant", async () => fixture(async h => {
+  const signin = await h.signin();
+  const created = await h.request("kanban.cards", "/api/workspaces", { method: "POST", token: signin.token, body: { name: "Design Studio", slug: "design-studio" } });
+  assert.equal(created.status, 201, JSON.stringify(created.data));
+  const workspace = created.data.workspace;
+  assert.deepEqual(workspace, { id: workspace.id, name: "Design Studio", slug: "design-studio", url: "https://design-studio.kanban.cards" });
+  assert.ok(workspace.id);
+  const registered = (await h.accessStore.read()).workspaces.find(w => w.id === workspace.id)!;
+  assert.deepEqual(registered.ownerIds, [h.owner.id]);
+  assert.notEqual(registered.storageId, h.first.storageId);
+  assert.notEqual(registered.storageId, h.second.storageId);
+  for (const auth of [{ token: signin.token }, { cookie: h.rootCookie }]) {
+    const inventory = await h.request("kanban.cards", "/api/workspaces", auth);
+    assert.equal(inventory.status, 200);
+    assert.deepEqual(inventory.data.workspaces, [
+      workspace,
+      { id: h.first.id, name: "First", slug: "first", url: "https://first.kanban.cards" }
+    ]);
+  }
+  const empty = await h.request("design-studio.kanban.cards", "/api/projects", { token: signin.token });
+  assert.equal(empty.status, 200);
+  assert.deepEqual(empty.data.projects, []);
+  const project = await h.request("design-studio.kanban.cards", "/api/projects", { method: "POST", token: signin.token, body: { name: "New Workspace project" } });
+  assert.equal(project.status, 201, JSON.stringify(project.data));
+  assert.deepEqual((await h.request("first.kanban.cards", "/api/projects", { token: signin.token })).data.projects, []);
+  assert.equal((await h.request("second.kanban.cards", "/api/projects", { token: signin.token })).status, 401);
+  assert.deepEqual((await h.accessStore.listWorkspacesForOwner("different-test-owner")).map(w => w.id), [h.second.id]);
+}));
+
+test("a native owner with no Workspaces can create their first Workspace", async () => fixture(async h => {
+  await h.accessStore.authTransaction(s => { s.workspaces = s.workspaces.filter(w => !w.ownerIds.includes(h.owner.id)); });
+  const signin = await h.signin();
+  assert.deepEqual((await h.request("kanban.cards", "/api/workspaces", { token: signin.token })).data.workspaces, []);
+  const before = (await h.accessStore.read()).owners;
+  const created = await h.request("kanban.cards", "/api/workspaces", { method: "POST", token: signin.token, body: { name: "First Workspace", slug: "first-workspace" } });
+  assert.equal(created.status, 201, JSON.stringify(created.data));
+  const owned = await h.accessStore.listWorkspacesForOwner(h.owner.id);
+  assert.deepEqual(owned.map(w => w.slug), ["first-workspace"]);
+  assert.deepEqual(owned[0].ownerIds, [h.owner.id]);
+  assert.deepEqual((await h.accessStore.read()).owners, before);
+  assert.deepEqual((await h.request("first-workspace.kanban.cards", "/api/projects", { token: signin.token })).data.projects, []);
+}));
+
+test("native Workspace creation rejects ambient browser authority, agent tokens, tenant hosts and Workspace selectors", async () => fixture(async h => {
+  const signin = await h.signin();
+  const agent = await h.accessStore.createAgentConnection({ providerSubject: h.owner.id, workspaceId: h.first.id, label: "Scoped agent", scopes: ["read", "write"] });
+  const before = (await h.accessStore.read()).workspaces;
+  const body = { name: "Rejected Workspace", slug: "rejected" };
+  for (const options of [{ origin: ROOT }, { cookie: h.rootCookie }, { headers: { "Sec-Fetch-Site": "same-origin" } }]) {
+    const response = await h.request("kanban.cards", "/api/workspaces", { method: "POST", token: signin.token, body, ...options });
+    assert.equal(response.status, 403, JSON.stringify(response.data));
+  }
+  for (const token of ["invalid", agent.credential]) {
+    const response = await h.request("kanban.cards", "/api/workspaces", { method: "POST", token, cookie: h.rootCookie, origin: ROOT, body });
+    assert.equal(response.status, 401, JSON.stringify(response.data));
+  }
+  for (const host of ["first.kanban.cards", "second.kanban.cards", AUTH_HOST, "unknown.example.test"]) {
+    assert.equal((await h.request(host, "/api/workspaces", { method: "POST", token: signin.token, body })).status, 404, host);
+  }
+  for (const selector of [{ workspaceId: h.second.id }, { workspaceSlug: "second" }, { tenant: "second" }]) {
+    assert.equal((await h.request("kanban.cards", "/api/workspaces", { method: "POST", token: signin.token, body: { ...body, ...selector } })).status, 400);
+  }
+  assert.equal((await h.request("kanban.cards", "/api/workspaces?workspaceId=" + h.second.id, { method: "POST", token: signin.token, body })).status, 400);
+  assert.equal((await h.request("kanban.cards", "/api/workspaces", { method: "POST", token: signin.token, headers: { "X-Kanban-Workspace": "second" }, body })).status, 400);
+  assert.deepEqual((await h.accessStore.read()).workspaces, before);
+}));
+
+test("native Workspace creation honors fixed expiry, root binding and revocation", async () => fixture(async h => {
+  const signin = await h.signin();
+  const session = (await h.accessStore.read()).nativeSessions[0];
+  const before = (await h.accessStore.read()).workspaces;
+  const create = () => h.request("kanban.cards", "/api/workspaces", { method: "POST", token: signin.token, body: { name: "Unavailable", slug: "unavailable" } });
+  await h.accessStore.authTransaction(s => { s.nativeSessions[0].rootOrigin = "https://candidate.kanban.cards"; });
+  assert.equal((await create()).status, 401);
+  await h.accessStore.authTransaction(s => {
+    s.nativeSessions[0].rootOrigin = ROOT;
+    s.nativeSessions[0].createdAt = new Date(Date.now() - 120_000).toISOString();
+    s.nativeSessions[0].expiresAt = new Date(Date.now() - 60_000).toISOString();
+  });
+  assert.equal((await create()).status, 401);
+  await h.accessStore.authTransaction(s => { s.nativeSessions[0] = session; });
+  assert.equal((await h.request("kanban.cards", `/api/sessions/${session.id}`, { method: "DELETE", cookie: h.rootCookie, origin: ROOT })).status, 204);
+  assert.equal((await create()).status, 401);
+  assert.deepEqual((await h.accessStore.read()).workspaces, before);
+  assert.equal((await h.request("kanban.cards", "/api/session", { cookie: h.rootCookie })).data.authenticated, true);
+}));
+
+test("Workspace creation preserves browser CSRF and returns native validation, conflict and quota errors", async () => fixture(async h => {
+  const signin = await h.signin();
+  const post = (body: unknown) => h.request("kanban.cards", "/api/workspaces", { method: "POST", token: signin.token, body });
+  const browserBody = { name: "Browser Workspace", slug: "browser-workspace" };
+  for (const options of [{}, { origin: "https://other.example.test" }]) {
+    assert.equal((await h.request("kanban.cards", "/api/workspaces", { method: "POST", cookie: h.rootCookie, body: browserBody, ...options })).status, 403);
+  }
+  assert.equal((await h.request("kanban.cards", "/api/workspaces", { method: "POST", origin: ROOT, body: browserBody })).status, 401);
+  const browser = await h.request("kanban.cards", "/api/workspaces", { method: "POST", origin: ROOT, cookie: h.rootCookie, body: browserBody });
+  assert.equal(browser.status, 201, JSON.stringify(browser.data));
+  assert.deepEqual(browser.data.workspace, { id: browser.data.workspace.id, name: browserBody.name, slug: browserBody.slug, url: "https://browser-workspace.kanban.cards" });
+  for (const body of [
+    { name: "", slug: "valid" }, { name: "x".repeat(121), slug: "valid" }, { name: "Two\nlines", slug: "valid" },
+    { name: "Valid", slug: "" }, { name: "Valid", slug: "auth" }, { name: "Valid", slug: "-invalid" },
+    { name: "Valid", slug: "invalid-" }, { name: "Valid", slug: "not valid" }, { name: "Valid", slug: "x".repeat(64) }
+  ]) {
+    const invalid = await post(body);
+    assert.equal(invalid.status, 400, JSON.stringify(body));
+  }
+  for (const slug of ["first", "second", "browser-workspace"]) {
+    const conflict = await post({ name: "Duplicate", slug });
+    assert.equal(conflict.status, 409);
+    assert.equal(conflict.data.error, "Workspace address is already in use.");
+  }
+  for (let index = 0; index < 8; index += 1) {
+    const created = await post({ name: `Workspace ${index}`, slug: `quota-${index}` });
+    assert.equal(created.status, 201, JSON.stringify(created.data));
+  }
+  const quota = await post({ name: "One too many", slug: "over-quota" });
+  assert.equal(quota.status, 403);
+  assert.equal(quota.data.error, "An owner can have up to 10 Workspaces.");
+  assert.equal((await h.accessStore.listWorkspacesForOwner(h.owner.id)).length, 10);
+  assert.deepEqual((await h.accessStore.listWorkspacesForOwner("different-test-owner")).map(w => w.id), [h.second.id]);
+}));

@@ -299,8 +299,10 @@ final class NativeWindowWorkflowTests: XCTestCase {
         let app = launch()
         showBoard(app)
         let board = board(in: app)
-        choose("You", from: board.popUpButtons["board.filter.actor"], in: app)
-        choose("High", from: board.popUpButtons["board.filter.priority"], in: app)
+        openFilters(in: board, app: app)
+        choose("You", from: app.popUpButtons["board.filter.actor"], in: app)
+        choose("High", from: app.popUpButtons["board.filter.priority"], in: app)
+        closeFilters(in: app)
         app.typeKey("n", modifierFlags: .command)
         let title = board.textFields["editor.title"]
         XCTAssertTrue(title.waitForExistence(timeout: 5))
@@ -313,8 +315,10 @@ final class NativeWindowWorkflowTests: XCTestCase {
         XCTAssertTrue(created.waitForExistence(timeout: 5), "Creation must reveal the confirmed editable Card.")
         XCTAssertEqual(created.textFields["editor.title"].value as? String, createdTitle)
         showBoard(app)
-        XCTAssertEqual(board.popUpButtons["board.filter.actor"].value as? String, "You")
-        XCTAssertEqual(board.popUpButtons["board.filter.priority"].value as? String, "High")
+        openFilters(in: board, app: app)
+        XCTAssertEqual(app.popUpButtons["board.filter.actor"].value as? String, "You")
+        XCTAssertEqual(app.popUpButtons["board.filter.priority"].value as? String, "High")
+        closeFilters(in: app)
         XCTAssertFalse(board.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@",
                                                           "board.card.", createdTitle)).firstMatch.exists)
         attach(app, named: "Created Card remains reachable while filters stay applied")
@@ -325,9 +329,9 @@ final class NativeWindowWorkflowTests: XCTestCase {
         showBoard(app)
         let board = board(in: app)
         let workspace = board.popUpButtons["board.workspace"]
-        let actor = board.popUpButtons["board.filter.actor"]
-        let priority = board.popUpButtons["board.filter.priority"]
-        let blocked = board.popUpButtons["board.filter.blocked"]
+        let actor = app.popUpButtons["board.filter.actor"]
+        let priority = app.popUpButtons["board.filter.priority"]
+        let blocked = app.popUpButtons["board.filter.blocked"]
         func assertCount(_ visible: Int, file: StaticString = #filePath, line: UInt = #line) {
             let rows = board.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "board.card."))
             let updated = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in rows.count == visible }, object: nil)
@@ -339,6 +343,7 @@ final class NativeWindowWorkflowTests: XCTestCase {
         choose("Studio Workspace", from: workspace, in: app)
         XCTAssertEqual(workspace.value as? String, "Studio Workspace")
         assertCount(9)
+        openFilters(in: board, app: app)
         choose("You", from: actor, in: app)
         assertCount(4)
         XCTAssertEqual(actor.value as? String, "You")
@@ -348,7 +353,7 @@ final class NativeWindowWorkflowTests: XCTestCase {
         choose("Blocked", from: blocked, in: app)
         assertCount(0)
         XCTAssertEqual(blocked.value as? String, "Blocked")
-        board.buttons["board.clear-filters"].click()
+        filterControls(in: app).buttons["board.clear-filters"].click()
         assertCount(9)
         XCTAssertEqual(actor.value as? String, "All actors")
         XCTAssertEqual(priority.value as? String, "All priorities")
@@ -365,7 +370,10 @@ final class NativeWindowWorkflowTests: XCTestCase {
         XCTAssertTrue(board.buttons["board.card.\(homepage)"].exists)
         choose("All", from: blocked, in: app)
         assertCount(9)
-        XCTAssertFalse(board.buttons["board.clear-filters"].exists)
+        XCTAssertTrue(filterControls(in: app).buttons["board.clear-filters"].exists)
+        XCTAssertFalse(filterControls(in: app).buttons["board.clear-filters"].isEnabled)
+        closeFilters(in: app)
+        XCTAssertFalse(board.staticTexts["board.filter-summary"].exists)
         XCTAssertEqual(workspace.value as? String, "Studio Workspace")
         attach(app, named: "Native board popup bindings and restored filter inventory")
     }
@@ -463,24 +471,27 @@ final class NativeWindowWorkflowTests: XCTestCase {
             showBoard(app)
             let rightEdge = board.coordinate(withNormalizedOffset: CGVector(dx: 1, dy: 0.6))
                 .withOffset(CGVector(dx: -1, dy: 0))
-            let contraction = max(0, board.frame.width - 760)
+            let contraction = max(0, board.frame.width - 1024)
             if contraction > 2 {
                 rightEdge.click(forDuration: 0.4, thenDragTo: rightEdge.withOffset(CGVector(dx: -contraction, dy: 0)))
             }
             XCTAssertTrue(board.buttons["board.new-card"].isHittable)
-            XCTAssertTrue(board.popUpButtons["board.filter.actor"].isHittable)
-            XCTAssertTrue(board.popUpButtons["board.filter.priority"].isHittable)
-            XCTAssertTrue(board.popUpButtons["board.filter.blocked"].isHittable)
-            XCTAssertTrue(board.checkBoxes["Include archived"].isHittable)
-            assertFiltersFit(board)
-            choose("Unassigned", from: board.popUpButtons["board.filter.actor"], in: app)
-            choose("High", from: board.popUpButtons["board.filter.priority"], in: app)
-            choose("Unblocked", from: board.popUpButtons["board.filter.blocked"], in: app)
-            XCTAssertEqual(board.popUpButtons["board.filter.actor"].value as? String, "Unassigned")
-            XCTAssertEqual(board.popUpButtons["board.filter.priority"].value as? String, "High")
-            XCTAssertEqual(board.popUpButtons["board.filter.blocked"].value as? String, "Unblocked")
-            XCTAssertTrue(board.buttons["board.clear-filters"].isHittable)
-            assertFiltersFit(board)
+            XCTAssertFalse(board.buttons["board.filters"].exists)
+            openFilters(in: board, app: app)
+            let filters = filterControls(in: app)
+            assertFiltersFit(filters)
+            choose("Unassigned", from: app.popUpButtons["board.filter.actor"], in: app)
+            choose("High", from: app.popUpButtons["board.filter.priority"], in: app)
+            choose("Unblocked", from: app.popUpButtons["board.filter.blocked"], in: app)
+            XCTAssertEqual(app.popUpButtons["board.filter.actor"].value as? String, "Unassigned")
+            XCTAssertEqual(app.popUpButtons["board.filter.priority"].value as? String, "High")
+            XCTAssertEqual(app.popUpButtons["board.filter.blocked"].value as? String, "Unblocked")
+            XCTAssertTrue(filters.buttons["board.clear-filters"].isHittable)
+            assertFiltersFit(filters)
+            closeFilters(in: app)
+            assertLabel(board.staticTexts["board.filter-summary"], contains: "Unassigned")
+            assertLabel(board.staticTexts["board.filter-summary"], contains: "High")
+            assertLabel(board.staticTexts["board.filter-summary"], contains: "Unblocked")
             for column in ["next", "doing", "done"] {
                 XCTAssertTrue(board.descendants(matching: .any).matching(identifier: "board.column.\(column)").firstMatch.exists)
             }
@@ -509,19 +520,18 @@ final class NativeWindowWorkflowTests: XCTestCase {
             try flow.seekForward("Projects heading", terms: ["Projects"], role: "heading", limit: 5)
             try flow.leave("Leave sidebar", terms: ["Workspaces and Projects"])
             try flow.enterBoardContents()
-            try flow.enter("Project name", terms: ["Atlas website"], role: "heading")
-            try flow.forward("Board information", terms: ["Board information"], role: "button")
-            try flow.leave("Leave overview", terms: ["Project overview"])
+            try flow.enter("Enter inline board filters")
+            XCTAssertFalse(board.buttons["board.filters"].exists)
+            XCTAssertTrue(board.popUpButtons["board.filter.actor"].isHittable)
             try flow.selectPopup("Next actor", identifier: "board.filter.actor", value: "You", expectedCount: 4)
             try flow.selectPopup("Priority", identifier: "board.filter.priority", value: "High", expectedCount: 3)
             try flow.selectPopup("Blocked", identifier: "board.filter.blocked", value: "Blocked", expectedCount: 0)
             try flow.seekForward("Clear", terms: ["Clear"], role: "button", limit: 5)
             try flow.activate("Clear board filters")
             flow.assertCount(9)
-            // Clear disappears when the last filter resets. Native VoiceOver
-            // returns to the containing group; enter it from that actual focus.
-            try flow.enterBoardContents()
-            try flow.seekForward("Columns scroll area", terms: [], role: "scroll area", limit: 14)
+            XCTAssertFalse(board.buttons["board.clear-filters"].isEnabled)
+            try flow.leave("Leave Board controls", terms: ["Board controls"])
+            try flow.seekForward("Columns scroll area", terms: [], role: "scroll area", limit: 6)
             try flow.enter("Next Column", terms: ["Next", "4 Cards"], role: "group")
             for (index, column) in [("Next", 4), ("Doing", 3), ("Done", 2)].enumerated() {
                 if index > 0 {
@@ -864,7 +874,9 @@ final class NativeWindowWorkflowTests: XCTestCase {
 
         func enterBoardContents() throws {
             try seekForward("Board contents", terms: ["Project board contents"], role: "group", limit: 3)
-            try enter("Project overview", terms: ["Project overview"], role: "group")
+            // SwiftUI applies the enclosing Project-board label to board.surface.
+            // Native VO enters that actual group directly at its Board controls child.
+            try enter("Board controls", terms: ["Board controls"], role: "group")
         }
 
         func assertCount(_ count: Int) {
@@ -886,7 +898,7 @@ final class NativeWindowWorkflowTests: XCTestCase {
             }
             try require("Selected \(label) menu item", terms: [value])
             try activate("Select \(value)")
-            XCTAssertEqual(test.board(in: app).popUpButtons[identifier].value as? String, value)
+            XCTAssertEqual(app.popUpButtons[identifier].value as? String, value)
             assertCount(expectedCount)
         }
 
@@ -1208,6 +1220,36 @@ final class NativeWindowWorkflowTests: XCTestCase {
         item.click()
     }
 
+    private func filterPopover(in app: XCUIApplication) -> XCUIElement {
+        app.descendants(matching: .any).matching(identifier: "board.filter-popover").firstMatch
+    }
+
+    private func filterControls(in app: XCUIApplication) -> XCUIElement {
+        let popover = filterPopover(in: app)
+        return popover.exists ? popover : board(in: app).descendants(matching: .any)
+            .matching(identifier: "board.control-strip").firstMatch
+    }
+
+    private func openFilters(in board: XCUIElement, app: XCUIApplication) {
+        if board.popUpButtons["board.filter.actor"].exists {
+            XCTAssertFalse(board.buttons["board.filters"].exists)
+            XCTAssertTrue(board.popUpButtons["board.filter.actor"].isHittable)
+            return
+        }
+        board.buttons["board.filters"].click()
+        XCTAssertTrue(filterPopover(in: app).waitForExistence(timeout: 5))
+        XCTAssertTrue(app.popUpButtons["board.filter.actor"].isHittable)
+    }
+
+    private func closeFilters(in app: XCUIApplication) {
+        guard filterPopover(in: app).exists else {
+            XCTAssertTrue(board(in: app).popUpButtons["board.filter.actor"].isHittable)
+            return
+        }
+        app.buttons["board.filters.done"].click()
+        XCTAssertTrue(filterPopover(in: app).waitForNonExistence(timeout: 5))
+    }
+
     private func choose(_ value: String, from picker: XCUIElement, in app: XCUIApplication) {
         XCTAssertTrue(picker.waitForExistence(timeout: 5))
         picker.click()
@@ -1236,18 +1278,20 @@ final class NativeWindowWorkflowTests: XCTestCase {
         XCTAssertEqual(actual.height, expected.height, accuracy: 2, file: file, line: line)
     }
 
-    private func assertFiltersFit(_ board: XCUIElement,
+    private func assertFiltersFit(_ filters: XCUIElement,
                                   file: StaticString = #filePath, line: UInt = #line) {
-        let controls = [board.popUpButtons["board.filter.actor"],
-                        board.popUpButtons["board.filter.priority"],
-                        board.popUpButtons["board.filter.blocked"],
-                        board.checkBoxes["Include archived"]]
+        let controls = [filters.popUpButtons["board.filter.actor"],
+                        filters.popUpButtons["board.filter.priority"],
+                        filters.popUpButtons["board.filter.blocked"],
+                        filters.checkBoxes["board.filter.archived"]]
         for control in controls {
             XCTAssertTrue(control.isHittable, "Adaptive filters must remain reachable.", file: file, line: line)
             XCTAssertGreaterThan(control.frame.width, 20, file: file, line: line)
-            XCTAssertGreaterThanOrEqual(control.frame.minX, board.frame.minX, file: file, line: line)
-            XCTAssertLessThanOrEqual(control.frame.maxX, board.frame.maxX,
-                                     "Adaptive filter controls must fit the narrow board.", file: file, line: line)
+            XCTAssertGreaterThanOrEqual(control.frame.minX, filters.frame.minX - 1, file: file, line: line)
+            XCTAssertLessThanOrEqual(control.frame.maxX, filters.frame.maxX + 1,
+                                     "Filter controls must fit their native container at the narrow board width.", file: file, line: line)
+            XCTAssertGreaterThanOrEqual(control.frame.minY, filters.frame.minY - 1, file: file, line: line)
+            XCTAssertLessThanOrEqual(control.frame.maxY, filters.frame.maxY + 1, file: file, line: line)
         }
         for (index, control) in controls.enumerated() {
             for other in controls.dropFirst(index + 1) {
@@ -1417,24 +1461,32 @@ private final class ReviewedBoardContainerDiagnostics {
         return true
     }
 
-    private static func isDetail(_ child: Snapshot) -> Bool {
-        guard child.elementType == .group, child.identifier.isEmpty, child.label == "Project board contents",
-              child.isEnabled, child.children.count == 9 else { return false }
-        let nodes = child.children
-        guard nodes[0].elementType == .group, nodes[0].label == "Project overview",
-              nodes[0].identifier.isEmpty, nodes[0].children.count == 2,
-              isLeafHeading(nodes[0].children[0], label: "Atlas website"),
-              isButton(nodes[0].children[1], id: "board.info", label: "Board information"),
-              isText(nodes[1], text: "Next actor"),
-              isPopup(nodes[2], id: "board.filter.actor", label: "Next actor", value: "All actors"),
-              isText(nodes[3], text: "Priority"),
-              isPopup(nodes[4], id: "board.filter.priority", label: "Priority", value: "All priorities"),
-              isText(nodes[5], text: "Blocked"),
-              isPopup(nodes[6], id: "board.filter.blocked", label: "Blocked", value: "All"),
-              nodes[7].elementType == .checkBox, nodes[7].label == "Include archived",
-              nodes[7].isEnabled, isZeroValue(nodes[7]),
-              isUnnamedDisabled(nodes[8], type: .scrollView), nodes[8].children.count == 1 else { return false }
-        let split = nodes[8].children[0]
+    private static func isDetail(_ surface: Snapshot) -> Bool {
+        // Observed in the dedicated VM: the enclosing accessibility label is
+        // applied to board.surface rather than creating a second native group.
+        guard surface.elementType == .group, surface.identifier == "board.surface",
+              surface.label == "Project board contents", surface.isEnabled,
+              surface.children.count == 2 else { return false }
+        let controls = surface.children[0]
+        guard controls.elementType == .group, controls.identifier == "board.control-strip",
+              controls.label == "Board controls", controls.isEnabled, controls.children.count == 8,
+              isInlineFilterLabel(controls.children[0], label: "Next actor"),
+              isPopup(controls.children[1], id: "board.filter.actor", label: "Next actor", value: "All actors"),
+              isInlineFilterLabel(controls.children[2], label: "Priority"),
+              isPopup(controls.children[3], id: "board.filter.priority", label: "Priority", value: "All priorities"),
+              isInlineFilterLabel(controls.children[4], label: "Blocked"),
+              isPopup(controls.children[5], id: "board.filter.blocked", label: "Blocked", value: "All"),
+              controls.children[6].elementType == .checkBox,
+              controls.children[6].identifier == "board.filter.archived",
+              controls.children[6].label == "Include archived", controls.children[6].isEnabled,
+              isZeroValue(controls.children[6]), controls.children[6].children.isEmpty,
+              controls.children[7].elementType == .button,
+              controls.children[7].identifier == "board.clear-filters",
+              controls.children[7].label == "Clear filters", !controls.children[7].isEnabled,
+              hasNoValue(controls.children[7]), controls.children[7].children.isEmpty,
+              isUnnamedDisabled(surface.children[1], type: .scrollView),
+              surface.children[1].children.count == 1 else { return false }
+        let split = surface.children[1].children[0]
         guard split.elementType == .splitGroup, split.children.count == 5,
               split.children[1].elementType == .splitter, split.children[3].elementType == .splitter
         else { return false }
@@ -1471,6 +1523,11 @@ private final class ReviewedBoardContainerDiagnostics {
     private static func isEmptyHeaderCell(_ cell: Snapshot) -> Bool {
         cell.children.count == 1 && isUnnamedDisabledGroup(cell.children[0])
             && cell.children[0].children.isEmpty
+    }
+
+    private static func isInlineFilterLabel(_ node: Snapshot, label: String) -> Bool {
+        node.elementType == .staticText && node.identifier.isEmpty && node.label.isEmpty
+            && (node.value as? String) == label && node.isEnabled && node.children.isEmpty
     }
 
     private static func isPopup(_ node: Snapshot, id: String, label: String, value: String) -> Bool {

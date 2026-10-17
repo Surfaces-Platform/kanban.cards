@@ -2232,3 +2232,64 @@ body[data-state="empty-workspace"] .workbench {
     align-self: start;
   }
 }
+
+/* Workspace navigation groups switching and creation without turning a form select into commands. */
+.header-workspace-switcher {
+  flex: 0 1 12rem;
+  min-inline-size: 0;
+  position: relative;
+}
+
+.workspace-switcher-trigger {
+  align-items: center;
+  display: flex;
+  gap: var(--jk-space-2);
+  inline-size: 100%;
+  justify-content: space-between;
+  min-inline-size: 0;
+}
+
+.workspace-switcher-trigger > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-switcher-panel {
+  inline-size: min(20rem, calc(100vw - 2rem));
+  inset-block-start: calc(100% + var(--jk-space-2));
+  inset-inline-start: 0;
+}
+
+.workspace-switcher-panel .jk-button {
+  inline-size: 100%;
+  justify-content: flex-start;
+}
+
+.workspace-current {
+  margin: 0;
+  overflow-wrap: anywhere;
+  padding: var(--jk-space-2);
+}
+
+.workspace-switcher-panel hr {
+  border: 0;
+  border-block-start: 1px solid var(--jk-color-border);
+  inline-size: 100%;
+  margin-block: var(--jk-space-2);
+}
+
+.workspace-create-action {
+  border-block-start: 1px solid var(--jk-color-border);
+  padding-block-start: var(--jk-space-3);
+}
+
+@media (max-width: 64rem) {
+  .header-primary { flex-wrap: wrap; }
+  .header-workspace-switcher { flex: 1 1 8rem; }
+  .header-primary .header-project-switcher { flex-basis: 100%; inline-size: 100%; }
+}
+
+@media (max-width: 24rem) {
+  .header-workspace-switcher { flex-basis: 100%; }
+}

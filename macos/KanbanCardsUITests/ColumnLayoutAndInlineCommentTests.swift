@@ -33,17 +33,98 @@ final class ColumnLayoutAndInlineCommentTests: XCTestCase {
         attach(board, named: "Default Column list and detail without a presentation selector or Card counts")
     }
 
+    func testFullBoardInlineFiltersRetainCriteriaAcrossColumnNavigation() throws {
+        let app = launch()
+        let board = board(in: app)
+        let surface = board.descendants(matching: .any).matching(identifier: "board.surface").firstMatch
+        let fullHeader = board.descendants(matching: .any).matching(identifier: "board.control-strip").firstMatch
+        let search = board.searchFields.firstMatch
+        XCTAssertTrue(surface.waitForExistence(timeout: 5))
+        for width in [CGFloat(1320), CGFloat(1024)] {
+            resize(board, toWidth: width)
+            replace(search, with: "")
+            XCTAssertTrue(fullHeader.waitForExistence(timeout: 5))
+            let headerFrame = fullHeader.frame
+            attachHeaderGeometry("initial inline board at \(Int(width))pt", in: board, app: app)
+            XCTAssertFalse(surface.staticTexts["Atlas website"].exists,
+                           "The native title bar already names this Project.")
+            XCTAssertFalse(surface.staticTexts["Prepare a clear, accessible launch experience."].exists,
+                           "Board descriptions must not occupy the board surface.")
+            XCTAssertFalse(board.buttons["board.info"].exists)
+            XCTAssertFalse(board.descendants(matching: .any).matching(identifier: "board.info-popover").firstMatch.exists)
+            assertInlineFiltersFit(in: board)
+            XCTAssertFalse(fullHeader.buttons["board.clear-filters"].isEnabled)
+
+            replace(search, with: "Review")
+            attachHeaderGeometry("searched inline board at \(Int(width))pt", in: board, app: app)
+            XCTAssertEqual(fullHeader.frame.minY, headerFrame.minY, accuracy: 1,
+                           "Searching must preserve the board's top control position.")
+            XCTAssertEqual(fullHeader.frame.height, headerFrame.height, accuracy: 1)
+            choose("You", from: board.popUpButtons["board.filter.actor"], in: app)
+            attachHeaderGeometry("actor selected at \(Int(width))pt", in: board, app: app)
+            XCTAssertEqual(fullHeader.frame.minY, headerFrame.minY, accuracy: 1)
+            choose("High", from: board.popUpButtons["board.filter.priority"], in: app)
+            attachHeaderGeometry("priority selected at \(Int(width))pt", in: board, app: app)
+            assertRows([homepage], in: board)
+            assertLabel(board.staticTexts["board.filter-summary"], contains: "You")
+            assertLabel(board.staticTexts["board.filter-summary"], contains: "High")
+            assertLabel(board.staticTexts["board.filter-summary"], contains: "Review")
+            XCTAssertTrue(fullHeader.buttons["board.clear-filters"].isEnabled)
+            assertInlineFiltersFit(in: board)
+            XCTAssertEqual(fullHeader.frame.minY, headerFrame.minY, accuracy: 1,
+                           "Active criteria must not expand the board above the native toolbar boundary.")
+            XCTAssertEqual(fullHeader.frame.height, headerFrame.height, accuracy: 1,
+                           "Active criteria belong below the control strip.")
+
+            board.buttons["board.card.\(homepage)"].click()
+            let list = columnList(in: board)
+            XCTAssertTrue(list.waitForExistence(timeout: 5))
+            XCTAssertTrue(board.descendants(matching: .any).matching(identifier: "card.control-strip.\(homepage)")
+                .firstMatch.waitForExistence(timeout: 5))
+            attachHeaderGeometry("filtered Column at \(Int(width))pt", in: board, app: app)
+            assertHeaderRow(in: board, list: list, matching: headerFrame)
+            assertRows([homepage], in: board)
+            XCTAssertEqual(search.value as? String, "Review")
+            XCTAssertFalse(board.popUpButtons["board.filter.actor"].exists,
+                           "The compact Column keeps its filter choices in a popover.")
+            openFilters(in: board, app: app)
+            XCTAssertEqual(app.popUpButtons["board.filter.actor"].value as? String, "You")
+            XCTAssertEqual(app.popUpButtons["board.filter.priority"].value as? String, "High")
+            closeFilters(in: app)
+            board.buttons["board.return-to-board"].click()
+            XCTAssertTrue(fullHeader.waitForExistence(timeout: 5))
+            attachHeaderGeometry("returned inline board at \(Int(width))pt", in: board, app: app)
+            XCTAssertEqual(fullHeader.frame.minY, headerFrame.minY, accuracy: 1)
+            XCTAssertEqual(fullHeader.frame.height, headerFrame.height, accuracy: 1)
+            assertInlineFiltersFit(in: board)
+            assertRows([homepage], in: board)
+            assertLabel(board.staticTexts["board.filter-summary"], contains: "Review")
+            XCTAssertEqual(board.popUpButtons["board.filter.actor"].value as? String, "You")
+            XCTAssertEqual(board.popUpButtons["board.filter.priority"].value as? String, "High")
+            fullHeader.buttons["board.clear-filters"].click()
+            XCTAssertFalse(fullHeader.buttons["board.clear-filters"].isEnabled)
+            XCTAssertEqual(search.value as? String, "Review")
+            assertRows(["demo-card-footer", homepage], in: board)
+            XCTAssertEqual(fullHeader.frame.minY, headerFrame.minY, accuracy: 1)
+            assertNoCardCounts(in: board)
+            XCTAssertEqual(app.windows.count, 1)
+        }
+    }
+
     func testColumnHeaderStaysInOneReachableRowAndPreservesWidthAtBothPaneLimits() throws {
         let app = launch()
         let board = board(in: app)
         resize(board, toWidth: 1320)
+        let fullHeader = board.descendants(matching: .any).matching(identifier: "board.control-strip").firstMatch
+        XCTAssertTrue(fullHeader.waitForExistence(timeout: 5))
+        let headerFrame = fullHeader.frame
         board.buttons["board.card.\(homepage)"].click()
         let list = columnList(in: board)
         XCTAssertTrue(list.waitForExistence(timeout: 5))
         for width in [CGFloat(440), CGFloat(230)] {
             resizeColumn(list, toWidth: width)
             let chosenWidth = list.frame.width
-            assertHeaderRow(in: board, list: list)
+            assertHeaderRow(in: board, list: list, matching: headerFrame)
             assertLabel(board.buttons["board.return-to-board"], contains: "Back to board")
             assertLabel(board.buttons["board.filters"], contains: "Filters")
             let header = board.descendants(matching: .any).matching(identifier: "board.column-header").firstMatch
@@ -65,7 +146,7 @@ final class ColumnLayoutAndInlineCommentTests: XCTestCase {
             assertLabel(board.staticTexts["board.filter-summary"], contains: "You")
             XCTAssertEqual(list.frame.width, chosenWidth, accuracy: 1,
                            "Changing a filter must preserve the chosen native divider position.")
-            assertHeaderRow(in: board, list: list)
+            assertHeaderRow(in: board, list: list, matching: headerFrame)
             board.buttons["board.card.\(licenses)"].click()
             XCTAssertTrue(viewer(licenses, in: board).waitForExistence(timeout: 5))
             XCTAssertEqual(list.frame.width, chosenWidth, accuracy: 1)
@@ -75,7 +156,7 @@ final class ColumnLayoutAndInlineCommentTests: XCTestCase {
             XCTAssertTrue(viewer(pricing, in: board).waitForExistence(timeout: 5))
             XCTAssertEqual(list.frame.width, chosenWidth, accuracy: 1,
                            "Choosing a Column must not resize the list or wrap its navigation controls.")
-            assertHeaderRow(in: board, list: list)
+            assertHeaderRow(in: board, list: list, matching: headerFrame)
             openFilters(in: board, app: app)
             choose("Agent", from: app.popUpButtons["board.filter.actor"], in: app)
             choose("High", from: app.popUpButtons["board.filter.priority"], in: app)
@@ -88,10 +169,26 @@ final class ColumnLayoutAndInlineCommentTests: XCTestCase {
             choose("Doing", from: board.popUpButtons["board.focused-column"], in: app)
             assertRows([homepage, keyboard, licenses], in: board)
             XCTAssertEqual(list.frame.width, chosenWidth, accuracy: 1)
-            assertHeaderRow(in: board, list: list)
+            assertHeaderRow(in: board, list: list, matching: headerFrame)
             assertNoCardCounts(in: board)
             attach(board, named: "Single native Column header row at \(Int(width))pt list width")
         }
+        board.buttons["board.return-to-board"].click()
+        XCTAssertTrue(fullHeader.waitForExistence(timeout: 5))
+        resize(board, toWidth: 1024)
+        let narrowHeaderFrame = fullHeader.frame
+        board.buttons["board.card.\(homepage)"].click()
+        XCTAssertTrue(list.waitForExistence(timeout: 5))
+        XCTAssertTrue(board.descendants(matching: .any).matching(identifier: "card.control-strip.\(homepage)")
+            .firstMatch.waitForExistence(timeout: 5))
+        for width in [CGFloat(440), CGFloat(230)] {
+            resizeColumn(list, toWidth: width)
+            assertHeaderRow(in: board, list: list, matching: narrowHeaderFrame)
+        }
+        board.buttons["board.return-to-board"].click()
+        XCTAssertTrue(fullHeader.waitForExistence(timeout: 5))
+        XCTAssertEqual(fullHeader.frame.minY, narrowHeaderFrame.minY, accuracy: 1)
+        XCTAssertEqual(fullHeader.frame.height, narrowHeaderFrame.height, accuracy: 1)
         XCTAssertEqual(app.windows.count, 1)
     }
 
@@ -149,7 +246,12 @@ final class ColumnLayoutAndInlineCommentTests: XCTestCase {
 
         board.buttons["board.return-to-board"].click()
         XCTAssertTrue(column.waitForNonExistence(timeout: 5))
-        XCTAssertEqual(board.popUpButtons["board.filter.actor"].value as? String, "You")
+        XCTAssertTrue(board.popUpButtons["board.filter.actor"].isHittable)
+        XCTAssertFalse(board.buttons["board.filters"].exists)
+        assertLabel(board.staticTexts["board.filter-summary"], contains: "You")
+        openFilters(in: board, app: app)
+        XCTAssertEqual(app.popUpButtons["board.filter.actor"].value as? String, "You")
+        closeFilters(in: app)
         assertRows([pricing, homepage, licenses, "demo-card-buttons"], in: board)
         board.buttons["board.card.\(homepage)"].click()
         assertRows([homepage, licenses], in: board)
@@ -276,23 +378,115 @@ final class ColumnLayoutAndInlineCommentTests: XCTestCase {
     }
 
     private func openFilters(in board: XCUIElement, app: XCUIApplication) {
+        if board.popUpButtons["board.filter.actor"].exists {
+            XCTAssertFalse(board.buttons["board.filters"].exists)
+            XCTAssertTrue(board.popUpButtons["board.filter.actor"].isHittable)
+            return
+        }
         board.buttons["board.filters"].click()
         XCTAssertTrue(popover(in: app).waitForExistence(timeout: 5))
         XCTAssertTrue(app.popUpButtons["board.filter.actor"].isHittable)
     }
 
     private func closeFilters(in app: XCUIApplication) {
+        guard popover(in: app).exists else {
+            XCTAssertTrue(board(in: app).popUpButtons["board.filter.actor"].isHittable)
+            return
+        }
         app.buttons["board.filters.done"].click()
         XCTAssertTrue(popover(in: app).waitForNonExistence(timeout: 5))
     }
 
-    private func assertHeaderRow(in board: XCUIElement, list: XCUIElement,
+    private func assertInlineFiltersFit(in board: XCUIElement,
+                                        file: StaticString = #filePath, line: UInt = #line) {
+        let header = board.descendants(matching: .any).matching(identifier: "board.control-strip").firstMatch
+        XCTAssertTrue(header.exists, file: file, line: line)
+        XCTAssertFalse(board.buttons["board.filters"].exists,
+                       "Full-board filters must be directly available.", file: file, line: line)
+        let controls = [header.popUpButtons["board.filter.actor"],
+                        header.popUpButtons["board.filter.priority"],
+                        header.popUpButtons["board.filter.blocked"],
+                        header.checkBoxes["board.filter.archived"], header.buttons["board.clear-filters"]]
+        for control in controls {
+            XCTAssertTrue(control.exists, file: file, line: line)
+            XCTAssertTrue(control.isHittable, "Every inline filter must remain reachable.", file: file, line: line)
+            XCTAssertGreaterThan(control.frame.width, 20, file: file, line: line)
+            XCTAssertGreaterThanOrEqual(control.frame.minX, header.frame.minX - 1, file: file, line: line)
+            XCTAssertLessThanOrEqual(control.frame.maxX, header.frame.maxX + 1, file: file, line: line)
+            XCTAssertGreaterThanOrEqual(control.frame.minY, header.frame.minY - 1, file: file, line: line)
+            XCTAssertLessThanOrEqual(control.frame.maxY, header.frame.maxY + 1, file: file, line: line)
+            XCTAssertGreaterThanOrEqual(control.frame.minX, board.frame.minX - 1, file: file, line: line)
+            XCTAssertLessThanOrEqual(control.frame.maxX, board.frame.maxX + 1, file: file, line: line)
+        }
+        for (left, right) in zip(controls, controls.dropFirst()) {
+            XCTAssertLessThanOrEqual(left.frame.maxX, right.frame.minX + 1,
+                                     "Inline filters must remain in one row without overlap.", file: file, line: line)
+            XCTAssertEqual(left.frame.midY, right.frame.midY, accuracy: 4, file: file, line: line)
+        }
+    }
+
+    private func attachHeaderGeometry(_ stage: String, in board: XCUIElement, app: XCUIApplication) {
+        let windowFrame = board.frame
+        let elements: [(String, XCUIElement)] = [
+            ("window", board),
+            ("toolbar", board.toolbars.firstMatch),
+            ("boardRoot", board.descendants(matching: .any).matching(identifier: "board.window").firstMatch),
+            ("surface", board.descendants(matching: .any).matching(identifier: "board.surface").firstMatch),
+            ("fullHeader", board.descendants(matching: .any).matching(identifier: "board.control-strip").firstMatch),
+            ("columnList", columnList(in: board)),
+            ("columnHeader", board.descendants(matching: .any).matching(identifier: "board.column-header").firstMatch),
+            ("cardHeader", board.descendants(matching: .any).matching(identifier: "card.control-strip.\(homepage)").firstMatch),
+            ("filters", board.buttons["board.filters"]),
+            ("actorFilter", board.popUpButtons["board.filter.actor"]),
+            ("priorityFilter", board.popUpButtons["board.filter.priority"]),
+            ("blockedFilter", board.popUpButtons["board.filter.blocked"]),
+            ("archivedFilter", board.checkBoxes["board.filter.archived"]),
+            ("filterPopover", popover(in: app)),
+            ("criteria", board.staticTexts["board.filter-summary"]),
+            ("doingColumn", board.descendants(matching: .any).matching(identifier: "board.column.doing").firstMatch)
+        ]
+        func values(_ frame: CGRect) -> [String: Any] {
+            ["x": frame.minX, "y": frame.minY, "width": frame.width, "height": frame.height]
+                .mapValues { $0.isFinite ? Double($0) as Any : NSNull() }
+        }
+        let frames: [[String: Any]] = elements.map { name, element in
+            guard element.exists else { return ["name": name, "exists": false] }
+            let frame = element.frame
+            return ["name": name, "exists": true, "absolute": values(frame),
+                    "windowRelative": values(frame.offsetBy(dx: -windowFrame.minX, dy: -windowFrame.minY))]
+        }
+        let payload: [String: Any] = ["stage": stage, "frames": frames]
+        let json = (try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "Unable to encode header geometry."
+        print("HEADER_GEOMETRY \(json)")
+        let geometry = XCTAttachment(string: json)
+        geometry.name = "Header geometry: \(stage)"
+        geometry.lifetime = .keepAlways
+        add(geometry)
+        let hierarchy = XCTAttachment(string: board.debugDescription
+            + (popover(in: app).exists ? "\n\nFilters popover:\n" + popover(in: app).debugDescription : ""))
+        hierarchy.name = "Native hierarchy: \(stage)"
+        hierarchy.lifetime = .keepAlways
+        add(hierarchy)
+        attach(board, named: "Header screenshot: \(stage)")
+        if popover(in: app).exists { attach(popover(in: app), named: "Filters screenshot: \(stage)") }
+    }
+
+    private func assertHeaderRow(in board: XCUIElement, list: XCUIElement, matching fullHeader: CGRect,
                                  file: StaticString = #filePath, line: UInt = #line) {
         let row = board.descendants(matching: .any).matching(identifier: "board.column-header").firstMatch
         let back = board.buttons["board.return-to-board"]
         let column = board.popUpButtons["board.focused-column"]
         let filters = board.buttons["board.filters"]
         XCTAssertTrue(row.waitForExistence(timeout: 5), file: file, line: line)
+        XCTAssertEqual(row.frame.minY, fullHeader.minY, accuracy: 1, file: file, line: line)
+        XCTAssertEqual(row.frame.height, fullHeader.height, accuracy: 1, file: file, line: line)
+        let cardStrip = board.descendants(matching: .any).matching(NSPredicate(
+            format: "identifier BEGINSWITH %@", "card.control-strip.")).firstMatch
+        if cardStrip.exists {
+            XCTAssertEqual(cardStrip.frame.minY, row.frame.minY, accuracy: 1, file: file, line: line)
+            XCTAssertEqual(cardStrip.frame.height, row.frame.height, accuracy: 1, file: file, line: line)
+        }
         for control in [back, column, filters] {
             XCTAssertTrue(control.isHittable, file: file, line: line)
             XCTAssertGreaterThanOrEqual(control.frame.minX, list.frame.minX, file: file, line: line)
@@ -380,7 +574,11 @@ final class ColumnLayoutAndInlineCommentTests: XCTestCase {
         XCTAssertTrue(field.waitForExistence(timeout: 5))
         field.click()
         field.typeKey("a", modifierFlags: .command)
-        field.typeText(text)
+        if text.isEmpty {
+            field.typeKey(XCUIKeyboardKey.delete.rawValue, modifierFlags: [])
+        } else {
+            field.typeText(text)
+        }
         let updated = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in field.value as? String == text }, object: nil)
         XCTAssertEqual(XCTWaiter.wait(for: [updated], timeout: 5), .completed)
     }

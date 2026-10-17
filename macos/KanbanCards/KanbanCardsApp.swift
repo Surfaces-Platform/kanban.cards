@@ -63,6 +63,8 @@ struct KanbanCommands: Commands {
             Button("New Project…") { boardActions?.createProject() }
                 .keyboardShortcut("n", modifiers: [.command, .shift])
                 .disabled(boardActions?.canCreateProject != true || projectActions?.hasSheet == true)
+            Button("New Workspace…") { boardActions?.createWorkspace() }
+                .disabled(boardActions?.canCreateWorkspace != true || projectActions?.hasSheet == true)
             Divider()
             Button("Show Board") { openWindow(id: "board", value: BoardWindowID.main) }
                 .keyboardShortcut("0")

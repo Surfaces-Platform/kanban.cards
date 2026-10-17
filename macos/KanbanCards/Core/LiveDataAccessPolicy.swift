@@ -50,6 +50,8 @@ enum LiveDataAccessPolicy: Equatable, Sendable {
         }
     }
 
+    var canCreateWorkspace: Bool { self == .unrestricted }
+
     var requiredProjectCreationName: String? {
         if case .createVerificationProject = self { return Self.verificationProjectName }
         return nil

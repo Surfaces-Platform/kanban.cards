@@ -17,6 +17,23 @@ final class CardContextMenuAndInlineEditTests: XCTestCase {
         let originalFrame = board.frame
         let originalRows = cardRows(in: board)
         openContextMenu(homepage, in: board, app: app)
+        app.typeKey(XCUIKeyboardKey.escape.rawValue, modifierFlags: [])
+        XCTAssertTrue(contextMenu(in: app).waitForNonExistence(timeout: 5))
+        app.typeKey("n", modifierFlags: .command)
+        let newCardSheet = app.sheets.firstMatch
+        XCTAssertTrue(newCardSheet.waitForExistence(timeout: 5),
+                      "Command-N must reach the window's New Card action while a hosted board row has focus.")
+        let newCardTitle = newCardSheet.textFields["editor.title"]
+        XCTAssertTrue(newCardTitle.waitForExistence(timeout: 5))
+        XCTAssertTrue(newCardTitle.isEnabled)
+        XCTAssertTrue(newCardTitle.isHittable)
+        assertValue("", of: newCardTitle)
+        newCardSheet.buttons["editor.cancel"].click()
+        XCTAssertTrue(newCardSheet.waitForNonExistence(timeout: 5))
+        XCTAssertEqual(app.sheets.count, 0)
+        assertWindowCount(1, in: app)
+        assertFullBoard(board, rows: originalRows, frame: originalFrame)
+        openContextMenu(homepage, in: board, app: app)
         for title in ["Open in New Window", "Move…", "Activity…", "Archive Card…"] {
             XCTAssertTrue(contextMenu(in: app).menuItems[title].firstMatch.isEnabled,
                           "A writable Card must expose its meaningful native action: \(title)")
@@ -106,6 +123,7 @@ final class CardContextMenuAndInlineEditTests: XCTestCase {
         let pane = editableCard(homepage, in: board)
         let list = columnList(in: board)
         let listFrame = list.frame
+        assertUnifiedCardControls(in: pane, board: board)
         assertWindowCount(1, in: app)
         XCTAssertEqual(app.sheets.count, 0)
         let title = pane.textFields["editor.title"]
@@ -136,6 +154,7 @@ final class CardContextMenuAndInlineEditTests: XCTestCase {
         XCTAssertTrue(title.isHittable)
         XCTAssertTrue(pane.buttons["editor.save"].isHittable)
         XCTAssertTrue(pane.buttons["editor.revert"].isHittable)
+        assertUnifiedCardControls(in: pane, board: board)
         XCTAssertLessThanOrEqual(title.frame.maxX, board.frame.maxX + 1)
         XCTAssertLessThanOrEqual(body.frame.maxX, board.frame.maxX + 1)
         attach(board, named: "Always-editable Card retains Save and Revert in the narrow detail pane")
@@ -144,6 +163,7 @@ final class CardContextMenuAndInlineEditTests: XCTestCase {
         assertValue(savedBody, of: body)
         XCTAssertTrue(board.buttons["board.card.\(homepage)"].label.contains(savedTitle))
         XCTAssertTrue(pane.exists)
+        assertUnifiedCardControls(in: pane, board: board)
         XCTAssertEqual(app.sheets.count, 0)
         assertWindowCount(1, in: app)
     }
@@ -184,7 +204,9 @@ final class CardContextMenuAndInlineEditTests: XCTestCase {
     func testKeyboardSelectionIsImmediatelyEditableAndArchivedCardsStayReadOnly() throws {
         let app = launch()
         let board = board(in: app)
-        choose("You", from: board.popUpButtons["board.filter.actor"], in: app)
+        openFilters(in: board, app: app)
+        choose("You", from: app.popUpButtons["board.filter.actor"], in: app)
+        closeFilters(in: app)
         board.buttons["board.card.\(homepage)"].click()
         _ = editableCard(homepage, in: board)
         assertRows([homepage, licenses], in: board)
@@ -444,14 +466,44 @@ final class CardContextMenuAndInlineEditTests: XCTestCase {
         board.descendants(matching: .any).matching(identifier: "board.column-list").firstMatch
     }
 
+    private func assertUnifiedCardControls(in pane: XCUIElement, board: XCUIElement,
+                                           file: StaticString = #filePath, line: UInt = #line) {
+        let row = pane.descendants(matching: .any).matching(identifier: "card.control-strip.\(homepage)").firstMatch
+        let columnHeader = board.descendants(matching: .any).matching(identifier: "board.column-header").firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 5), file: file, line: line)
+        XCTAssertTrue(columnHeader.exists, file: file, line: line)
+        XCTAssertEqual(row.frame.minY, columnHeader.frame.minY, accuracy: 1, file: file, line: line)
+        XCTAssertEqual(row.frame.height, columnHeader.frame.height, accuracy: 1, file: file, line: line)
+        XCTAssertEqual(pane.buttons.matching(identifier: "editor.save").count, 1, file: file, line: line)
+        XCTAssertEqual(pane.buttons.matching(identifier: "editor.revert").count, 1, file: file, line: line)
+        let controls = [row.buttons["Move…"], row.buttons["Refresh"],
+                        row.descendants(matching: .any).matching(identifier: "card.actions.\(homepage)").firstMatch,
+                        row.buttons["editor.revert"], row.buttons["editor.save"], row.buttons["card.close.\(homepage)"]]
+        for control in controls {
+            XCTAssertTrue(control.isHittable, "Every Card action must remain visible in the unified row.", file: file, line: line)
+            XCTAssertGreaterThanOrEqual(control.frame.minX, row.frame.minX - 1, file: file, line: line)
+            XCTAssertLessThanOrEqual(control.frame.maxX, row.frame.maxX + 1, file: file, line: line)
+            XCTAssertEqual(control.frame.midY, controls[0].frame.midY, accuracy: 4, file: file, line: line)
+        }
+        for (left, right) in zip(controls, controls.dropFirst()) {
+            XCTAssertLessThanOrEqual(left.frame.maxX, right.frame.minX + 1,
+                                     "Card actions must remain in one row without overlap.", file: file, line: line)
+        }
+    }
+
     private func openFilters(in board: XCUIElement, app: XCUIApplication) {
-        board.buttons["board.filters"].click()
-        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "board.filter-popover").firstMatch.waitForExistence(timeout: 5))
+        if board.buttons["board.filters"].exists {
+            board.buttons["board.filters"].click()
+            XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "board.filter-popover").firstMatch.waitForExistence(timeout: 5))
+        }
+        XCTAssertTrue(app.popUpButtons["board.filter.actor"].isHittable)
     }
 
     private func closeFilters(in app: XCUIApplication) {
-        app.buttons["board.filters.done"].click()
-        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "board.filter-popover").firstMatch.waitForNonExistence(timeout: 5))
+        if app.buttons["board.filters.done"].exists {
+            app.buttons["board.filters.done"].click()
+            XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "board.filter-popover").firstMatch.waitForNonExistence(timeout: 5))
+        }
     }
 
     private func choose(_ value: String, from picker: XCUIElement, in app: XCUIApplication) {

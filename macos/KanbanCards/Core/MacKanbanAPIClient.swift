@@ -159,6 +159,31 @@ final class KanbanAPIClient {
         return result.workspaces
     }
 
+    func createWorkspace(name: String, slug: String) async throws -> Workspace {
+        struct Body: Encodable { var name: String; var slug: String }
+        struct Result: Decodable { var workspace: Workspace }
+        let result: Result = try await request(origin: rootURL, path: ["workspaces"], method: "POST",
+            body: encode(Body(name: name, slug: slug)))
+        let workspace = result.workspace
+        do {
+            try validateWorkspaceOrigin(workspace.url)
+            guard !workspace.id.isEmpty, workspace.slug == slug,
+                  workspace.name == name,
+                  workspace.url.host == "\(slug).\(rootURL.host ?? "")" else {
+                throw APIError(message: "The Workspace address could not be verified.")
+            }
+        } catch {
+            // A successful server mutation with an unreadable or invalid receipt may
+            // already exist. Reconcile against the owner's inventory before retrying.
+            throw APIError(message: "The new Workspace could not be verified. Refresh your Workspaces before retrying.",
+                isAmbiguousMutation: true, sessionGeneration: sessionGeneration)
+        }
+        // An inventory read begun before creation must not remove the new origin.
+        workspaceRequestID = nil
+        workspaceOrigins.insert(workspace.url)
+        return workspace
+    }
+
     func projects(in workspace: Workspace, includeArchived: Bool = false) async throws -> [ProjectSummary] {
         struct Result: Decodable { var projects: [ProjectSummary] }
         let result: Result = try await request(origin: workspaceOrigin(workspace), path: ["projects"],

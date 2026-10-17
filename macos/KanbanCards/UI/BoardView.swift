@@ -8,6 +8,7 @@ struct BoardView: View {
     @State private var workspaceID: String?
     @State private var projectID: String?
     @State private var creatingProject = false
+    @State private var creatingWorkspace = false
     @State private var newProjectPresentation = UUID()
     @State private var openedExamples = false
     @State private var refreshing = false
@@ -15,6 +16,8 @@ struct BoardView: View {
     @State private var cardInteractionLocked = false
 
     private var workspace: Workspace? { model.workspaces.first { $0.id == workspaceID } }
+    private var hasNavigationSheet: Bool { creatingProject || creatingWorkspace }
+    private var canCreateWorkspace: Bool { model.canCreateWorkspace && !hasNavigationSheet && !cardInteractionLocked && !refreshing }
     private var minimumWidth: CGFloat {
         let mode = CardInteractionMode.current
         return mode == .windows ? 760 : 1024
@@ -38,7 +41,7 @@ struct BoardView: View {
                     sidebar.disabled(cardInteractionLocked).accessibilityElement(children: .contain).accessibilityLabel("Workspaces and Projects")
                 } detail: {
                     if let workspace, let projectID {
-                        ProjectBoard(workspace: workspace, projectID: projectID, parentSheet: creatingProject, onInteractionLockChanged: { cardInteractionLocked = $0 }, refreshInventory: { await refreshNavigation() })
+                        ProjectBoard(workspace: workspace, projectID: projectID, parentSheet: hasNavigationSheet, onInteractionLockChanged: { cardInteractionLocked = $0 }, refreshInventory: { await refreshNavigation() })
                             .id("\(model.sessionID):\(workspace.id):\(projectID)")
                             .accessibilityElement(children: .contain).accessibilityLabel("Project board contents")
                     } else {
@@ -72,8 +75,9 @@ struct BoardView: View {
         .task { await model.restore(); selectWorkspace() }
         .onChange(of: model.workspaces) { _, _ in selectWorkspace() }
         .onChange(of: model.signedIn) { _, signedIn in
-            if !signedIn { workspaceID = nil; projectID = nil; creatingProject = false }
+            if !signedIn { workspaceID = nil; projectID = nil; creatingProject = false; creatingWorkspace = false }
         }
+        .onChange(of: model.sessionID) { _, _ in creatingWorkspace = false; creatingProject = false }
         .onChange(of: workspaceID) { _, _ in projectID = nil }
         .task(id: workspaceID) { await loadProjects() }
         .sheet(isPresented: $creatingProject) {
@@ -81,11 +85,20 @@ struct BoardView: View {
                 ProjectEditor(workspace: workspace, onRefreshFailure: { navigationError = $0 }).environment(model).id(newProjectPresentation)
             }
         }
+        .sheet(isPresented: $creatingWorkspace) {
+            WorkspaceEditor { created in
+                workspaceID = created.id
+                projectID = nil
+                navigationError = nil
+            }.environment(model)
+        }
         .focusedSceneValue(\.boardWindowActions, BoardWindowActions(
-            canCreateProject: workspace.map { model.canCreateProject(in: $0) } == true && !creatingProject && !refreshing,
-            canRefresh: model.signedIn && !creatingProject && !refreshing,
+            canCreateWorkspace: canCreateWorkspace,
+            canCreateProject: workspace.map { model.canCreateProject(in: $0) } == true && !hasNavigationSheet && !cardInteractionLocked && !refreshing,
+            canRefresh: model.signedIn && !hasNavigationSheet && !cardInteractionLocked && !refreshing,
+            createWorkspace: { if canCreateWorkspace { creatingWorkspace = true } },
             createProject: {
-                if let workspace, model.canCreateProject(in: workspace), !creatingProject {
+                if let workspace, model.canCreateProject(in: workspace), !hasNavigationSheet, !cardInteractionLocked {
                     newProjectPresentation = UUID(); creatingProject = true
                 }
             },
@@ -111,10 +124,20 @@ struct BoardView: View {
             Section {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Workspace").font(.caption).foregroundStyle(.primary)
-                    NativePopUpPicker(label: "Workspace", selection: $workspaceID,
-                        options: model.workspaces.map { NativePopUpOption(title: $0.name, value: Optional($0.id)) },
-                        identifier: "board.workspace")
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    if !model.workspaces.isEmpty {
+                        NativePopUpPicker(label: "Workspace", selection: $workspaceID,
+                            options: model.workspaces.map { NativePopUpOption(title: $0.name, value: Optional($0.id)) },
+                            identifier: "board.workspace", actions: [
+                                NativeMenuAction(title: "New Workspace…", systemImage: "plus", isEnabled: canCreateWorkspace,
+                                    perform: { if canCreateWorkspace { creatingWorkspace = true } })
+                            ])
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                if model.workspaces.isEmpty {
+                    Button("New Workspace…", systemImage: "plus") { creatingWorkspace = true }
+                        .accessibilityIdentifier("board.new-workspace")
+                        .disabled(!canCreateWorkspace)
                 }
                 if model.loadingWorkspaces { ProgressView("Loading Workspaces") }
                 if model.workspaces.isEmpty && !model.loadingWorkspaces {
@@ -138,7 +161,7 @@ struct BoardView: View {
                         Text(projects.isEmpty ? "No Projects" : "No active Projects")
                     }
                     Button("New Project…", systemImage: "plus") { newProjectPresentation = UUID(); creatingProject = true }
-                        .disabled(creatingProject || !model.canCreateProject(in: workspace))
+                        .disabled(hasNavigationSheet || !model.canCreateProject(in: workspace))
                 } header: {
                     Text("Projects")
                         .accessibilityElement(children: .combine)
@@ -233,7 +256,6 @@ struct ProjectBoard: View {
     @State private var mutating = false
     @State private var filter = CardFilter()
     @State private var filtersPresented = false
-    @State private var projectInfoPresented = false
     @State private var selectedCardID: String?
     @FocusState private var columnListFocused: Bool
     @State private var creating = false
@@ -357,58 +379,61 @@ struct ProjectBoard: View {
     }
 
     private func boardSurface(_ project: Project) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(project.name).font(.title).fontWeight(.semibold).accessibilityAddTraits(.isHeader)
-                        .layoutPriority(1)
-                    if !project.description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        Button("Board information", systemImage: "info.circle") { projectInfoPresented.toggle() }
-                            .labelStyle(.iconOnly)
-                            .fixedSize()
-                            .help("Board information")
-                            .accessibilityIdentifier("board.info")
-                            .disabled(hasSheet || mutating)
-                            .popover(isPresented: $projectInfoPresented) { projectInformation(project) }
-                    }
-                    Spacer(minLength: 0)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                actorFilter
+                priorityFilter
+                blockedFilter
+                archivedFilter
+                clearFiltersButton.disabled(filter.refinementCount == 0)
+                Spacer(minLength: 0)
+            }
+            .lineLimit(1)
+            .controlSize(.small)
+            .frame(minHeight: 24)
+            .padding(.horizontal)
+            .padding(.vertical, 12)
+            .disabled(hasSheet || mutating)
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("Board controls")
+            .accessibilityIdentifier("board.control-strip")
+            Divider()
+            boardStatus(project)
+            boardColumns(project)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Board surface")
+        .accessibilityIdentifier("board.surface")
+    }
+
+    @ViewBuilder private func boardStatus(_ project: Project) -> some View {
+        if project.archivedAt != nil || !model.canEditProject(id: projectID, in: workspace)
+            || loadError != nil || loading || mutating || filter.active {
+            VStack(alignment: .leading, spacing: 8) {
+                if project.archivedAt != nil {
+                    Text("Archived Project. Cards are read-only.").foregroundStyle(.secondary)
+                } else if !model.canEditProject(id: projectID, in: workspace) {
+                    Label("Read-only", systemImage: "lock").font(.subheadline)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .accessibilityElement(children: .contain)
-                .accessibilityLabel("Project overview")
-                if project.archivedAt != nil { Text("Archived Project. Cards are read-only.").foregroundStyle(.secondary) }
-                else if !model.canEditProject(id: projectID, in: workspace) { Label("Read-only", systemImage: "lock").font(.subheadline) }
                 if let loadError {
                     Text(loadError).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("board.error")
                     Button("Retry refresh") { Task { await refresh() } }
+                        .disabled(loading || hasSheet || mutating)
                 }
                 if loading { ProgressView("Refreshing Project") }
                 if mutating { ProgressView("Updating Project") }
-                filters
-            }.padding([.horizontal, .top])
-            boardColumns(project)
-        }
-    }
-
-    private func projectInformation(_ project: Project) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(project.name).font(.headline)
-            ViewThatFits(in: .vertical) {
-                Text(verbatim: project.description)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-                ScrollView {
-                    Text(verbatim: project.description)
-                        .textSelection(.enabled)
+                if filter.active {
+                    Text(activeFilterSummary)
+                        .font(.caption).foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityIdentifier("board.filter-summary")
                 }
             }
-            .frame(maxHeight: 320)
+            .controlSize(.small)
+            .padding()
         }
-        .padding().frame(width: 360)
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("Board information")
-        .accessibilityIdentifier("board.info-popover")
     }
 
     @ViewBuilder private func boardColumns(_ project: Project) -> some View {
@@ -455,24 +480,9 @@ struct ProjectBoard: View {
         let cards = columnCards.filter(filter.includes).sorted { $0.position < $1.position }
         return HSplitView {
             VStack(alignment: .leading, spacing: 0) {
-                VStack(alignment: .leading, spacing: 12) {
-                    columnHeader(project)
-                    if let loadError {
-                        Text(loadError).font(.caption).foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .accessibilityIdentifier("board.error")
-                        Button("Retry refresh") { Task { await refresh() } }.disabled(loading || hasSheet || mutating)
-                    }
-                    if filter.active {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text(activeFilterSummary)
-                                .font(.caption).foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .accessibilityIdentifier("board.filter-summary")
-                            clearFilters
-                        }
-                    }
-                }.controlSize(.small).padding()
+                columnHeader(project)
+                Divider()
+                boardStatus(project)
                 List(selection: cardSelection) {
                     ForEach(cards) { card in
                         Button { open(card) } label: {
@@ -533,13 +543,14 @@ struct ProjectBoard: View {
                 }
             }.layoutPriority(1)
             Spacer(minLength: 0)
-            ViewThatFits(in: .horizontal) {
-                columnFiltersButton.labelStyle(.titleAndIcon).fixedSize()
-                columnFiltersButton.labelStyle(.iconOnly).fixedSize()
-            }
-            .popover(isPresented: $filtersPresented, arrowEdge: .trailing) { columnFilterPopover }
+            filtersControl
         }
+        .controlSize(.small)
+        .frame(minHeight: 24)
+        .padding(.horizontal)
+        .padding(.vertical, 12)
         .accessibilityElement(children: .contain)
+        .accessibilityLabel("Column controls")
         .accessibilityIdentifier("board.column-header")
     }
 
@@ -561,7 +572,15 @@ struct ProjectBoard: View {
             identifier: "board.focused-column")
     }
 
-    private var columnFiltersButton: some View {
+    private var filtersControl: some View {
+        ViewThatFits(in: .horizontal) {
+            filtersButton.labelStyle(.titleAndIcon).fixedSize()
+            filtersButton.labelStyle(.iconOnly).fixedSize()
+        }
+        .popover(isPresented: $filtersPresented, arrowEdge: .trailing) { filterPopover }
+    }
+
+    private var filtersButton: some View {
         Button(filter.refinementCount == 0 ? "Filters" : "Filters (\(filter.refinementCount))",
                systemImage: "line.3.horizontal.decrease") { filtersPresented.toggle() }
             .accessibilityLabel("Filters")
@@ -570,7 +589,7 @@ struct ProjectBoard: View {
             .help(filter.refinementCount == 0 ? "Filters" : "Filters (\(filter.refinementCount))")
     }
 
-    private var columnFilterPopover: some View {
+    private var filterPopover: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("Filters").font(.headline)
@@ -620,41 +639,6 @@ struct ProjectBoard: View {
             .sorted { $0.position < $1.position }.first?.id
     }
 
-    private var filters: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 16) {
-                actorFilter
-                priorityFilter
-                blockedFilter
-                archivedFilter
-                clearFilters
-            }
-            .fixedSize(horizontal: true, vertical: false)
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 16) {
-                    actorFilter
-                    priorityFilter
-                }
-                HStack(spacing: 16) {
-                    blockedFilter
-                    archivedFilter
-                    clearFilters
-                }
-            }
-            .fixedSize(horizontal: true, vertical: false)
-            VStack(alignment: .leading, spacing: 8) {
-                actorFilter
-                priorityFilter
-                blockedFilter
-                archivedFilter
-                clearFilters
-            }
-            .fixedSize(horizontal: true, vertical: false)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .controlSize(.small)
-    }
-
     private var actorFilter: some View {
         LabeledContent("Next actor") {
             NativePopUpPicker(label: "Next actor", selection: $filter.actor, options: [
@@ -687,11 +671,13 @@ struct ProjectBoard: View {
             .accessibilityIdentifier("board.filter.archived")
     }
 
+    private var clearFiltersButton: some View {
+        Button("Clear filters") { filter.clearRefinements() }
+            .accessibilityIdentifier("board.clear-filters")
+    }
+
     @ViewBuilder private var clearFilters: some View {
-        if filter.refinementCount > 0 {
-            Button("Clear filters") { filter.clearRefinements() }
-                .accessibilityIdentifier("board.clear-filters")
-        }
+        if filter.refinementCount > 0 { clearFiltersButton }
     }
 
     private var cardSelection: Binding<String?> {
@@ -739,7 +725,6 @@ struct ProjectBoard: View {
 
     private func open(_ card: Card) {
         guard model.signedIn, !hasSheet, !mutating else { return }
-        projectInfoPresented = false
         selectedCardID = card.id
         switch interactionMode {
         case .windows:
