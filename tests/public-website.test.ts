@@ -54,12 +54,14 @@ test("public homepage has the bounded source-grounded composition and two existi
   assert.equal((html.match(/class="website-support"/g) || []).length, 1);
   const words = html.replace(/<svg[\s\S]*?<\/svg>/g, "").replace(/<[^>]+>/g, " ").trim().split(/\s+/);
   assert.ok(words.length <= 220, `Homepage contains ${words.length} words`);
-  const shell = renderPublicWebsite(html, "https://kanban.cards/", '<button data-action="start-recovery">Recover access</button>');
+  assert.ok(!html.includes("Recover access"));
+  const shell = renderPublicWebsite(html, "https://kanban.cards/", '<button data-action="start-setup">Set up existing account</button>');
   const desktopNav = shell.match(/<nav class="website-navigation"[^>]*>([\s\S]*?)<\/nav>/)![1];
   assert.equal((desktopNav.match(/<a\b/g) || []).length, 4);
   assert.ok(shell.includes('href="https://kanban.cards/#workload"'));
   assert.ok(shell.includes('href="https://kanban.cards/#how-it-works"'));
-  assert.ok(shell.match(/<footer[\s\S]*data-action="start-recovery"/));
+  assert.ok(shell.match(/<footer[\s\S]*data-action="start-setup"/));
+  assert.ok(!shell.includes("Recover access"));
 });
 
 test("recovery copy states credential replacement while other passkey modes keep their instructions", () => {

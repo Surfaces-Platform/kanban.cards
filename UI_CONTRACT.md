@@ -27,7 +27,7 @@ The client has passkey sign-up/sign-in, recovery, access settings, zero/one/many
 - Workspace selection, Manage access, Agent connections, and the Context Dock retain their current rendered font, colors, controls, and layout after sign-in. Sign-out restores the public shell and its existing bounded receipt.
 - The font and license are fingerprinted in `website-assets/manifest.json`. The static build verifies and copies them. Exact GET/HEAD routes expose only the website stylesheet, font, license, and fingerprinted hero WebP; private API routes, other methods, and encoded traversal remain restricted.
 - The mobile family menu closes on Escape and restores its summary focus. Outside clicks close it without rerendering the auth form or losing field drafts. Secondary public buttons retain a visible keyboard focus ring.
-- The four primary links lead to The work, How it works, Surfaces, and Handbooks. Recover access and conditional setup/retry controls are quiet footer utilities. Selecting a compact-menu link closes the menu. Auth-page home links use the existing validated initiating root. Form actions, labels, passkey ceremonies, recovery acknowledgement, and session/origin semantics remain unchanged.
+- The four primary links lead to The work, How it works, Surfaces, and Handbooks. Conditional setup/retry controls remain quiet footer utilities. Recover access appears only inside the passkey sign-in card, after the primary Continue with passkey and secondary Back actions. It is an underlined tertiary text action with the existing visible keyboard focus and a 48px target. Selecting a compact-menu link closes the menu. Auth-page home links use the existing validated initiating root. Passkey ceremonies, recovery acknowledgement, and session/origin semantics remain unchanged.
 
 ## Resource model
 
@@ -87,7 +87,7 @@ The client has passkey sign-up/sign-in, recovery, access settings, zero/one/many
 ## Authentication boundary
 
 - The static shell and dedicated sign-in surface render without authenticated Project data.
-- A signed-out application root offers `Create account`, `Sign in`, and `Recover access`. A configured, unclaimed existing account also offers `Set up existing account`.
+- A signed-out application root offers `Create account` and `Sign in`. The passkey sign-in card offers `Recover access`; it returns through the validated initiating root, where only an anonymous root consumes the fixed `access=recover` navigation request and starts the existing same-origin, browser-bound intent flow. The request is removed from history before that transition. A configured, unclaimed existing account also offers `Set up existing account` on the root.
 - `Create account` creates a private Workspace and owner together after a verified passkey registration. Signup collects the Workspace name and address and an optional display name. Sign-in uses a discoverable passkey without an email requirement.
 - Authentication ceremonies run only on the exact dedicated auth host, using the auth host as the WebAuthn relying party. The browser begins at an authorized application root, posts to `/api/auth-start`, and immediately form-posts the returned intent token, browser nonce, and exact root origin to the configured `/api/passkeys/start`. Secrets never enter URLs or browser storage.
 - The auth host trusts only the server-verified auth intent from `/api/session`. Direct navigation without an intent offers a return to the app root. No Workspace, Project, or app-session data API is available on the auth host.
