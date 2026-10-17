@@ -440,6 +440,24 @@ body.public-website {
   box-shadow: none;
 }
 
+.public-website .access-card .website-tertiary-action {
+  justify-self: start;
+  inline-size: fit-content;
+  min-block-size: 48px;
+  padding-inline: 0;
+  border: 0;
+  background: transparent;
+  color: var(--website-muted);
+  font-weight: 400;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.public-website .access-card .website-tertiary-action:hover:not(:disabled) {
+  background: transparent;
+  color: var(--website-text);
+}
+
 .public-website .jk-button:hover:not(:disabled) {
   background: var(--website-canvas);
 }

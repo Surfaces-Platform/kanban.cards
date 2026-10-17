@@ -146,6 +146,7 @@ test("recovery replaces a lost passkey, rotates the code, and preserves owner da
     const ownerBefore = (await harness.accessStore.read()).owners[0].id;
     await signout(page, harness);
     await device.cdp.send("WebAuthn.clearCredentials", { authenticatorId: device.id });
+    await page.getByRole("button", { name: "Sign in", exact: true }).click();
     await page.getByRole("button", { name: "Recover access", exact: true }).click();
     await page.getByLabel("Recovery code", { exact: true }).fill(originalCode);
     await page.getByRole("button", { name: "Replace passkeys", exact: true }).click();
@@ -162,6 +163,7 @@ test("recovery replaces a lost passkey, rotates the code, and preserves owner da
     expect(state.passkeys.filter(key => key.revokedAt)).toHaveLength(1);
     expect(JSON.stringify(state)).not.toContain(replacementCode);
     await signout(page, harness);
+    await page.getByRole("button", { name: "Sign in", exact: true }).click();
     await page.getByRole("button", { name: "Recover access", exact: true }).click();
     await page.getByLabel("Recovery code", { exact: true }).fill(originalCode);
     await page.getByRole("button", { name: "Replace passkeys", exact: true }).click();
@@ -234,6 +236,7 @@ test("one-time setup attaches a passkey to the existing owner and preserves its 
     await page.goto(harness.rootOrigin);
     await expectNoHorizontalOverflow(page, "320px existing-owner setup entry");
     await page.getByRole("button", { name: "Set up existing account", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Recover access", exact: true })).toHaveCount(0);
     await page.getByLabel("Setup token", { exact: true }).fill(SETUP_TOKEN);
     await page.getByRole("button", { name: "Create passkey", exact: true }).click();
     await expect(page.locator("#recovery-code")).toBeVisible();

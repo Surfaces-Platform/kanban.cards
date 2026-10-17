@@ -127,11 +127,58 @@ for (const theme of ["light", "dark"] as const) {
       const secondary = page.getByRole("button", { name: "Sign in", exact: true });
       await expect(secondary).toBeFocused();
       expect(await secondary.evaluate(button => getComputedStyle(button).boxShadow)).toContain("5px");
-      const recovery = page.locator("footer").getByRole("button", { name: "Recover access", exact: true });
-      await recovery.focus();
+      await expect(page.getByRole("button", { name: "Recover access", exact: true })).toHaveCount(0);
+      await secondary.click();
+      await expect(page).toHaveURL(authOrigin + "/sign-in");
+      await expect(page.getByRole("heading", { name: "Sign in", exact: true })).toBeVisible();
+      const signInCard = page.locator(".access-card");
+      const recovery = signInCard.getByRole("button", { name: "Recover access", exact: true });
+      await expect(page.locator("footer").getByRole("button", { name: "Recover access", exact: true })).toHaveCount(0);
+      await expect(signInCard.getByRole("button")).toHaveText(["Continue with passkey", "Back", "Recover access"]);
+      expect(await recovery.evaluate(button => {
+        const style = getComputedStyle(button);
+        return { target: button.getBoundingClientRect().height, background: style.backgroundColor, border: style.borderTopWidth, underline: style.textDecorationLine, shadow: style.boxShadow };
+      })).toEqual({ target: 48, background: "rgba(0, 0, 0, 0)", border: "0px", underline: "underline", shadow: "none" });
+      await signInCard.getByRole("button", { name: "Continue with passkey", exact: true }).focus();
+      await page.keyboard.press("Tab");
+      await expect(signInCard.getByRole("button", { name: "Back", exact: true })).toBeFocused();
+      await page.keyboard.press("Tab");
+      await expect(recovery).toBeFocused();
       expect(await recovery.evaluate(button => getComputedStyle(button).boxShadow)).toContain("5px");
+      const flow: Array<{ host: string; path: string; origin: string; mode?: string; rootOrigin?: string; boundFieldsPresent?: boolean }> = [];
+      const headerReads: Array<Promise<void>> = [];
+      const observeRecovery = (request: import("@playwright/test").Request) => {
+        if (request.method() !== "POST") return;
+        const url = new URL(request.url());
+        if (!["/api/auth-start", "/api/passkeys/start"].includes(url.pathname)) return;
+        const observed: (typeof flow)[number] = { host: url.host, path: url.pathname, origin: "" };
+        flow.push(observed);
+        headerReads.push(request.allHeaders().then(headers => { observed.origin = headers.origin || ""; }));
+        if (url.pathname === "/api/auth-start") observed.mode = request.postDataJSON().mode;
+        if (url.pathname === "/api/passkeys/start") {
+          const fields = new URLSearchParams(request.postData() || "");
+          observed.rootOrigin = fields.get("rootOrigin") || "";
+          observed.boundFieldsPresent = Boolean(fields.get("intentToken") && fields.get("browserNonce"));
+        }
+      };
+      page.on("request", observeRecovery);
+      await page.keyboard.press("Enter");
+      await expect(page.getByRole("heading", { name: "Recover your account", exact: true })).toBeVisible();
+      page.off("request", observeRecovery);
+      await Promise.all(headerReads);
+      await expect(page).toHaveURL(authOrigin + "/sign-in");
+      await expect(page.getByLabel("Recovery code", { exact: true })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Recover access", exact: true })).toHaveCount(0);
+      expect(flow).toEqual([
+        { host: `board.localhost:${port}`, path: "/api/auth-start", origin: rootOrigin, mode: "recover" },
+        { host: `auth.board.localhost:${port}`, path: "/api/passkeys/start", origin: rootOrigin, rootOrigin, boundFieldsPresent: true }
+      ]);
+      await page.getByRole("button", { name: "Back", exact: true }).click();
+      await expect(page).toHaveURL(rootOrigin + "/");
+      await expect(page.getByRole("button", { name: "Recover access", exact: true })).toHaveCount(0);
       await start.click();
       await expect(page).toHaveURL(authOrigin + "/sign-up");
+      await expect(page.getByRole("button", { name: "Recover access", exact: true })).toHaveCount(0);
       await expect(page.locator("body")).toHaveClass(/public-website/);
       await page.getByLabel("Workspace name", { exact: true }).fill("First synthetic Workspace");
       await page.getByLabel("Workspace address", { exact: true }).fill("first");
@@ -154,18 +201,22 @@ for (const theme of ["light", "dark"] as const) {
       expect(await back.evaluate(button => getComputedStyle(button).boxShadow)).toContain("5px");
       await page.getByRole("button", { name: "Create passkey", exact: true }).click();
       await expect(page.getByRole("heading", { name: "Save your recovery code", exact: true })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Recover access", exact: true })).toHaveCount(0);
       await expect(page.locator("body")).toHaveClass(/public-website/);
       await page.getByRole("button", { name: "I saved my recovery code", exact: true }).click();
       await expect(page).toHaveURL(`http://first.board.localhost:${port}/`);
       await expect(page.getByRole("heading", { name: "Create the first Project", exact: true })).toBeVisible();
       await expectWorkbench();
+      await expect(page.getByRole("button", { name: "Recover access", exact: true })).toHaveCount(0);
       await page.getByRole("button", { name: "Open account panel", exact: true }).click();
       await expect(page.locator("#account-panel")).toBeVisible();
       expect(await page.locator("#account-panel .jk-button").first().evaluate(button => getComputedStyle(button).minHeight)).toBe("44px");
       const owner = (await store.read()).owners[0];
       await store.createWorkspace({ providerSubject: owner.id, email: "", displayName: owner.displayName, slug: "second", name: "Second synthetic Workspace" });
-      await page.goto(rootOrigin);
+      await page.goto(rootOrigin + "/?access=recover");
       await expect(page.getByRole("heading", { name: "Choose a Workspace", exact: true })).toBeVisible();
+      await expect(page).toHaveURL(rootOrigin + "/?access=recover");
+      await expect(page.getByRole("button", { name: "Recover access", exact: true })).toHaveCount(0);
       await expectWorkbench();
       expect(await page.locator(".access-card").evaluate(card => getComputedStyle(card).backgroundColor)).toBe(privateSurface);
       expect(await page.getByRole("button", { name: "Manage access", exact: true }).evaluate(button => getComputedStyle(button).minHeight)).toBe("44px");

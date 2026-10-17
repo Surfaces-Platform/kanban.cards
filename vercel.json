@@ -7,6 +7,21 @@
       "includeFiles": "{index.html,public/**}"
     }
   },
+  "redirects": [
+    {
+      "source": "/:path(.*)",
+      "has": [
+        {
+          "type": "host",
+          "value": {
+            "eq": "www.kanban.cards"
+          }
+        }
+      ],
+      "destination": "https://kanban.cards/:path",
+      "permanent": true
+    }
+  ],
   "rewrites": [
     {
       "source": "/api/(.*)",

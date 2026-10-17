@@ -555,6 +555,7 @@ async function beginPasskeyFlow(mode: PasskeyMode, action?: string): Promise<voi
   if (accessContext === "auth") {
     if (rootUrl) {
       const destination = new URL("/", rootUrl);
+      if (mode === "recover") destination.searchParams.set("access", "recover");
       if (authIntent?.mode === "add" || authIntent?.mode === "verify" && authIntent.action === "access-settings") destination.searchParams.set("cancel-access", "1");
       window.location.assign(destination.toString());
     }
@@ -963,7 +964,8 @@ function renderSignIn(): string {
       const workspaceFields = mode === "signup" ? renderField({ id: "signup-workspace-name", label: "Workspace name", control: renderTextInput({ id: "signup-workspace-name", name: "workspaceName", value: passkeyDraft.workspaceName, required: true, autofocus: true }) }) + renderField({ id: "signup-workspace-slug", label: "Workspace address", control: renderTextInput({ id: "signup-workspace-slug", name: "workspaceSlug", value: passkeyDraft.workspaceSlug, required: true, placeholder: "your-workspace" }), hint: "Lowercase letters, numbers, and hyphens." }) + renderField({ id: "signup-display-name", label: "Your name (optional)", control: renderTextInput({ id: "signup-display-name", name: "displayName", value: passkeyDraft.displayName, autocomplete: "name" }) }) : "";
       const secretField = mode === "setup" || mode === "recover" ? renderField({ id: "passkey-access-code", label: mode === "setup" ? "Setup token" : "Recovery code", control: renderTextInput({ id: "passkey-access-code", name: mode === "setup" ? "setupToken" : "recoveryCode", type: "password", autocomplete: "off", required: true, autofocus: true }) }) : "";
       const { instruction, submitLabel } = passkeyFormCopy(mode);
-      return `<main class="access-view"><section class="access-card jk-panel" aria-labelledby="access-title">${renderProductName()}<h1 id="access-title">${heading}</h1><p>${instruction}</p>${notice}<form data-form="passkey" class="access-form">${workspaceFields}${secretField}<button class="jk-button" data-priority="primary" type="submit"${disabledAttribute()}>${mutationInFlight ? "Waiting for your passkey…" : submitLabel}</button></form>${renderButton("Back", "passkey-sign-in")}</section></main>`;
+      const recoveryAction = mode === "signin" ? renderButton("Recover access", "start-recovery", { className: "jk-button website-tertiary-action", disabled: !rootUrl }) : "";
+      return `<main class="access-view"><section class="access-card jk-panel" aria-labelledby="access-title">${renderProductName()}<h1 id="access-title">${heading}</h1><p>${instruction}</p>${notice}<form data-form="passkey" class="access-form">${workspaceFields}${secretField}<button class="jk-button" data-priority="primary" type="submit"${disabledAttribute()}>${mutationInFlight ? "Waiting for your passkey…" : submitLabel}</button></form>${renderButton("Back", "passkey-sign-in")}${recoveryAction}</section></main>`;
     }
     if (accessContext === "root") {
       if (authNotice?.kind === "signed-out") return `<main class="access-view"><section class="access-card jk-panel" aria-labelledby="access-title">${renderProductName()}<h1 id="access-title">Signed out</h1>${renderButton("Continue", "signed-out-continue", { priority: "primary" })}</section></main>`;
@@ -1544,7 +1546,7 @@ function render(): void {
         ? accessContext === "root" ? accessPanelOpen ? renderAccessSettings() : renderWorkspaceRoute() : renderWorkspace()
         : renderSignIn();
   const utilities = publicWebsite && accessContext === "root" && authNotice?.kind !== "signed-out"
-    ? renderButton("Recover access", "start-recovery", { disabled: !loginUrl }) + (setupAvailable ? renderButton("Set up existing account", "start-setup", { disabled: !loginUrl }) : "") + (authNotice?.kind === "sign-out-incomplete" ? renderButton("Retry sign out", "retry-global-sign-out") : "")
+    ? (setupAvailable ? renderButton("Set up existing account", "start-setup", { disabled: !loginUrl }) : "") + (authNotice?.kind === "sign-out-incomplete" ? renderButton("Retry sign out", "retry-global-sign-out") : "")
     : "";
   root.innerHTML = publicWebsite ? renderPublicWebsite(content, rootUrl, utilities) : content;
   restoreDescriptionSelection();
@@ -3400,6 +3402,11 @@ async function boot(): Promise<void> {
       currentUrl.searchParams.delete("signedout");
       window.history.replaceState(null, "", `${currentUrl.pathname}${currentUrl.search}`);
       if (!session && accessContext === "root") authNotice = { kind: "signed-out", title: "Signed out", message: "" };
+    }
+    if (!session && accessContext === "root" && currentUrl.searchParams.get("access") === "recover") {
+      window.history.replaceState(null, "", "/");
+      await beginPasskeyFlow("recover");
+      return;
     }
     if (session && accessContext === "root") {
       if (currentUrl.searchParams.get("cancel-access") === "1") {
