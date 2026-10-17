@@ -37,6 +37,7 @@ Native requests use JSON. Send the bearer as `Authorization: Bearer <token>` aft
 | Auth | `POST /api/native-auth/challenge` with `{}` | Five-minute, single-use `challengeId`, `ceremonyToken`, `challenge`, `relyingPartyIdentifier`, and `expiresAt` |
 | Auth | `POST /api/native-auth/verify` with `challengeId`, `ceremonyToken`, and `response` | Verifies the signed assertion and returns `authenticated`, `tokenType`, `token`, absolute `expiresAt`, `rootUrl`, and owner identity |
 | Root | `GET /api/workspaces` | Current owner's Workspaces with their exact tenant URLs |
+| Root | `POST /api/workspaces` with `name` and `slug` | Creates a private Workspace for the current owner and returns `201 {workspace}` with its exact tenant URL; duplicate addresses return 409 and the ten-Workspace limit returns 403 |
 | Root or owned tenant | `GET /api/session` | Current authority, `authenticationMethod: "native"`, and expiry |
 | Root or owned tenant | `DELETE /api/session` | Revokes the current native credential across the root and tenant hosts |
 | Owned tenant | Existing Project, Card, Comment, and Activity routes | Same board data, membership checks, and version checks as browser and agent requests |

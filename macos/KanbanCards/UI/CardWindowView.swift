@@ -51,7 +51,7 @@ struct CardWindowView: View {
                     .navigationTitle(card?.title ?? "Card")
                     .navigationSubtitle([workspace?.name, project?.name].compactMap { $0 }.joined(separator: " / "))
                     .toolbar {
-                        ToolbarItem { moveAction }
+                        ToolbarItem { moveAction.labelStyle(.titleOnly) }
                         ToolbarItem { refreshAction }
                         ToolbarItem { moreActions }
                     }
@@ -95,22 +95,6 @@ struct CardWindowView: View {
                 NativeCardWindowGeometry(identity: identity, resetDemoLayout: model.isDemo && ProcessInfo.processInfo.arguments.contains("--reset-demo-window-layout"))
                     .frame(width: 1, height: 1).accessibilityHidden(true)
             }
-            if embedded {
-                HStack {
-                    moveAction
-                    refreshAction.labelStyle(.iconOnly).help("Refresh Card")
-                    moreActions
-                    Spacer(minLength: 0)
-                    Button("Close Card", systemImage: "xmark") { close() }
-                        .labelStyle(.iconOnly).help("Close Card")
-                        .disabled(interactionLocked || interactionDisabled)
-                        .accessibilityIdentifier("card.close.\(identity.cardID)")
-                }
-                .padding()
-                .accessibilityElement(children: .contain)
-                .accessibilityLabel("Card controls")
-                Divider()
-            }
             content
         }
         .background {
@@ -125,7 +109,8 @@ struct CardWindowView: View {
     }
 
     private var moveAction: some View {
-        Button("Move…") { activeSheet = CardSheet(kind: .move) }.disabled(!canEdit)
+        Button("Move…", systemImage: "arrow.right") { activeSheet = CardSheet(kind: .move) }
+            .disabled(!canEdit).help("Move Card").accessibilityLabel("Move…")
     }
     private var refreshAction: some View {
         Button("Refresh", systemImage: "arrow.clockwise") { Task { await refresh() } }.disabled(!canRefresh)
@@ -143,6 +128,24 @@ struct CardWindowView: View {
         ])
     }
 
+    private var embeddedLeadingControls: some View {
+        HStack(spacing: 6) {
+            ViewThatFits(in: .horizontal) {
+                moveAction.labelStyle(.titleOnly)
+                moveAction.labelStyle(.iconOnly)
+            }
+            refreshAction.labelStyle(.iconOnly).help("Refresh Card").fixedSize()
+            moreActions.fixedSize()
+        }
+    }
+
+    private var embeddedCloseButton: some View {
+        Button("Close Card", systemImage: "xmark") { close() }
+            .labelStyle(.iconOnly).help("Close Card")
+            .disabled(interactionLocked || interactionDisabled)
+            .accessibilityIdentifier("card.close.\(identity.cardID)")
+    }
+
     private var content: some View {
         Group {
             if model.restoring { ProgressView("Opening Card") }
@@ -151,7 +154,9 @@ struct CardWindowView: View {
                     onRefreshFailure: { loadError = $0 }, presentation: .inline,
                     onInteractionLockChanged: { editorInteractionLocked = $0 },
                     cardEditingDisabled: commentInteractionLocked, additionalContent: AnyView(cardComments(card, workspace: workspace, project: project)),
-                    additionalContentFocusRequest: composingComment ? commentFocusRequest : nil)
+                    additionalContentFocusRequest: composingComment ? commentFocusRequest : nil,
+                    headerLeadingContent: embedded ? AnyView(embeddedLeadingControls) : nil,
+                    headerTrailingContent: embedded ? AnyView(embeddedCloseButton) : nil)
                     .environment(model)
                     .disabled(interactionDisabled || hasSheet || mutating)
                 .sheet(item: $activeSheet) { sheet in

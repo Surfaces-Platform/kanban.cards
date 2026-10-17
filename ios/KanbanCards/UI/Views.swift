@@ -2,10 +2,11 @@ import SwiftUI
 
 struct RootView: View {
     @Environment(AppModel.self) private var model
-    @Environment(\.scenePhase) private var scenePhase
+    @State private var workspaceID: String?
+    @State private var creatingWorkspace = false
+    private var workspace: Workspace? { model.workspaces.first { $0.id == workspaceID } }
 
     var body: some View {
-        @Bindable var model = model
         NavigationStack {
             if model.restoring {
                 ProgressView("Opening kanban.cards")
@@ -19,16 +20,21 @@ struct RootView: View {
                         .disabled(model.endingSession)
                 }
             } else if model.signedIn {
-                if let workspace = model.workspaces.first, model.workspaces.count == 1 {
-                    ProjectsView(workspace: workspace)
+                if let workspace {
+                    ProjectsView(workspace: workspace, workspaceID: $workspaceID,
+                        createWorkspace: { creatingWorkspace = true })
+                        .id(workspace.id)
                 } else {
                     List {
                         if model.loadingWorkspaces { ProgressView("Loading Workspaces") }
                         ForEach(model.workspaces) { workspace in
-                            NavigationLink(workspace.name) { ProjectsView(workspace: workspace) }
+                            Button(workspace.name) { workspaceID = workspace.id }
                         }
                         if !model.loadingWorkspaces && model.workspaces.isEmpty {
                             ContentUnavailableView(model.workspaceLoadFailed ? "Workspaces unavailable" : "No Workspaces", systemImage: "folder")
+                            Button("New Workspace", systemImage: "plus") { creatingWorkspace = true }
+                                .accessibilityIdentifier("workspace.new")
+                                .disabled(!model.canCreateWorkspace)
                             Button("Retry loading Workspaces") { Task { await model.refreshWorkspaces() } }
                         }
                     }
@@ -50,10 +56,24 @@ struct RootView: View {
                 .navigationTitle("kanban.cards")
             }
         }
-        .task { await model.restore() }
+        .id(model.ownerID)
+        .task { await model.restore(); selectWorkspace() }
+        .onChange(of: model.workspaces) { _, _ in selectWorkspace() }
+        .onChange(of: model.signedIn) { _, signedIn in
+            if !signedIn { workspaceID = nil; creatingWorkspace = false }
+        }
+        .sheet(isPresented: $creatingWorkspace) {
+            WorkspaceEditor { workspaceID = $0.id }.environment(model)
+        }
         .alert("Unable to complete the action", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
             Button("OK", role: .cancel) { model.errorMessage = nil }
         } message: { Text(model.errorMessage ?? "") }
+    }
+
+    private func selectWorkspace() {
+        if !model.workspaces.contains(where: { $0.id == workspaceID }) {
+            workspaceID = model.workspaces.first?.id
+        }
     }
 }
 
@@ -74,6 +94,8 @@ struct AccountView: View {
 struct ProjectsView: View {
     @Environment(AppModel.self) private var model
     let workspace: Workspace
+    @Binding var workspaceID: String?
+    let createWorkspace: () -> Void
     @State private var loading = false
     @State private var creating = false
 
@@ -91,6 +113,16 @@ struct ProjectsView: View {
             }
         }
         .navigationTitle(workspace.name)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbarTitleMenu {
+            Picker("Workspace", selection: $workspaceID) {
+                ForEach(model.workspaces) { Text($0.name).tag(Optional($0.id)) }
+            }
+            Divider()
+            Button("New Workspace…", systemImage: "plus", action: createWorkspace)
+                .accessibilityIdentifier("workspace.new")
+                .disabled(!model.canCreateWorkspace || creating)
+        }
         .toolbar {
             ToolbarItem { NavigationLink { AccountView() } label: { Label("Account", systemImage: "person.crop.circle") } }
             ToolbarItem(placement: .primaryAction) { Button("New Project", systemImage: "plus") { creating = true } }

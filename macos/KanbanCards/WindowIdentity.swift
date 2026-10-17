@@ -80,8 +80,10 @@ struct CardWindowActions {
 }
 
 struct BoardWindowActions {
+    var canCreateWorkspace: Bool
     var canCreateProject: Bool
     var canRefresh: Bool
+    var createWorkspace: () -> Void
     var createProject: () -> Void
     var refresh: () -> Void
 }

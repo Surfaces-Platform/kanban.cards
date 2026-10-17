@@ -16,13 +16,23 @@ The script builds an ad hoc Debug app and opens the synthetic Studio Workspace, 
 
 Demo mode is available only in Debug builds. It makes no account or backend changes. Confirmed demo edits remain in memory for that run; unsaved drafts persist locally. The [Direction A Figma scene](https://www.figma.com/design/zlFNrtTvemQYEDePnCynCU?node-id=45-3081) is the design reference.
 
+## Create a Workspace
+
+Open the Workspace chooser and choose **New Workspace…** below the separator, or use the File menu. The chooser checks the current Workspace; the creation command opens a form without changing that selection. Cancel keeps the current Workspace. If no Workspaces exist, a visible **New Workspace…** button starts the same form. Enter a name and an address, then choose **Create**. The app selects the new Workspace, where **New Project…** starts its first board. Creation errors leave the form open with the entered values. Workspace creation is disabled during read-only or scoped live verification.
+
+Demo mode creates synthetic Workspaces in memory for that run. It does not create an account Workspace. The native owner-token API supports creation at the root `POST /api/workspaces`; a deployed server must include that support for signed-in account creation.
+
 ## Open Cards alongside their Column
 
 Opening a Card now shows its Column as a compact list beside the Card details. The app uses this presentation by default and has no Card view selector. Older saved presentation preferences do not change this behavior. Choose another Column or use **Board** to return to the full board.
 
-The Column header keeps Board, the Column chooser, and Filters on one row. At narrow widths, Board and Filters use native icons and the Column chooser omits its visible label. Tooltips and accessibility labels retain each control's meaning. Active filter criteria remain below the row; Card result counts are hidden.
+The native window title shows the Project and Workspace names. The board omits the repeated heading, description, and info control. Creation and editing show the name field; stored descriptions remain intact.
 
-**Filters** opens a native popover for Next actor, Priority, Blocked, and Include archived. **Clear filters** preserves search, and an empty list offers separate actions to clear filters or search. Selecting another Card or changing a filter preserves the Column width chosen with the native divider.
+The full board shows Next actor, Priority, Blocked, Include archived, and Clear filters directly in one control row. Clear filters stays visible and is disabled until a filter is active. The Column list keeps these choices in its **Filters** popover. Both presentations preserve the same filters and search.
+
+The Column header keeps Board, the chooser, and Filters on one row. At narrow widths, Board and Filters use native icons and the chooser omits its visible label. Tooltips and accessibility labels retain each control's meaning. Active criteria remain below the row; result counts are hidden.
+
+In the Column list, **Filters** opens a native popover for Next actor, Priority, Blocked, and Include archived. **Clear filters** preserves search, and an empty list offers separate actions to clear filters or search. Selecting another Card or changing a filter preserves the Column width chosen with the native divider.
 
 Comments appear in the Card details. **Add Comment** opens an inline text editor in that section. Command-Shift-M focuses the composer, Command-Return submits, and Escape cancels. Cancel retains the per-Card draft; switching Cards keeps each draft separate. Posting uses the existing retry and confirmation behavior.
 
@@ -31,7 +41,7 @@ The Project window has a native 1024-point minimum width. All layouts, menus, bu
 ## Window and editing behavior
 
 1. Click a Card to open its editable fields beside the Column list. Right-click for Open in New Window, Move, Activity, and Archive or Restore. Opening a window preserves the current board view and reuses the same Card's window. Double-click has no separate action. Board or Close Card returns to the full board.
-2. The pane and windows share one draft for each Card. Changes appear in every open presentation immediately. Save or Command-S commits the draft and leaves the fields open. Revert restores the saved Card after confirmation. Switching Cards or closing a window retains unfinished drafts on this Mac. New Cards still use a creation sheet; comments have their own inline composer and Post action.
+2. In the pane, Move, Refresh, More, Save, Revert, and Close share one adaptive row aligned with the Column controls. The pane and windows share one draft for each Card. Changes appear in every open presentation immediately. Save or Command-S commits the draft and leaves the fields open. Revert restores the saved Card after confirmation. Switching Cards or closing a window retains unfinished drafts on this Mac. New Cards still use a creation sheet; comments have their own inline composer and Post action.
 3. Confirmed saves update the board and matching windows without replacing another Card's unsaved draft. A stale Card version requires reconciliation with current server content. Uncertain requests retain their retry identity. Drafts from earlier previews remain available for explicit recovery.
 4. Card actions and shortcuts use the focused Card. Shift-Command-M opens Add Comment, and Command-R refreshes that Card. The File menu offers Save and Revert to Saved. With the board focused, Command-N creates a Card and Shift-Command-N creates a Project.
 5. Sign-out immediately hides private data and closes Card windows. Unconfirmed server revocation remains pending and can be retried. Archived Projects and Cards stay readable and reject edits until restored.
@@ -73,11 +83,11 @@ xcodebuild -project macos/KanbanCards.xcodeproj \
   CODE_SIGN_ENTITLEMENTS= -only-testing:KanbanCardsTests test
 ```
 
-CI runs these unit tests, a Release build, and the Mac source guard alongside the existing iPhone and web checks. Interactive tests use synthetic data and require an unlocked Mac. To run the UI suite, replace the final unit-test selector with `-only-testing:KanbanCardsUITests`. The suite includes independent window behavior, editing and drafts, menus, filters, archived Projects, appearance, accessible values, VoiceOver speech, and the native diagnostic audit. VoiceOver cases temporarily control VoiceOver and restore its initial state. The diagnostic audit retains reviewed host-specific native wrapper and system findings and rejects unreviewed issues.
+CI runs these unit tests, a Release build, and the Mac source guard alongside the existing iPhone and web checks. Interactive tests use synthetic data and require an unlocked Mac. To run the UI suite, replace the final unit-test selector with `-only-testing:KanbanCardsUITests`. The suite includes independent window behavior, Workspace creation and selection, editing and drafts, menus, filters, archived Projects, appearance, accessible values, VoiceOver speech, and the native diagnostic audit. VoiceOver cases temporarily control VoiceOver and restore its initial state. The diagnostic audit retains reviewed host-specific native wrapper and system findings and rejects unreviewed issues.
 
 Keep signed-account, hosted CI, interactive accessibility, and distribution evidence distinct. Use a dedicated test Project for live edit verification and confirm persistence by server readback and relaunch.
 
-The Tart demo pilot uses synthetic data and a 1920×1080 guest display. Run UI automation inside the dedicated macOS VM. `ColumnLayoutAndInlineCommentTests` covers the default presentation, adaptive header, filtering, navigation, and inline comment drafts and submission. `CardContextMenuAndInlineEditTests` covers native context actions, editable window reuse, shared drafts, Save/Revert at narrow widths, draft recovery, keyboard selection, archived Cards, and ordinary click behavior. Historical inspector and mode-switching receipts remain in the pilot evidence. `CommentDraftRecoveryTests` uses an opt-in Debug demo fixture to verify Copy, Export, and Retry after local write failures. UI-test signing must retain the user-selected file read/write entitlement for the native export panel.
+`WorkspaceCreationTests` covers the native creation form, address validation, duplicate-address errors, new Workspace selection, the empty Projects state, and retained Card drafts. The Tart demo pilot uses synthetic data and a 1920×1080 guest display. Run UI automation inside the dedicated macOS VM. `ColumnLayoutAndInlineCommentTests` covers the default presentation, adaptive header, filtering, navigation, and inline comment drafts and submission. `CardContextMenuAndInlineEditTests` covers native context actions, editable window reuse, shared drafts, Save/Revert at narrow widths, draft recovery, keyboard selection, archived Cards, and ordinary click behavior. Historical inspector and mode-switching receipts remain in the pilot evidence. `CommentDraftRecoveryTests` uses an opt-in Debug demo fixture to verify Copy, Export, and Retry after local write failures. UI-test signing must retain the user-selected file read/write entitlement for the native export panel.
 
 ## App icon
 

@@ -14,7 +14,10 @@ final class AppModel {
     private var workspaceMutationGenerations: [String: UUID] = [:]
     private var workspaceRefreshes: [String: UUID] = [:]
     private var workspaceLoadID: UUID?
+    private var workspaceCreationID: UUID?
+    private var uncertainWorkspaceCreationBaselines: [WorkspaceCreationIntent: Set<String>] = [:]
     private(set) var loadingWorkspaces = false
+    private(set) var creatingWorkspace = false
     private(set) var workspaceLoadFailed = false
     private(set) var signedIn = false
     private(set) var restoring = true
@@ -43,6 +46,7 @@ final class AppModel {
             }
             signedIn = true
             restoring = false
+            guard !ProcessInfo.processInfo.arguments.contains("--demo-empty-workspaces") else { return }
             workspaces = [Workspace(id: "demo-workspace", slug: "demo", name: "Demo Workspace", url: URL(string: "https://demo.invalid")!)]
             let timestamp = ServerTimestamp.string()
             let card = Card(id: "demo-card", title: "Review the iPhone app", body: "Check the native Card workflow.", nextActor: .human, nextAction: "Review the changes", priority: .high, blockedReason: "", columnId: "next", position: 0, version: 1, createdAt: timestamp, updatedAt: timestamp, comments: [])
@@ -53,6 +57,78 @@ final class AppModel {
     }
 
     var ownerID: String { isDemo ? "demo-owner" : api.credential?.owner.id ?? "signed-out" }
+
+    var canCreateWorkspace: Bool {
+        let credentialIsCurrent = isDemo || api.credential.flatMap { ServerTimestamp.date(from: $0.expiresAt) }.map { $0 > .now } == true
+        return signedIn && credentialIsCurrent && !restoring && !signingIn
+            && !signOutPending && !endingSession && !creatingWorkspace
+    }
+
+    func createWorkspace(name: String, slug: String) async throws -> Workspace {
+        guard canCreateWorkspace else { throw CancellationError() }
+        let intent = try WorkspaceCreationIntent(name: name, slug: slug)
+        let baseline = uncertainWorkspaceCreationBaselines[intent] ?? Set(workspaces.map(\.id))
+        let session = api.sessionGeneration
+        let creation = UUID()
+        workspaceCreationID = creation
+        creatingWorkspace = true
+        defer {
+            if workspaceCreationID == creation {
+                workspaceCreationID = nil
+                creatingWorkspace = false
+            }
+        }
+        do {
+            let saved: Workspace
+            if isDemo {
+                guard !workspaces.contains(where: { $0.slug == intent.slug }) else {
+                    throw APIError(message: "Workspace address is already in use.", statusCode: 409)
+                }
+                guard workspaces.count < 10 else {
+                    throw APIError(message: "You can create up to 10 Workspaces.", statusCode: 403)
+                }
+                saved = Workspace(id: UUID().uuidString, slug: intent.slug, name: intent.name,
+                    url: URL(string: "https://\(intent.slug).demo.invalid")!)
+            } else {
+                do { saved = try await api.createWorkspace(name: intent.name, slug: intent.slug) }
+                catch let error as APIError {
+                    if error.isUnauthorized { handle(error); throw CancellationError() }
+                    try requireWorkspaceCreationSession(creation, session: session)
+                    if error.isAmbiguousMutation, uncertainWorkspaceCreationBaselines[intent] == nil {
+                        // Retain the inventory from before the original attempt across
+                        // retries. A known Workspace cannot confirm a new creation.
+                        uncertainWorkspaceCreationBaselines[intent] = baseline
+                    }
+                    guard error.isAmbiguousMutation || (error.isConflict && uncertainWorkspaceCreationBaselines[intent] != nil) else { throw error }
+                    let incoming: [Workspace]
+                    do { incoming = try await api.workspaces() }
+                    catch {
+                        // A failed read cannot prove that the original create failed.
+                        // Preserve its uncertainty so retrying the same address is safe.
+                        if (error as? APIError)?.isUnauthorized == true || error is CancellationError { throw error }
+                        throw APIError(message: "Workspace creation was not confirmed. Check your connection and retry the same name and address.",
+                            isAmbiguousMutation: true, sessionGeneration: session)
+                    }
+                    try requireWorkspaceCreationSession(creation, session: session)
+                    guard let reconciled = incoming.first(where: { $0.slug == intent.slug && $0.name == intent.name && !baseline.contains($0.id) }) else { throw error }
+                    workspaces = incoming
+                    saved = reconciled
+                }
+            }
+            try requireWorkspaceCreationSession(creation, session: session)
+            // Invalidate older AppModel reads as well as the transport's origin list.
+            workspaceLoadID = nil
+            loadingWorkspaces = false
+            workspaceLoadFailed = false
+            if let index = workspaces.firstIndex(where: { $0.id == saved.id }) { workspaces[index] = saved }
+            else { workspaces.append(saved) }
+            uncertainWorkspaceCreationBaselines.removeValue(forKey: intent)
+            return saved
+        } catch {
+            if workspaceCreationID == creation, (error as? APIError)?.isUnauthorized == true { handle(error) }
+            throw error
+        }
+    }
 
     func restore() async {
         guard restoring else { return }
@@ -134,6 +210,9 @@ final class AppModel {
         if !isDemo { defaults.set(true, forKey: Self.signOutIntentKey) }
         signedIn = false
         workspaceLoadID = nil
+        workspaceCreationID = nil
+        creatingWorkspace = false
+        uncertainWorkspaceCreationBaselines = [:]
         loadingWorkspaces = false
         workspaceLoadFailed = false
         workspaces = []
@@ -286,6 +365,9 @@ final class AppModel {
         guard !(error is CancellationError) else { return }
         if let generation = (error as? APIError)?.sessionGeneration, generation != api.sessionGeneration { return }
         if let error = error as? APIError, error.isUnauthorized {
+            workspaceCreationID = nil
+            creatingWorkspace = false
+            uncertainWorkspaceCreationBaselines = [:]
             signedIn = false
             workspaces = []
             projectLists = [:]
@@ -295,6 +377,11 @@ final class AppModel {
     }
 
     func isConflict(_ error: Error) -> Bool { (error as? APIError)?.isConflict == true || (error as? AppFailure) == .conflict }
+
+    private func requireWorkspaceCreationSession(_ creation: UUID, session: UUID) throws {
+        guard workspaceCreationID == creation, session == api.sessionGeneration,
+              signedIn, !signOutPending, !endingSession else { throw CancellationError() }
+    }
 
     private func refreshAfterConfirmedMutation(projectID: String, in workspace: Workspace, confirmation: String) async {
         do {
@@ -352,5 +439,25 @@ enum AppFailure: LocalizedError, Equatable {
         case .missingProject: "The Project is unavailable. Refresh and try again."
         case .conflict: "This Card changed while you were editing. Review the latest saved values before saving."
         }
+    }
+}
+
+private struct WorkspaceCreationIntent: Hashable {
+    let name: String
+    let slug: String
+
+    init(name: String, slug: String) throws {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let slug = slug.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !name.isEmpty, name.utf16.count <= 120,
+              !name.unicodeScalars.contains(where: { [0, 10, 13].contains($0.value) }) else {
+            throw APIError(message: "Workspace name must be 120 characters or fewer and stay on one line.")
+        }
+        guard slug.range(of: "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$", options: .regularExpression) != nil,
+              !["api", "app", "auth", "admin", "www"].contains(slug) else {
+            throw APIError(message: "Choose a Workspace address using lowercase letters, numbers, and hyphens.")
+        }
+        self.name = name
+        self.slug = slug
     }
 }

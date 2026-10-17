@@ -118,6 +118,224 @@ test("real passkeys create isolated owner Workspaces and scoped agent keys", asy
   } finally { await Promise.allSettled([secondContext.close(), harness.stop()]); }
 });
 
+test("Workspace menu creates another Workspace, keeps errors, cancels back, and switches without leaking Projects", async ({ page, context }) => {
+  test.setTimeout(90_000);
+  const harness = await startHarness();
+  await authenticator(context, page);
+  try {
+    await signup(page, harness, "studio");
+    await createProject(page, "Studio private project");
+    const switcher = page.getByRole("button", { name: "Workspace: studio Workspace", exact: true });
+    await switcher.click();
+    await expect(page.locator("#workspace-switcher-panel")).toContainText("current Workspace");
+    await expect(page.getByRole("button", { name: "New Workspace…", exact: true })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#workspace-switcher-panel")).toHaveCount(0);
+    await expect(switcher).toBeFocused();
+    await switcher.click();
+    await page.getByRole("button", { name: "New Workspace…", exact: true }).click();
+    await expect(page).toHaveURL(`${harness.rootOrigin}/`);
+    await expect(page.getByLabel("Workspace name", { exact: true })).toBeFocused();
+    await page.getByLabel("Workspace name", { exact: true }).fill("Cancelled Workspace");
+    await page.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(page).toHaveURL(`${harness.tenantOrigin("studio")}/`);
+    await expect(page.getByLabel("Active Project", { exact: true })).toContainText("Studio private project");
+    expect((await harness.accessStore.read()).workspaces).toHaveLength(1);
+
+    await page.setViewportSize({ width: 320, height: 720 });
+    await switcher.click();
+    await expectNoHorizontalOverflow(page, "320px Workspace menu");
+    await page.getByRole("button", { name: "New Workspace…", exact: true }).click();
+    await page.getByLabel("Workspace name", { exact: true }).fill("Research Workspace");
+    await page.getByLabel("Workspace address", { exact: true }).fill("bad address");
+    await page.getByRole("button", { name: "Create Workspace", exact: true }).click();
+    await expect(page.getByText("Workspace details needed", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("Workspace name", { exact: true })).toHaveValue("Research Workspace");
+    await expect(page.getByLabel("Workspace address", { exact: true })).toHaveValue("bad address");
+    await page.getByLabel("Workspace address", { exact: true }).fill("studio");
+    await page.getByRole("button", { name: "Create Workspace", exact: true }).click();
+    await expect(page.getByText("Workspace address is already in use.", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("Workspace name", { exact: true })).toHaveValue("Research Workspace");
+    await expect(page.getByLabel("Workspace address", { exact: true })).toHaveValue("studio");
+    await expectNoHorizontalOverflow(page, "320px Workspace creation validation");
+    await page.getByLabel("Workspace address", { exact: true }).fill("research");
+    await page.getByRole("button", { name: "Create Workspace", exact: true }).click();
+    await expect(page).toHaveURL(`${harness.tenantOrigin("research")}/`);
+    await expect(page.getByRole("heading", { name: "Create the first Project", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Workspace: Research Workspace", exact: true })).toBeVisible();
+    await expect(page.getByText("Studio private project", { exact: true })).toHaveCount(0);
+    expect((await harness.accessStore.read()).workspaces).toHaveLength(2);
+    await page.getByRole("button", { name: "Workspace: Research Workspace", exact: true }).click();
+    await page.getByRole("button", { name: "Switch Workspace…", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Choose a Workspace", exact: true })).toBeVisible();
+    await page.locator(".workspace-choice").filter({ hasText: "studio Workspace" }).getByRole("button", { name: "Open", exact: true }).click();
+    await expect(page).toHaveURL(`${harness.tenantOrigin("studio")}/`);
+    await expect(page.getByLabel("Active Project", { exact: true })).toContainText("Studio private project");
+  } finally { await harness.stop(); }
+});
+
+test("Workspace navigation preserves an unsaved new Card and Comment", async ({ page, context }) => {
+  test.setTimeout(60_000);
+  const harness = await startHarness();
+  await authenticator(context, page);
+  try {
+    await signup(page, harness, "drafts");
+    await createProject(page, "Draft Project");
+    await page.getByRole("button", { name: "Actions", exact: true }).click();
+    await page.getByRole("button", { name: "New Card", exact: true }).click();
+    await page.getByLabel("Title", { exact: true }).fill("A retained new Card");
+    await page.getByRole("button", { name: "Workspace: drafts Workspace", exact: true }).click();
+    await page.getByRole("button", { name: "New Workspace…", exact: true }).click();
+    await expect(page).toHaveURL(`${harness.tenantOrigin("drafts")}/`);
+    await expect(page.getByText("Workspace change paused", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("Title", { exact: true })).toHaveValue("A retained new Card");
+    await page.locator(".card-inspector").getByRole("button", { name: "Create Card", exact: true }).click();
+    await expect(page.getByLabel("Add Comment", { exact: true })).toBeVisible();
+    await page.getByLabel("Add Comment", { exact: true }).fill("Keep this unsent Comment");
+    await page.getByRole("button", { name: "Workspace: drafts Workspace", exact: true }).click();
+    await page.getByRole("button", { name: "Switch Workspace…", exact: true }).click();
+    await expect(page).toHaveURL(`${harness.tenantOrigin("drafts")}/`);
+    await expect(page.getByText("Workspace change paused", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("Add Comment", { exact: true })).toHaveValue("Keep this unsent Comment");
+    expect((await harness.accessStore.read()).workspaces).toHaveLength(1);
+  } finally { await harness.stop(); }
+});
+
+test("Workspace creation reconciles a lost response and retries opening without another creation", async ({ page, context }) => {
+  test.setTimeout(60_000);
+  const harness = await startHarness();
+  await authenticator(context, page);
+  let creationRequests = 0;
+  let handoffRequests = 0;
+  try {
+    await signup(page, harness, "original");
+    await page.getByRole("button", { name: "Workspace: original Workspace", exact: true }).click();
+    await page.getByRole("button", { name: "New Workspace…", exact: true }).click();
+    await page.route("**/api/workspaces", async route => {
+      if (route.request().method() !== "POST") return route.continue();
+      creationRequests += 1;
+      await route.fetch();
+      await route.abort("failed");
+    });
+    await page.route("**/api/workspace-handoffs", async route => {
+      handoffRequests += 1;
+      if (handoffRequests === 1) return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "Workspace opening is temporarily unavailable." }) });
+      return route.continue();
+    });
+    await page.getByLabel("Workspace name", { exact: true }).fill("Created once");
+    await page.getByLabel("Workspace address", { exact: true }).fill("created-once");
+    await page.getByRole("button", { name: "Create Workspace", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Workspace created", exact: true })).toBeVisible();
+    await expect(page.getByText("Workspace created; opening failed", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Create Workspace", exact: true })).toHaveCount(0);
+    await page.getByRole("button", { name: "Open Workspace", exact: true }).click();
+    await expect(page).toHaveURL(`${harness.tenantOrigin("created-once")}/`);
+    await expect(page.getByRole("heading", { name: "Create the first Project", exact: true })).toBeVisible();
+    expect(creationRequests).toBe(1);
+    expect((await harness.accessStore.read()).workspaces).toHaveLength(2);
+  } finally { await harness.stop(); }
+});
+
+test("an uncertain Workspace creation retries its original intent and never adopts a known duplicate", async ({ page, context }) => {
+  test.setTimeout(60_000);
+  const harness = await startHarness();
+  await authenticator(context, page);
+  let dropPost = true;
+  let failRead = true;
+  let creationRequests = 0;
+  try {
+    await signup(page, harness, "existing");
+    await page.getByRole("button", { name: "Workspace: existing Workspace", exact: true }).click();
+    await page.getByRole("button", { name: "New Workspace…", exact: true }).click();
+    await expect(page.getByLabel("Workspace name", { exact: true })).toBeVisible();
+    await page.route("**/api/workspaces", async route => {
+      if (route.request().method() === "GET") {
+        if (failRead) return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "Inventory offline" }) });
+        return route.continue();
+      }
+      if (route.request().method() !== "POST") return route.continue();
+      creationRequests += 1;
+      if (dropPost) { await route.fetch(); return route.abort("failed"); }
+      return route.continue();
+    });
+    await page.getByLabel("Workspace name", { exact: true }).fill("Created after retry");
+    await page.getByLabel("Workspace address", { exact: true }).fill("retry-created");
+    await page.getByRole("button", { name: "Create Workspace", exact: true }).click();
+    await expect(page.getByText("Workspace creation could not be confirmed", { exact: true })).toBeVisible();
+    expect((await harness.accessStore.read()).workspaces).toHaveLength(2);
+    dropPost = false;
+    failRead = false;
+    await page.getByRole("button", { name: "Create Workspace", exact: true }).click();
+    await expect(page).toHaveURL(`${harness.tenantOrigin("retry-created")}/`);
+    expect(creationRequests).toBe(2);
+    expect((await harness.accessStore.read()).workspaces).toHaveLength(2);
+
+    await page.getByRole("button", { name: "Workspace: Created after retry", exact: true }).click();
+    await page.getByRole("button", { name: "New Workspace…", exact: true }).click();
+    dropPost = true;
+    await page.getByLabel("Workspace name", { exact: true }).fill("existing Workspace");
+    await page.getByLabel("Workspace address", { exact: true }).fill("existing");
+    await page.getByRole("button", { name: "Create Workspace", exact: true }).click();
+    await expect(page.getByText("Workspace creation could not be confirmed", { exact: true })).toBeVisible();
+    await expect(page).toHaveURL(`${harness.rootOrigin}/`);
+    await expect(page.getByLabel("Workspace name", { exact: true })).toHaveValue("existing Workspace");
+    await expect(page.getByRole("button", { name: "Open Workspace", exact: true })).toHaveCount(0);
+    dropPost = false;
+    await page.getByRole("button", { name: "Create Workspace", exact: true }).click();
+    await expect(page.getByText("Workspace address is already in use.", { exact: true })).toBeVisible();
+    await expect(page).toHaveURL(`${harness.rootOrigin}/`);
+  } finally { await harness.stop(); }
+});
+
+test("New Workspace intent survives passkey sign-in without storing the form draft", async ({ page, context }) => {
+  test.setTimeout(60_000);
+  const harness = await startHarness();
+  await authenticator(context, page);
+  try {
+    await signup(page, harness, "signin-intent");
+    await signout(page, harness);
+    await page.goto(`${harness.rootOrigin}/?new-workspace=1&return-workspace=signin-intent`);
+    await page.getByRole("button", { name: "Sign in", exact: true }).click();
+    await page.getByRole("button", { name: "Continue with passkey", exact: true }).click();
+    await expect(page).toHaveURL(`${harness.rootOrigin}/`);
+    await expect(page.getByRole("heading", { name: "Create a Workspace", exact: true })).toBeVisible();
+    await page.getByLabel("Workspace name", { exact: true }).fill("This draft stays in memory");
+    await page.getByLabel("Workspace address", { exact: true }).fill("not-persisted");
+    const stored = await page.evaluate(() => JSON.stringify([Object.entries(localStorage), Object.entries(sessionStorage)]));
+    expect(stored).not.toContain("This draft stays in memory");
+    expect(stored).not.toContain("not-persisted");
+    await page.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(page).toHaveURL(`${harness.tenantOrigin("signin-intent")}/`);
+    await page.goto(`${harness.rootOrigin}/?workspaces=1`);
+    expect(await page.evaluate(() => sessionStorage.getItem("kanban.cards:workspace-route"))).toBeTruthy();
+    await page.getByRole("button", { name: "New Workspace…", exact: true }).click();
+    await page.getByRole("button", { name: "Sign out", exact: true }).click();
+    expect(await page.evaluate(() => sessionStorage.getItem("kanban.cards:workspace-route"))).toBeNull();
+  } finally { await harness.stop(); }
+});
+
+test("an owner with no Workspaces has a visible first-Workspace creation form", async ({ page, context }) => {
+  const harness = await startHarness();
+  await authenticator(context, page);
+  try {
+    await signup(page, harness, "removed");
+    await harness.accessStore.authTransaction(state => {
+      // Remove the fixture's consumed tenant handoffs with their Workspace so
+      // the empty-owner state retains the registry's referential guarantees.
+      state.handoffs = [];
+      state.workspaces = [];
+    });
+    await page.goto(harness.rootOrigin);
+    await expect(page.getByRole("heading", { name: "Create a Workspace", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Create Workspace", exact: true })).toBeVisible();
+    await page.getByLabel("Workspace name", { exact: true }).fill("First Workspace");
+    await page.getByLabel("Workspace address", { exact: true }).fill("first");
+    await page.getByRole("button", { name: "Create Workspace", exact: true }).click();
+    await expect(page).toHaveURL(`${harness.tenantOrigin("first")}/`);
+    await expect(page.getByRole("heading", { name: "Create the first Project", exact: true })).toBeVisible();
+  } finally { await harness.stop(); }
+});
+
 test("passkey sign-in returns to the same Workspace and sign-out revokes its browser family", async ({ page, context }) => {
   const harness = await startHarness();
   await authenticator(context, page);

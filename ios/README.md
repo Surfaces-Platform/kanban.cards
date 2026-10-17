@@ -10,6 +10,12 @@ Select the shared `KanbanCards` scheme. The project uses Swift 6, requires iOS 2
 
 Every application screen must use standard Apple components with system appearance and behavior. The [native app plan](../docs/iphone-native-app-plan.md) defines the component inventory. Use Apple's [Human Interface Guidelines](https://developer.apple.com/design/human-interface-guidelines), [Adopting Liquid Glass](https://developer.apple.com/documentation/technologyoverviews/adopting-liquid-glass), and [Materials guidance](https://developer.apple.com/design/human-interface-guidelines/materials) before changing the interface. Do not add custom control styles, materials, drawing, web views, or third-party UI dependencies.
 
+## Create and switch Workspaces
+
+Open the Workspace title menu above the Project list to switch Workspaces or choose **New Workspace…**. The native form asks for a name and address. Cancel preserves the selected Workspace; successful creation opens its empty Project list. Accounts with no Workspaces have a visible New Workspace action. Existing Card drafts remain available when switching back.
+
+Native creation uses the owner-session `POST /api/workspaces` contract. The backend change must be released before an installed client can create real Workspaces. Demo mode keeps creation in memory for isolated simulator testing.
+
 ## Build and test locally
 
 Run these commands from the repository root. Build outputs stay in the ignored local project directory.
