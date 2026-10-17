@@ -25,7 +25,7 @@ export KANBAN_CARDS_AUTH_HOST=auth.board.localhost:4317
 npm run dev
 ```
 
-Open `http://board.localhost:4317`, choose Start free, and create a passkey at `http://auth.board.localhost:4317`. Save the recovery code before opening the board. A returning owner chooses Sign in and uses their passkey. No email or password is required.
+Open `http://board.localhost:4317`, choose Create account, and create a passkey at `http://auth.board.localhost:4317`. Save the recovery code before opening the board. A returning owner chooses Sign in and uses their passkey. No email or password is required.
 
 Local development uses JSON files under `data/`. Production requires Postgres. `.env.example` lists configuration; export the values into the server process or set them in the hosting environment.
 

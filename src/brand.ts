@@ -1,4 +1,5 @@
 import { BRAND_ICON_REVISION, BRAND_WEB_ASSETS } from "./brand-web-assets";
+import { PUBLIC_HOME_TITLE } from "./public-website";
 
 export const BRAND_LOCKUP_ASSETS = [
   ["/brand-lockup.svg", "public/branding/brand-lockup.svg"],
@@ -11,7 +12,7 @@ export const BRAND_PUBLIC_ASSETS = [
 ] as const;
 
 export function renderBrandHead(): string {
-  return `  <meta name="description" content="A simple Kanban board for projects run by you and your agents.">
+  return `  <meta name="description" content="A shared board where you and your agents record work and its progress.">
   <meta name="application-name" content="kanban.cards">
   <meta name="apple-mobile-web-app-title" content="kanban.cards">
   <meta name="theme-color" content="#f8f7f2" media="(prefers-color-scheme: light)">
@@ -24,8 +25,8 @@ export function renderBrandHead(): string {
   <link rel="manifest" href="/site-${BRAND_ICON_REVISION}.webmanifest">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="kanban.cards">
-  <meta property="og:title" content="kanban.cards">
-  <meta property="og:description" content="A simple Kanban board for projects run by you and your agents.">
+  <meta property="og:title" content="${PUBLIC_HOME_TITLE}">
+  <meta property="og:description" content="A shared board where you and your agents record work and its progress.">
   <meta property="og:url" content="https://kanban.cards/">
   <meta property="og:image" content="https://kanban.cards/social-brand-v2.png">
   <meta property="og:image:type" content="image/png">
@@ -33,8 +34,8 @@ export function renderBrandHead(): string {
   <meta property="og:image:height" content="630">
   <meta property="og:image:alt" content="kanban.cards Split K mark and wordmark">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="kanban.cards">
-  <meta name="twitter:description" content="A simple Kanban board for projects run by you and your agents.">
+  <meta name="twitter:title" content="${PUBLIC_HOME_TITLE}">
+  <meta name="twitter:description" content="A shared board where you and your agents record work and its progress.">
   <meta name="twitter:image" content="https://kanban.cards/social-brand-v2.png">
   <meta name="twitter:image:alt" content="kanban.cards Split K mark and wordmark">`;
 }

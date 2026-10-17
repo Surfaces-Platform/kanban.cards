@@ -1,4 +1,6 @@
 import { renderProductName } from "../brand";
+import { passkeyFormCopy, publicPageTitle, renderPublicHomepage, renderPublicWebsite, usesPublicWebsite } from "../public-website";
+import "./public-website-menu";
 import { renderCardMarkdown } from "./markdown";
 import { startRegistration, startAuthentication, type PublicKeyCredentialCreationOptionsJSON, type PublicKeyCredentialRequestOptionsJSON } from "@simplewebauthn/browser";
 
@@ -955,17 +957,17 @@ function renderSignIn(): string {
   if (accessContext !== "local") {
     if (accessContext === "auth") {
       if (recoveryCode) return `<main class="access-view">${renderRecoveryCode()}</main>`;
-      if (!authIntent) return `<main class="access-view"><section class="access-card jk-panel">${renderProductName()}<h1>Open kanban.cards to continue</h1><p>Start from your app to create a Workspace or sign in.</p>${renderButton("Continue", "passkey-sign-in", { priority: "primary", disabled: !rootUrl })}</section></main>`;
+      if (!authIntent) return `<main class="access-view"><section class="access-card jk-panel">${renderProductName()}<h1>Open kanban.cards to continue</h1><p>Return to kanban.cards to create a Workspace or sign in.</p>${renderButton("Continue", "passkey-sign-in", { priority: "primary", disabled: !rootUrl })}</section></main>`;
       const mode = authIntent.mode;
       const heading = mode === "signup" ? "Create your Workspace" : mode === "setup" ? "Set up your passkey" : mode === "recover" ? "Recover your account" : mode === "add" ? "Add a passkey" : mode === "verify" ? "Verify your identity" : "Sign in";
       const workspaceFields = mode === "signup" ? renderField({ id: "signup-workspace-name", label: "Workspace name", control: renderTextInput({ id: "signup-workspace-name", name: "workspaceName", value: passkeyDraft.workspaceName, required: true, autofocus: true }) }) + renderField({ id: "signup-workspace-slug", label: "Workspace address", control: renderTextInput({ id: "signup-workspace-slug", name: "workspaceSlug", value: passkeyDraft.workspaceSlug, required: true, placeholder: "your-workspace" }), hint: "Lowercase letters, numbers, and hyphens." }) + renderField({ id: "signup-display-name", label: "Your name (optional)", control: renderTextInput({ id: "signup-display-name", name: "displayName", value: passkeyDraft.displayName, autocomplete: "name" }) }) : "";
       const secretField = mode === "setup" || mode === "recover" ? renderField({ id: "passkey-access-code", label: mode === "setup" ? "Setup token" : "Recovery code", control: renderTextInput({ id: "passkey-access-code", name: mode === "setup" ? "setupToken" : "recoveryCode", type: "password", autocomplete: "off", required: true, autofocus: true }) }) : "";
-      const registering = ["signup", "setup", "recover", "add"].includes(mode);
-      return `<main class="access-view"><section class="access-card jk-panel" aria-labelledby="access-title">${renderProductName()}<h1 id="access-title">${heading}</h1><p>${registering ? "Use your device or password manager to save a passkey." : "Use your passkey to continue."}</p>${notice}<form data-form="passkey" class="access-form">${workspaceFields}${secretField}<button class="jk-button" data-priority="primary" type="submit"${disabledAttribute()}>${mutationInFlight ? "Waiting for your passkey…" : registering ? "Create passkey" : "Continue with passkey"}</button></form>${renderButton("Back", "passkey-sign-in")}</section></main>`;
+      const { instruction, submitLabel } = passkeyFormCopy(mode);
+      return `<main class="access-view"><section class="access-card jk-panel" aria-labelledby="access-title">${renderProductName()}<h1 id="access-title">${heading}</h1><p>${instruction}</p>${notice}<form data-form="passkey" class="access-form">${workspaceFields}${secretField}<button class="jk-button" data-priority="primary" type="submit"${disabledAttribute()}>${mutationInFlight ? "Waiting for your passkey…" : submitLabel}</button></form>${renderButton("Back", "passkey-sign-in")}</section></main>`;
     }
     if (accessContext === "root") {
       if (authNotice?.kind === "signed-out") return `<main class="access-view"><section class="access-card jk-panel" aria-labelledby="access-title">${renderProductName()}<h1 id="access-title">Signed out</h1>${renderButton("Continue", "signed-out-continue", { priority: "primary" })}</section></main>`;
-      return `<main class="access-view"><section class="access-card jk-panel" aria-labelledby="access-title">${renderProductName()}<h1 id="access-title">Open your Workspace</h1>${notice}<div class="jk-actions">${renderButton("Start free", "start-signup", { priority: "primary", disabled: !loginUrl })}${renderButton("Sign in", "passkey-sign-in", { disabled: !loginUrl })}</div>${renderButton("Recover access", "start-recovery", { disabled: !loginUrl })}${setupAvailable ? renderButton("Set up existing account", "start-setup", { disabled: !loginUrl }) : ""}${authNotice?.kind === "sign-out-incomplete" ? renderButton("Retry sign out", "retry-global-sign-out") : ""}</section></main>`;
+      return renderPublicHomepage(renderButton("Create account", "start-signup", { priority: "primary", disabled: !loginUrl }) + renderButton("Sign in", "passkey-sign-in", { disabled: !loginUrl }), notice);
     }
     return `<main class="access-view"><section class="access-card jk-panel">${renderProductName()}<h1>Sign in</h1>${notice}${renderButton("Continue", "passkey-sign-in", { priority: "primary", disabled: !rootUrl })}${authNotice?.kind === "sign-out-incomplete" ? renderButton("Retry sign out", "retry-global-sign-out") : ""}</section></main>`;
   }
@@ -1531,13 +1533,20 @@ function render(): void {
     clearConfirmation();
   }
   document.body.dataset.state = currentUiState();
-  root.innerHTML = initialLoading || workspaceHandoffPending
+  const publicWebsite = usesPublicWebsite(accessContext, Boolean(session)) && !initialLoading && !workspaceHandoffPending && !signOutPending;
+  document.title = publicPageTitle({ context: accessContext, authenticated: Boolean(session), resolved: !initialLoading, pending: workspaceHandoffPending || signOutPending, authMode: authIntent?.mode, recoveryCodePresent: Boolean(recoveryCode), signedOut: authNotice?.kind === "signed-out" });
+  document.body.classList.toggle("public-website", publicWebsite);
+  const content = initialLoading || workspaceHandoffPending
     ? renderLoading()
     : signOutPending
       ? renderSignOutProgress()
       : session
         ? accessContext === "root" ? accessPanelOpen ? renderAccessSettings() : renderWorkspaceRoute() : renderWorkspace()
         : renderSignIn();
+  const utilities = publicWebsite && accessContext === "root" && authNotice?.kind !== "signed-out"
+    ? renderButton("Recover access", "start-recovery", { disabled: !loginUrl }) + (setupAvailable ? renderButton("Set up existing account", "start-setup", { disabled: !loginUrl }) : "") + (authNotice?.kind === "sign-out-incomplete" ? renderButton("Retry sign out", "retry-global-sign-out") : "")
+    : "";
+  root.innerHTML = publicWebsite ? renderPublicWebsite(content, rootUrl, utilities) : content;
   restoreDescriptionSelection();
   restorePendingContext();
 }

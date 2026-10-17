@@ -17,6 +17,18 @@ Context Dock is the only production interface direction.
 
 The client has passkey sign-up/sign-in, recovery, access settings, zero/one/many Workspace routing, scoped API key management, Project selection and empty state, the Project workspace, and Card detail and editing. Local development may show the access-key fallback when hosted passkey authentication is absent.
 
+## Public website scope
+
+- Signed-out root/auth views use `body.public-website`, a reversed-brand header/footer, a source-grounded public homepage, and the existing passkey forms. Loading, handoff, sign-out progress, local development, and signed-in views do not acquire that marker.
+- Public copy follows `docs/specs/website-family-copy.md`. It names the owner or authorized agent, states the installed-skill and write-access prerequisite for agent updates, and makes no pricing or automatic-execution promise. Recovery-mode instructions state credential revocation before the existing registration ceremony; other passkey modes retain their instructions.
+- The ordinary signed-out root follows `docs/specs/website-family-layout.md`: one edge-to-edge image hero, one left text stack, exactly two auth actions, one ruled three-item problem row, one connected five-step workflow, at most two supporting sentences, and a compact footer. Main copy stays within 220 words; `website-assets/copy-provenance.md` records its first-party sources.
+- Public headings use 40/32/24px desktop sizes and 32/24/20px sizes at widths up to 620px, with Inter weight 600 and zero tracking. Layout uses a separate 820px breakpoint.
+- Every public override in `website.css` is qualified by the public marker. The stylesheet loads after the unchanged Workbench styles; it must not redefine `--jk-*` tokens. Only its unique, self-hosted Inter font face is global.
+- Workspace selection, Manage access, Agent connections, and the Context Dock retain their current rendered font, colors, controls, and layout after sign-in. Sign-out restores the public shell and its existing bounded receipt.
+- The font and license are fingerprinted in `website-assets/manifest.json`. The static build verifies and copies them. Exact GET/HEAD routes expose only the website stylesheet, font, license, and fingerprinted hero WebP; private API routes, other methods, and encoded traversal remain restricted.
+- The mobile family menu closes on Escape and restores its summary focus. Outside clicks close it without rerendering the auth form or losing field drafts. Secondary public buttons retain a visible keyboard focus ring.
+- The four primary links lead to The work, How it works, Surfaces, and Handbooks. Recover access and conditional setup/retry controls are quiet footer utilities. Selecting a compact-menu link closes the menu. Auth-page home links use the existing validated initiating root. Form actions, labels, passkey ceremonies, recovery acknowledgement, and session/origin semantics remain unchanged.
+
 ## Resource model
 
 - A project is the board.
@@ -75,8 +87,8 @@ The client has passkey sign-up/sign-in, recovery, access settings, zero/one/many
 ## Authentication boundary
 
 - The static shell and dedicated sign-in surface render without authenticated Project data.
-- A signed-out application root offers `Start free`, `Sign in`, and `Recover access`. A configured, unclaimed existing account also offers `Set up existing account`.
-- `Start free` creates a private Workspace and owner together after a verified passkey registration. Signup collects the Workspace name and address and an optional display name. Sign-in uses a discoverable passkey without an email requirement.
+- A signed-out application root offers `Create account`, `Sign in`, and `Recover access`. A configured, unclaimed existing account also offers `Set up existing account`.
+- `Create account` creates a private Workspace and owner together after a verified passkey registration. Signup collects the Workspace name and address and an optional display name. Sign-in uses a discoverable passkey without an email requirement.
 - Authentication ceremonies run only on the exact dedicated auth host, using the auth host as the WebAuthn relying party. The browser begins at an authorized application root, posts to `/api/auth-start`, and immediately form-posts the returned intent token, browser nonce, and exact root origin to the configured `/api/passkeys/start`. Secrets never enter URLs or browser storage.
 - The auth host trusts only the server-verified auth intent from `/api/session`. Direct navigation without an intent offers a return to the app root. No Workspace, Project, or app-session data API is available on the auth host.
 - Registration and authentication use the supported SimpleWebAuthn browser API. The client requests options from `/api/passkeys/options`, completes the device ceremony, and posts its response and challenge id to `/api/passkeys/verify`. Cancellation leaves a retryable public form. Setup and recovery credentials leave the form before the device ceremony and are never persisted.
@@ -106,7 +118,7 @@ Every control uses `.form-control`; selects also use `.select-control`. Fallback
 
 - Production imports the pinned JudgmentKit `judgmentkit_default` Workbench source from `judgmentkit.css` before application styles.
 - `judgmentkit.css` is the only client stylesheet allowed to declare `--jk-*` tokens. `styles.css` consumes those canonical roles and must not redeclare them or create local lookalike tokens.
-- Application styles must not introduce literal colors, literal shadows, local or remote fonts, external assets, or unknown `--jk-*` roles. System and forced-color keywords remain valid where the platform requires them.
+- Workbench application styles must not introduce literal colors, literal shadows, local or remote fonts, external assets, or unknown `--jk-*` roles. The separate public `website.css` allowance above uses the approved Surfaces website palette and local Inter font only under the public marker. Remote font loading remains prohibited. System and forced-color keywords remain valid where the platform requires them.
 - Dynamic loading, Refresh, create progress, failure, stale recovery, archive, Undo, and Sign out are programmatic status messages. Routine successful Project, Card, Move, Comment, restore, discard, Refresh, and draft-retention confirmations use the single polite, atomic `#toast-region` without moving focus; each composes the JudgmentKit receipt-status anatomy and its non-color marker, the latest replaces the prior confirmation, and it clears after approximately five seconds. The changed resource remains the primary confirmation. A transient receipt must not cover Archive or sticky Card controls. Routine blur-save success is announced without adding visible persistent chrome. Errors, warnings, unconfirmed outcomes, conflicts, archived-draft recovery, archive Undo, and Sign out remain in their affected surface until resolved or superseded.
 - Visible controls have accessible names. Fields have programmatic labels, and validation errors use `aria-invalid` plus referenced error text.
 - Keyboard focus follows visible task order, remains visible, restores after Close, Back, Move Cancel, or Escape, and is not covered by sticky actions or the responsive Move disclosure.

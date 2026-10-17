@@ -28,7 +28,7 @@ The browser and skill are two clients of the same system:
 - A Project is the board. Columns express state. Cards carry the work. Comments and Activity preserve useful context.
 - Neither client maintains a second workflow model.
 
-Owners choose Start free, name a private Workspace, create a passkey, and save a recovery code. Successful verification creates the owner, Workspace, and credentials together. Returning owners sign in with a passkey; one Workspace opens directly and two or more require a choice. Owner authority uses the internal owner ID. Agents use scoped API keys backed by Workspace-bound AgentConnections.
+Owners choose Create account, name a private Workspace, create a passkey, and save a recovery code. Successful verification creates the owner, Workspace, and credentials together. Returning owners sign in with a passkey; one Workspace opens directly and two or more require a choice. Owner authority uses the internal owner ID. Agents use scoped API keys backed by Workspace-bound AgentConnections.
 
 The interface should feel like a focused work surface. It should not feel like an administration console for agents, permissions, or workflows.
 
@@ -94,11 +94,21 @@ These qualities are outcomes, not inherited tokens. The new system must choose i
 
 Brand artwork uses the canonical outlined Inter 780 lockups in `brand/split-k/lockups/`. They use optical size 32, a 60px visible Split K, a 38px cap height, a 20px measured ink gap, and at least 24px outer padding. Scale the complete lockup uniformly. The lower arm stays Nickel `#8B9096` in both themes; the remaining shapes and wordmark use Ink `#0B0D0E` on light backgrounds and Warm ivory `#F7F6F2` on dark backgrounds. `brand/split-k/README.md` defines the horizontal and stacked compositions. This brand-artwork choice leaves the app’s system typography unchanged.
 
+## Public website and sign-in pages
+
+Mike selected public website and sign-in alignment with Surfaces on October 16, 2026. The ordinary signed-out root is a public homepage governed by `docs/specs/website-family-layout.md` and `docs/specs/website-family-copy.md`. One full-width raster hero sits behind left-aligned copy and the existing Create account and Sign in actions. A three-item ruled problem row and a connected five-step execution loop follow. Recover access and conditional setup/retry utilities remain available in the footer. The dedicated auth pages keep their current passkey fields, progress, recovery-code acknowledgement, validation, and initiating-root routing. `website-assets/copy-provenance.md` maps the homepage copy to current product sources.
+
+These public pages use a 1120px shell, 24px desktop and 16px mobile gutters, a 72px Ink header, and an Ink footer. Both contain the complete reversed canonical lockup. Public UI typography uses the included self-hosted Inter font at 16px/1.45, with 40/32/24px headings at weight 600 and zero tracking. At widths up to 620px, the three heading levels reduce to 32/24/20px. The 820px layout breakpoint controls the compact navigation, gutters, and footer independently. Controls are at least 48px high, with 14px labels at weight 500, 4px control corners, 8px panel corners, and quiet 120ms transitions. The palette follows the Surfaces website: Ink, Ivory, Nickel, Rule, White, and its neutral dark surface. Preserve semantic warning and error states.
+
+`website.css` owns this public treatment. Every selector is qualified by `body.public-website` or its descendant namespace. The client adds that marker only to signed-out root/auth views and removes it for every signed-in or local-development view. The unique font face may be declared globally; it is used only by the public namespace. `website-assets/manifest.json` records the unchanged font bytes, SIL Open Font License, and generated hero fingerprint. `website-assets/art-provenance.json` records the hero source and prompt. The hero is decorative page artwork, not an application screenshot or brand master.
+
+Signed-in Workspace selection, access settings, Agent connections, and the Context Dock retain the pinned JudgmentKit Workbench tokens, system typography, layout, and behavior. Their shared access-card classes must not receive unqualified website overrides. Native Apple interfaces and canonical brand artwork remain separate and unchanged.
+
 ## Required surfaces
 
 ### Sign in
 
-The signed-out application root offers `Start free`, `Sign in`, and `Recover access`. Each action opens the corresponding passkey form on the dedicated auth host and preserves the exact initiating root. The form asks only for the fields needed for that task and a short instruction to use the device or password manager.
+The signed-out application root offers `Create account`, `Sign in`, and `Recover access`. Each action opens the corresponding passkey form on the dedicated auth host and preserves the exact initiating root. The form asks only for the fields needed for that task and a short instruction to use the device or password manager.
 
 Signup asks for the Workspace name and address, then offers `Create passkey`. After verification, show the recovery code once and ask the owner to save it before entering the board. Sign-in offers `Continue with passkey`. The forms require no email or password.
 
@@ -234,7 +244,7 @@ The alternative **Focus Workspace** remains comparison evidence, not a second pr
 
 ### Visual system
 
-- Use JudgmentKit's `judgmentkit_default` source with the `workbench` surface pattern.
+- Use JudgmentKit's `judgmentkit_default` source with the `workbench` surface pattern for signed-in and local-development screens. Public root/auth pages use the scoped website treatment defined above.
 - Use the exact `--jk-*` token roles, system typography, and component and pattern contracts; do not recreate the appearance with local lookalike tokens.
 - Lucide is the icon authority when an icon materially improves comprehension. Text controls remain valid when an icon would add noise.
 - Keep the surface calm, compact, and low-elevation. Selection, focus, validation, stale state, action progress, and receipts are the justified sources of salience.
