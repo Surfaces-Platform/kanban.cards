@@ -1536,16 +1536,14 @@ function restorePendingContext(): void {
   pendingFocusId = null;
   pendingFocusRestore = null;
   pendingScrollRestore = null;
-  window.requestAnimationFrame(() => {
-    if (scrollTop !== null) window.scrollTo({ top: scrollTop });
-    let target = focusId ? document.getElementById(focusId) : focusTarget ? findFocusTarget(focusTarget) : null;
-    if (!target && focusTarget?.action === "open-card" && activeProject) {
-      const card = activeProject.cards.find((candidate) => candidate.id === focusTarget.cardId);
-      const heading = document.getElementById(`column-${safeId(card?.columnId || selectedMobileColumn(activeProject))}`);
-      target = heading?.getClientRects().length ? heading : document.getElementById("board-filter-next-actor");
-    }
-    target?.focus();
-  });
+  if (scrollTop !== null) window.scrollTo({ top: scrollTop });
+  let target = focusId ? document.getElementById(focusId) : focusTarget ? findFocusTarget(focusTarget) : null;
+  if (!target && focusTarget?.action === "open-card" && activeProject) {
+    const card = activeProject.cards.find((candidate) => candidate.id === focusTarget.cardId);
+    const heading = document.getElementById(`column-${safeId(card?.columnId || selectedMobileColumn(activeProject))}`);
+    target = heading?.getClientRects().length ? heading : document.getElementById("board-filter-next-actor");
+  }
+  target?.focus();
 }
 
 function render(): void {
@@ -3237,12 +3235,8 @@ async function handleAction(button: HTMLElement): Promise<void> {
     workspaceMenuOpen = !workspaceMenuOpen;
     accountPanelOpen = false;
     projectActionsOpen = false;
-    const focus: FocusTarget = { action: workspaceMenuOpen ? "choose-workspace" : "toggle-workspace-menu", occurrence: 0 };
-    pendingFocusRestore = focus;
+    pendingFocusRestore = { action: workspaceMenuOpen ? "choose-workspace" : "toggle-workspace-menu", occurrence: 0 };
     render();
-    // Replacing the trigger temporarily leaves focus on the document body. Keep
-    // immediate Escape/Tab input inside the new disclosure while context restores.
-    findFocusTarget(focus)?.focus();
     return;
   }
   if (action === "toggle-account-panel") {
