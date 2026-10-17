@@ -1564,6 +1564,10 @@ function render(): void {
   const utilities = publicWebsite && accessContext === "root" && authNotice?.kind !== "signed-out"
     ? (setupAvailable ? renderButton("Set up existing account", "start-setup", { disabled: !loginUrl }) : "") + (authNotice?.kind === "sign-out-incomplete" ? renderButton("Retry sign out", "retry-global-sign-out") : "")
     : "";
+  const activeElement = document.activeElement;
+  if (!pendingFocusId && !pendingFocusRestore && activeElement instanceof HTMLElement && root.contains(activeElement) && activeElement.id) {
+    pendingFocusId = activeElement.id;
+  }
   root.innerHTML = publicWebsite ? renderPublicWebsite(content, rootUrl, utilities) : content;
   restoreDescriptionSelection();
   restorePendingContext();
