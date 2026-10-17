@@ -82,8 +82,8 @@ for (const theme of ["light", "dark"] as const) {
       expect(await page.locator("#workload").evaluate(section => section.getBoundingClientRect().top)).toBe(632);
       expect(await page.locator(".website-hero .website-eyebrow").evaluate(label => {
         const style = getComputedStyle(label);
-        return { top: label.getBoundingClientRect().top, color: style.color, rule: style.borderLeftWidth, ruleColor: style.borderLeftColor };
-      })).toEqual({ top: 152, color: "rgb(247, 246, 242)", rule: "2px", ruleColor: "rgb(139, 144, 150)" });
+        return { top: label.getBoundingClientRect().top, color: style.color, rule: style.borderInlineStartWidth, padding: style.paddingInlineStart, aligned: label.getBoundingClientRect().left === document.querySelector(".website-hero h1")!.getBoundingClientRect().left };
+      })).toEqual({ top: 152, color: "rgb(247, 246, 242)", rule: "0px", padding: "0px", aligned: true });
       for (const row of [".website-problem-row", ".website-workflow-row"]) {
         const notch = await page.locator(row + " > li").first().evaluate(item => {
           const notch = getComputedStyle(item, "::after");
