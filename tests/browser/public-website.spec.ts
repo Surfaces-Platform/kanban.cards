@@ -35,6 +35,7 @@ for (const theme of ["light", "dark"] as const) {
     const privateSurface = theme === "light" ? "rgb(255, 255, 255)" : "rgb(24, 29, 27)";
     async function expectWorkbench(): Promise<void> {
       await expect(page.locator("body")).not.toHaveClass(/public-website/);
+      await expect(page.locator("body")).not.toHaveClass(/website-menu-open/);
       await expect(page.locator(".website-header")).toHaveCount(0);
       expect(await page.locator("body").evaluate(body => getComputedStyle(body).fontFamily)).toContain("system-ui");
       expect(await page.locator("body").evaluate(body => getComputedStyle(body).fontFamily)).not.toContain("Inter Website");
@@ -66,10 +67,39 @@ for (const theme of ["light", "dark"] as const) {
         return { metrics, interLoaded: document.fonts.check('600 32px "Inter Website"') };
       });
       expect(headingMetrics).toEqual({ metrics: [["32px", "600", "36.8px"], ["24px", "600", "27.6px"], ["20px", "600", "23px"]], interLoaded: true });
+      expect(await page.locator(".website-lead").evaluate(lead => {
+        const style = getComputedStyle(lead);
+        return { size: style.fontSize, line: style.lineHeight };
+      })).toEqual({ size: "16px", line: "23.2px" });
+      const mobileFooter = await page.locator(".website-footer-inner").evaluate(footer => {
+        const brand = footer.querySelector(".website-brand")!.getBoundingClientRect();
+        const [description, copyright] = footer.querySelectorAll(".website-footer-copy p");
+        return { brandToCopy: description.getBoundingClientRect().top - brand.bottom, copyToCopyright: copyright.getBoundingClientRect().top - description.getBoundingClientRect().bottom, paragraphMargin: getComputedStyle(copyright).marginTop };
+      });
+      expect(mobileFooter).toEqual({ brandToCopy: 12, copyToCopyright: 12, paragraphMargin: "0px" });
+      const compactMenu = page.locator(".website-menu");
+      await compactMenu.locator("summary").click();
+      await expect(compactMenu.locator("summary")).toHaveAttribute("aria-expanded", "true");
+      await expect(page.locator("body")).toHaveClass(/website-menu-open/);
+      expect(await compactMenu.locator("nav").evaluate(nav => {
+        const bounds = nav.getBoundingClientRect();
+        const style = getComputedStyle(nav);
+        return { x: bounds.x, y: bounds.y, width: bounds.width, padding: style.padding, background: style.backgroundColor, rowHeights: Array.from(nav.querySelectorAll("a"), link => link.getBoundingClientRect().height), rowColors: Array.from(nav.querySelectorAll("a"), link => getComputedStyle(link).color) };
+      })).toEqual({ x: 0, y: 72, width: 390, padding: "12px 16px 24px", background: "rgb(11, 13, 14)", rowHeights: [52, 52, 52, 52], rowColors: Array(4).fill("rgb(218, 215, 207)") });
+      expect(await compactMenu.locator(".website-menu-bars").evaluate(icon => getComputedStyle(icon).display)).toBe("none");
+      expect(await compactMenu.locator(".website-menu-close").evaluate(icon => getComputedStyle(icon).display)).toBe("block");
+      await compactMenu.locator('a[href$="#workload"]').click();
+      await expect(compactMenu).not.toHaveAttribute("open", "");
+      await expect(compactMenu.locator("summary")).toHaveAttribute("aria-expanded", "false");
+      await expect(page.locator("body")).not.toHaveClass(/website-menu-open/);
+      await page.goto(rootOrigin);
       await page.setViewportSize({ width: 700, height: 844 });
       await expect.poll(() => page.locator("h1").evaluate(heading => getComputedStyle(heading).fontSize)).toBe("40px");
       await expect(page.locator(".website-menu")).toBeVisible();
+      await page.locator(".website-menu summary").click();
       await page.setViewportSize({ width: 1280, height: 900 });
+      await expect(page.locator(".website-menu")).not.toHaveAttribute("open", "");
+      await expect(page.locator("body")).not.toHaveClass(/website-menu-open/);
       await expect(page.locator(".website-navigation")).toBeVisible();
       await expect(page.locator(".website-menu")).toBeHidden();
       await expect(page.locator(".website-hero-actions button")).toHaveCount(2);
@@ -82,8 +112,11 @@ for (const theme of ["light", "dark"] as const) {
       expect(await page.locator("#workload").evaluate(section => section.getBoundingClientRect().top)).toBe(632);
       expect(await page.locator(".website-hero .website-eyebrow").evaluate(label => {
         const style = getComputedStyle(label);
-        return { top: label.getBoundingClientRect().top, color: style.color, rule: style.borderInlineStartWidth, padding: style.paddingInlineStart, aligned: label.getBoundingClientRect().left === document.querySelector(".website-hero h1")!.getBoundingClientRect().left };
-      })).toEqual({ top: 152, color: "rgb(247, 246, 242)", rule: "0px", padding: "0px", aligned: true });
+        return { top: label.getBoundingClientRect().top, color: style.color, rule: style.borderInlineStartWidth, padding: style.paddingInlineStart, aligned: label.getBoundingClientRect().left === document.querySelector(".website-hero h1")!.getBoundingClientRect().left, size: style.fontSize, tracking: style.letterSpacing, bottomGap: style.marginBottom };
+      })).toEqual({ top: 152, color: "rgb(247, 246, 242)", rule: "0px", padding: "0px", aligned: true, size: "14px", tracking: "normal", bottomGap: "20px" });
+      for (const [selector, gap] of [[".website-problem", 40], [".website-workflow", 48]] as const) {
+        expect(await page.locator(selector).evaluate(section => section.querySelector("ol")!.getBoundingClientRect().top - section.querySelector("h2")!.getBoundingClientRect().bottom)).toBe(gap);
+      }
       for (const row of [".website-problem-row", ".website-workflow-row"]) {
         const notch = await page.locator(row + " > li").first().evaluate(item => {
           const notch = getComputedStyle(item, "::after");
@@ -185,8 +218,11 @@ for (const theme of ["light", "dark"] as const) {
       const menu = page.locator(".website-menu");
       await menu.locator("summary").click();
       await expect(menu).toHaveAttribute("open", "");
+      await expect(menu.locator("summary")).toHaveAttribute("aria-expanded", "true");
       await page.keyboard.press("Escape");
       await expect(menu).not.toHaveAttribute("open", "");
+      await expect(menu.locator("summary")).toHaveAttribute("aria-expanded", "false");
+      await expect(page.locator("body")).not.toHaveClass(/website-menu-open/);
       await expect(menu.locator("summary")).toBeFocused();
       await expect(page.getByLabel("Workspace name", { exact: true })).toHaveValue("First synthetic Workspace");
       await expect(page.getByLabel("Workspace address", { exact: true })).toHaveValue("first");
