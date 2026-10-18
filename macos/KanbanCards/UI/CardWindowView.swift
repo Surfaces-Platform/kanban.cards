@@ -204,7 +204,7 @@ struct CardWindowView: View {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Text(comment.author).fontWeight(.semibold)
                         if let date = ServerTimestamp.date(from: comment.createdAt) {
-                            Text(date, style: .relative).font(.subheadline).foregroundStyle(.secondary)
+                            Text(date, style: .relative).font(.subheadline).foregroundStyle(Color.primary)
                         }
                     }.accessibilityElement(children: .combine)
                     Text(verbatim: comment.body).textSelection(.enabled)

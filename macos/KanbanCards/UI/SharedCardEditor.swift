@@ -142,6 +142,13 @@ struct SharedCardEditorView: View {
             .accessibilityIdentifier("editor.save")
     }
 
+    private var columnOptions: [NativePopUpOption<String>] {
+        let available = session.columns.map { NativePopUpOption(title: $0.name, value: $0.id) }
+        guard !session.columns.contains(where: { $0.id == session.pending.draft.columnId }) else { return available }
+        return [.init(title: session.pending.draft.columnId.isEmpty ? "Choose a Column" : "Unavailable Column",
+                      value: session.pending.draft.columnId)] + available
+    }
+
     private var editorForm: some View {
         Form {
             if session.saving {
@@ -202,25 +209,38 @@ struct SharedCardEditorView: View {
                 Section { Text("This Card or its Project is unavailable, archived, or read-only. Your local draft is retained.") }
             }
             Section {
-                TextField("Title (required)", text: $session.pending.draft.title)
-                    .accessibilityIdentifier("editor.title")
-                Picker("Column", selection: $session.pending.draft.columnId) {
-                    if !session.columns.contains(where: { $0.id == session.pending.draft.columnId }) {
-                        Text(session.pending.draft.columnId.isEmpty ? "Choose a Column" : "Unavailable Column")
-                            .tag(session.pending.draft.columnId)
-                    }
-                    ForEach(session.columns) { Text($0.name).tag($0.id) }
+                TextField(text: $session.pending.draft.title) {
+                    Text("Title (required)").foregroundStyle(Color.primary)
                 }
-                Picker("Next actor", selection: $session.pending.draft.nextActor) {
-                    Text("Unassigned").tag(CardNextActor?.none)
-                    ForEach(CardNextActor.allCases) { Text($0.label).tag(Optional($0)) }
+                .accessibilityIdentifier("editor.title")
+                LabeledContent {
+                    NativePopUpPicker(label: "Column", selection: $session.pending.draft.columnId,
+                        options: columnOptions, identifier: "editor.column")
+                } label: {
+                    Text("Column").foregroundStyle(Color.primary)
                 }
-                Picker("Priority", selection: $session.pending.draft.priority) {
-                    Text("Unset").tag(CardPriority?.none)
-                    ForEach(CardPriority.allCases) { Text($0.rawValue).tag(Optional($0)) }
+                LabeledContent {
+                    NativePopUpPicker(label: "Next actor", selection: $session.pending.draft.nextActor,
+                        options: [.init(title: "Unassigned", value: CardNextActor?.none)]
+                            + CardNextActor.allCases.map { .init(title: $0.label, value: Optional($0)) },
+                        identifier: "editor.next-actor")
+                } label: {
+                    Text("Next actor").foregroundStyle(Color.primary)
                 }
-                TextField("Next action", text: $session.pending.draft.nextAction, axis: .vertical)
-                TextField("Blocker", text: $session.pending.draft.blockedReason, axis: .vertical)
+                LabeledContent {
+                    NativePopUpPicker(label: "Priority", selection: $session.pending.draft.priority,
+                        options: [.init(title: "Unset", value: CardPriority?.none)]
+                            + CardPriority.allCases.map { .init(title: $0.rawValue, value: Optional($0)) },
+                        identifier: "editor.priority")
+                } label: {
+                    Text("Priority").foregroundStyle(Color.primary)
+                }
+                TextField(text: $session.pending.draft.nextAction, axis: .vertical) {
+                    Text("Next action").foregroundStyle(Color.primary)
+                }
+                TextField(text: $session.pending.draft.blockedReason, axis: .vertical) {
+                    Text("Blocker").foregroundStyle(Color.primary)
+                }
                 if session.columns.isEmpty {
                     Text("This Project has no available Columns. Refresh the Project before saving.")
                         .font(.caption).foregroundStyle(.secondary).accessibilityIdentifier("editor.validation")
