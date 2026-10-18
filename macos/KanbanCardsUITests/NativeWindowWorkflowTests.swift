@@ -544,6 +544,76 @@ final class NativeWindowWorkflowTests: XCTestCase {
         }
     }
 
+    func testNativeVoiceOverChangesCardPopupsAndPreservesSavedValues() throws {
+        guard #available(macOS 27.0, *) else { XCTFail("Requires the macOS 27 VoiceOver test service."); return }
+        try withVoiceOverDemo("Card popup activation, draft changes, and saved values",
+                              openExampleCards: true, resetBoardCursor: false) { flow in
+            let app = flow.app
+            focus(homepage, in: app)
+            let first = viewer(homepage, in: app)
+            let column = first.popUpButtons["editor.column"]
+            let actor = first.popUpButtons["editor.next-actor"]
+            let priority = first.popUpButtons["editor.priority"]
+            for popup in [column, actor, priority] {
+                XCTAssertTrue(popup.waitForExistence(timeout: 5))
+                XCTAssertTrue(popup.isEnabled)
+            }
+            XCTAssertEqual(column.value as? String, "Doing")
+            XCTAssertEqual(actor.value as? String, "You")
+            XCTAssertEqual(priority.value as? String, "High")
+
+            @MainActor
+            func selectCardPopup(_ label: String, popup: XCUIElement,
+                                 oldValue: String, newValue: String) throws {
+                try flow.scan("Card \(label) popup", terms: [label, oldValue], role: "pop up button", limit: 16)
+                try flow.activate("Open Card \(label) popup")
+                XCTAssertTrue(app.menuItems[newValue].firstMatch.waitForExistence(timeout: 5),
+                              "VO-Space must open the Card popup's native menu.")
+                for index in 1...8 {
+                    if flow.lastSpeech.localizedCaseInsensitiveContains(newValue) { break }
+                    app.typeKey(XCUIKeyboardKey.downArrow.rawValue, modifierFlags: [.control, .option])
+                    try flow.current("Card \(label) menu item \(index)")
+                }
+                try flow.require("Card \(label) target option", terms: [newValue])
+                try flow.activate("Select Card \(label): \(newValue)")
+                XCTAssertEqual(popup.value as? String, newValue,
+                               "The accessibility action must update the Card draft binding.")
+            }
+
+            try flow.startCardReading()
+            try selectCardPopup("Column", popup: column, oldValue: "Doing", newValue: "Done")
+            try selectCardPopup("Next actor", popup: actor, oldValue: "You", newValue: "Agent")
+            try selectCardPopup("Priority", popup: priority, oldValue: "High", newValue: "Low")
+            assertEnabled(first.buttons["editor.save"])
+            let board = board(in: app)
+            let boardCard = board.buttons["board.card.\(homepage)"]
+            assertLabel(boardCard, contains: "You")
+            assertLabel(boardCard, contains: "High priority")
+            XCTAssertFalse(boardCard.label.contains("Low priority"), "Popup changes stay in the draft until Save.")
+
+            // Popup opening and selection above use actual VoiceOver actions.
+            // Cmd-S and ordinary window reopening establish the saved-state checks below.
+            first.typeKey("s", modifierFlags: .command)
+            assertLabel(boardCard, contains: "Agent")
+            assertLabel(boardCard, contains: "Low priority")
+            let doneColumn = board.descendants(matching: .any).matching(identifier: "board.column.done").firstMatch
+            XCTAssertTrue(doneColumn.buttons["board.card.\(homepage)"].exists,
+                          "Saving the Column selection must move the shared Card into Done.")
+            first.buttons[XCUIIdentifierCloseWindow].click()
+            XCTAssertTrue(first.waitForNonExistence(timeout: 5))
+            showBoard(app)
+            board.buttons["board.card.\(homepage)"].click()
+            let reopened = viewer(homepage, in: app)
+            XCTAssertTrue(reopened.waitForExistence(timeout: 5))
+            XCTAssertEqual(reopened.popUpButtons["editor.column"].value as? String, "Done")
+            XCTAssertEqual(reopened.popUpButtons["editor.next-actor"].value as? String, "Agent")
+            XCTAssertEqual(reopened.popUpButtons["editor.priority"].value as? String, "Low")
+            XCTAssertEqual(viewer(signup, in: app).popUpButtons["editor.priority"].value as? String, "Medium",
+                           "Changing the focused Card must preserve the other Card's values.")
+            XCTAssertEqual(app.windows.containing(.any, identifier: "card.window.\(homepage)").count, 1)
+        }
+    }
+
     func testNativeVoiceOverReadsCurrentCardContentAfterSave() throws {
         guard #available(macOS 27.0, *) else { XCTFail("Requires the macOS 27 VoiceOver test service."); return }
         try withVoiceOverDemo("Current Card speech after Save",
@@ -560,7 +630,9 @@ final class NativeWindowWorkflowTests: XCTestCase {
             XCTAssertTrue(body.waitForExistence(timeout: 5))
             let savedTitle = "Saved title"
             let savedAction = "Saved next action"
-            let savedBody = "Saved description"
+            // The service caps utterances at 64 characters, including the field label
+            // and cursor hint. Require the entire replacement body within that limit.
+            let savedBody = "Saved body"
             replace(title, with: savedTitle)
             replace(action, with: savedAction)
             replace(body, with: savedBody)
