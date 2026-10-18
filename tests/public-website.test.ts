@@ -30,6 +30,10 @@ test("public shell eligibility excludes every authenticated and local context", 
   assert.equal((html.match(/href="http:\/\/board.localhost:4322"/g) || []).length, 2);
   assert.ok(html.includes('href="https://surfaces.systems/"'));
   assert.ok(html.includes('href="https://handbooks.surfaces.systems/"'));
+  const menu = html.match(/<details class="website-menu">([\s\S]*?)<\/details>/)![1];
+  assert.ok(menu.includes('<summary aria-expanded="false" aria-controls="website-mobile-navigation">Menu'));
+  assert.equal((menu.match(/id="website-mobile-navigation"/g) || []).length, 1);
+  assert.equal((menu.match(/<a\b/g) || []).length, 4);
 });
 
 test("public homepage has the bounded source-grounded composition and two existing auth actions", () => {

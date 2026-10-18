@@ -1,6 +1,6 @@
 import { renderProductName } from "../brand";
 import { passkeyFormCopy, publicPageTitle, renderPublicHomepage, renderPublicWebsite, usesPublicWebsite } from "../public-website";
-import "./public-website-menu";
+import { syncPublicWebsiteMenu } from "./public-website-menu";
 import { renderCardMarkdown } from "./markdown";
 import { startRegistration, startAuthentication, type PublicKeyCredentialCreationOptionsJSON, type PublicKeyCredentialRequestOptionsJSON } from "@simplewebauthn/browser";
 
@@ -1569,6 +1569,7 @@ function render(): void {
     pendingFocusId = activeElement.id;
   }
   root.innerHTML = publicWebsite ? renderPublicWebsite(content, rootUrl, utilities) : content;
+  syncPublicWebsiteMenu();
   restoreDescriptionSelection();
   restorePendingContext();
 }
