@@ -271,7 +271,10 @@ struct MoveCardSheet: View {
     @State private var reloading = false
     @State private var errorMessage: String?
     @State private var openingSession: UUID?
+    @State private var editingSession: SharedCardEditingSession?
 
+    private var pendingOperation: Bool { editingSession?.pendingMove != nil || editingSession?.pending.submitted != nil || editingSession?.pending.confirmed != nil }
+    private var moveLabel: String { pendingOperation ? (editingSession?.confirmationLabel ?? "Check Saved Destination") : "Move" }
     private var project: Project? { model.project(id: projectID, in: workspace) }
     private var latest: Card? { project?.cards.first { $0.id == card.id } }
     private var validDestination: Bool { project?.columns.contains { $0.id == columnID } == true }
@@ -290,11 +293,15 @@ struct MoveCardSheet: View {
                     LabeledContent("Card", value: latest?.title ?? card.title)
                     Picker("Column", selection: $columnID) {
                         ForEach(project?.columns.sorted { $0.position < $1.position } ?? []) { Text($0.name).tag($0.id) }
-                    }.disabled(saving || reloading || readOnly)
+                    }.disabled(saving || reloading || readOnly || pendingOperation)
                     if readOnly { Text("This Card or its Project is unavailable or archived. Reload to check its current state.") }
                     else if !validDestination { Text("This Column is no longer available. Choose another Column.") }
                     else if columnID == latest?.columnId { Text("The Card is already in the selected Column.") }
-                    if saving { ProgressView("Moving Card") }
+                    if let intent = editingSession?.pendingMove {
+                        LabeledContent("Retained destination", value: project?.columns.first { $0.id == intent.columnID }?.name ?? intent.columnID)
+                        Text(intent.confirmedCard == nil ? "This Move is unconfirmed. Check saved placement before starting another action." : "Move confirmed. Finish local cleanup without moving again.")
+                    } else if pendingOperation { Text("Check the earlier Card save before starting a separate Move.") }
+                    if saving { ProgressView(moveLabel) }
                     if reloading { ProgressView("Reloading Card") }
                     if let errorMessage { Text(errorMessage).textSelection(.enabled) }
                     Button("Reload Latest Card") { Task { await reload() } }.disabled(saving || reloading)
@@ -304,14 +311,18 @@ struct MoveCardSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction).disabled(saving) }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Move") { Task { await move() } }.keyboardShortcut(.defaultAction)
-                        .disabled(saving || reloading || readOnly || !validDestination || columnID == latest?.columnId)
+                    Button(moveLabel) { Task { await move() } }.keyboardShortcut(.defaultAction)
+                        .disabled(saving || reloading || (!pendingOperation && (readOnly || !validDestination || columnID == latest?.columnId)))
                 }
             }
         }
         .frame(minWidth: 420, minHeight: 280)
         .interactiveDismissDisabled(saving)
-        .task { openingSession = model.sessionID }
+        .task {
+            openingSession = model.sessionID
+            editingSession = model.cardEditingSession(workspace: workspace, projectID: projectID, card: latest ?? card)
+            if let intent = editingSession?.pendingMove { columnID = intent.columnID }
+        }
     }
 
     private func reload() async {
@@ -327,16 +338,20 @@ struct MoveCardSheet: View {
     }
 
     private func move() async {
-        guard openingSession == model.sessionID, model.signedIn, !saving, !readOnly, validDestination else { return }
+        guard openingSession == model.sessionID, model.signedIn, !saving, (pendingOperation || (!readOnly && validDestination)) else { return }
         saving = true
         defer { saving = false }
         do {
-            _ = try await model.moveCard(cardID: card.id, to: columnID, projectID: projectID, in: workspace,
+            let moved = try await model.moveCard(cardID: card.id, to: columnID, projectID: projectID, in: workspace,
                 onRefreshFailure: onRefreshFailure)
-            if openingSession == model.sessionID { dismiss() }
+            if openingSession == model.sessionID {
+                if editingSession?.pendingMove != nil { errorMessage = editingSession?.persistenceError }
+                else if moved.columnId == columnID { dismiss() }
+                else { errorMessage = editingSession?.savedMessage }
+            }
         } catch {
             guard openingSession == model.sessionID, !(error is CancellationError) else { return }
-            errorMessage = "The move could not be confirmed. Reload the latest Card, then retry the selected destination. \(error.localizedDescription)"
+            errorMessage = error.localizedDescription
             if (error as? APIError)?.isUnauthorized == true { model.handle(error) }
         }
     }

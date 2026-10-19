@@ -1,0 +1,1150 @@
+{
+  "schemaVersion": 1,
+  "basis": {
+    "commit": "f3406b38b0c89bfdd65b909ce07c507f313a0084",
+    "interpretation": "Current source inventory at the base commit compared with the requested shared target. Aligned means the inspected source supports this feature scope; partial identifies a specific difference; missing means the client lacks the target path. These statuses do not establish runtime acceptance. The unmerged Direction A candidate is excluded."
+  },
+  "runtimeAcceptance": "pending",
+  "features": [
+    {
+      "id": "feature-workspace-create",
+      "name": "Create a Workspace",
+      "target": "Create a named Workspace with a validated address, retain entered values after errors, reconcile an uncertain creation without adopting a known duplicate, and open the created Workspace.",
+      "priority": "High",
+      "clients": {
+        "macos": {
+          "status": "aligned",
+          "detail": "Native form validates name/address; the model reconciles uncertain creation against the pre-request Workspace inventory.",
+          "sources": [
+            "macos/KanbanCards/UI/WorkspaceEditor.swift:14",
+            "macos/KanbanCards/Core/AppModel.swift:85"
+          ]
+        },
+        "ios": {
+          "status": "aligned",
+          "detail": "Native form and model support creation, address validation, retained form errors, and uncertain-creation reconciliation.",
+          "sources": [
+            "ios/KanbanCards/UI/WorkspaceEditor.swift:14",
+            "ios/KanbanCards/UI/AppModel.swift:67"
+          ]
+        },
+        "web": {
+          "status": "aligned",
+          "detail": "Root creation preserves the form and distinguishes a committed Workspace from a failed opening handoff.",
+          "sources": [
+            "src/client/context-dock.ts:1870",
+            "src/client/context-dock.ts:1909"
+          ]
+        }
+      }
+    },
+    {
+      "id": "feature-workspace-switch",
+      "name": "Switch Workspaces safely",
+      "target": "Choose an owned Workspace, show its Projects, preserve each Workspace's local drafts, and block navigation when pending work cannot be retained safely.",
+      "priority": "High",
+      "clients": {
+        "macos": {
+          "status": "aligned",
+          "detail": "Sidebar Workspace selection uses scoped Project caches and durable drafts; navigation is disabled during editor interaction locks.",
+          "sources": [
+            "macos/KanbanCards/UI/BoardView.swift:122",
+            "macos/KanbanCards/UI/BoardView.swift:190",
+            "macos/KanbanCards/Core/AppModel.swift:751"
+          ]
+        },
+        "ios": {
+          "status": "partial",
+          "detail": "Workspace title menu switches Workspaces and drafts persist, but editor state does not use the Mac owner/session guard and Card draft resource keys omit Workspace.",
+          "sources": [
+            "ios/KanbanCards/UI/Views.swift:117",
+            "ios/KanbanCards/UI/Editors.swift:40",
+            "ios/KanbanCards/UI/Editors.swift:110"
+          ]
+        },
+        "web": {
+          "status": "partial",
+          "detail": "Workspace changes wait for autosaves and refuse to leave while drafts, Comments, pending POSTs, or conflicts remain; drafts cannot survive the cross-host navigation.",
+          "sources": [
+            "src/client/context-dock.ts:1837",
+            "src/client/context-dock.ts:324"
+          ]
+        }
+      }
+    },
+    {
+      "id": "feature-project-create-edit",
+      "name": "Create and edit Project metadata",
+      "target": "Create a Project and explicitly save edits to both Name and Description while preserving Columns, Cards, and unrelated local drafts.",
+      "priority": "High",
+      "clients": {
+        "macos": {
+          "status": "partial",
+          "detail": "Project creation/editing has explicit Save and preserves existing description, but the ordinary form exposes only Name.",
+          "sources": [
+            "macos/KanbanCards/UI/Editors.swift:569",
+            "macos/KanbanCards/UI/Editors.swift:606",
+            "macos/KanbanCards/Core/AppModel.swift:414"
+          ]
+        },
+        "ios": {
+          "status": "aligned",
+          "detail": "Project editor exposes Name and Description with Create/Save and omits Columns from metadata edits.",
+          "sources": [
+            "ios/KanbanCards/UI/Editors.swift:226",
+            "ios/KanbanCards/UI/Editors.swift:242",
+            "ios/KanbanCards/UI/Editors.swift:258"
+          ]
+        },
+        "web": {
+          "status": "aligned",
+          "detail": "Project form exposes Name and Description; versioned save preserves stable Column IDs during metadata/Column-name edits.",
+          "sources": [
+            "src/client/context-dock.ts:1135",
+            "src/client/context-dock.ts:2328"
+          ]
+        }
+      }
+    },
+    {
+      "id": "feature-project-archive-restore",
+      "name": "Archive and restore Projects",
+      "target": "Archive a Project without deleting its Cards or Columns, browse archived Projects, and restore a Project before editing it again.",
+      "priority": "Medium",
+      "clients": {
+        "macos": {
+          "status": "aligned",
+          "detail": "Sidebar includes archived Projects; Project actions confirm archive/restore and send an archive-only mutation.",
+          "sources": [
+            "macos/KanbanCards/UI/BoardView.swift:171",
+            "macos/KanbanCards/UI/BoardView.swift:307",
+            "macos/KanbanCards/Core/AppModel.swift:634"
+          ]
+        },
+        "ios": {
+          "status": "partial",
+          "detail": "API client has Project archive/restore, but the model loads active Projects and Project views expose no archive/restore action.",
+          "sources": [
+            "ios/KanbanCards/Core/KanbanAPIClient.swift:183",
+            "ios/KanbanCards/Core/KanbanAPIClient.swift:234",
+            "ios/KanbanCards/UI/Views.swift:188"
+          ]
+        },
+        "web": {
+          "status": "partial",
+          "detail": "Server supports Project archivedAt and archived inventory; the shipped Project menu exposes no Project archive/restore or archived-Project browser.",
+          "sources": [
+            "src/server.ts:625",
+            "src/server.ts:709",
+            "src/client/context-dock.ts:1096"
+          ]
+        }
+      }
+    },
+    {
+      "id": "feature-column-create-rename",
+      "name": "Create and rename custom Columns",
+      "target": "Create custom Columns and rename existing Columns using stable IDs. Preserve stored order, every Card placement, and unedited Columns. Do not add reorder or delete controls in this work.",
+      "priority": "High",
+      "clients": {
+        "macos": {
+          "status": "partial",
+          "detail": "Native boards display custom stored Columns, but Project metadata edits deliberately omit Columns and no create/rename form is exposed.",
+          "sources": [
+            "macos/KanbanCards/UI/BoardView.swift:439",
+            "macos/KanbanCards/UI/Editors.swift:569"
+          ]
+        },
+        "ios": {
+          "status": "partial",
+          "detail": "Project view displays stored Columns; metadata editor omits Columns and has no custom Column creation/rename controls.",
+          "sources": [
+            "ios/KanbanCards/UI/Views.swift:177",
+            "ios/KanbanCards/UI/Editors.swift:226"
+          ]
+        },
+        "web": {
+          "status": "aligned",
+          "detail": "Project editor renames stored Columns; Add Column reads the latest complete Project, appends a stable ID, and retains stale/unconfirmed intent.",
+          "sources": [
+            "src/client/context-dock.ts:1135",
+            "src/client/context-dock.ts:2135",
+            "src/client/context-dock.ts:2245",
+            "tests/browser/lifecycle.spec.ts:295"
+          ]
+        }
+      }
+    },
+    {
+      "id": "feature-card-create",
+      "name": "Create a Card",
+      "target": "Create a Card only after explicit Create, with a visible destination, all editable fields, retained validation errors, and a stable retry identity for an uncertain response.",
+      "priority": "High",
+      "clients": {
+        "macos": {
+          "status": "aligned",
+          "detail": "Creation sheet captures all fields and destination, retains a submitted draft and request key, and records confirmation separately from cleanup.",
+          "sources": [
+            "macos/KanbanCards/UI/Editors.swift:116",
+            "macos/KanbanCards/UI/Editors.swift:257",
+            "macos/KanbanCards/Core/AppModel.swift:460"
+          ]
+        },
+        "ios": {
+          "status": "aligned",
+          "detail": "Creation form has Title, Description, optional fields, Column, explicit Create, and a durable submitted draft/key.",
+          "sources": [
+            "ios/KanbanCards/UI/Editors.swift:35",
+            "ios/KanbanCards/UI/Editors.swift:54",
+            "ios/KanbanCards/UI/Editors.swift:147"
+          ]
+        },
+        "web": {
+          "status": "partial",
+          "detail": "Create Card has explicit destination and idempotent POST, but the draft and retry identity disappear when the page reloads.",
+          "sources": [
+            "src/client/context-dock.ts:1330",
+            "src/client/context-dock.ts:2854",
+            "src/client/context-dock.ts:324"
+          ]
+        }
+      }
+    },
+    {
+      "id": "feature-card-edit-save",
+      "name": "Edit on open and save explicitly",
+      "target": "Opening a Card exposes editable fields immediately. Edits remain local until Save; Save leaves the Card editable and updates matching views without replacing another Card's draft.",
+      "priority": "High",
+      "clients": {
+        "macos": {
+          "status": "aligned",
+          "detail": "Card windows and embedded details mount the shared editor immediately; Save commits through the shared editing session.",
+          "sources": [
+            "macos/KanbanCards/UI/CardWindowView.swift:149",
+            "macos/KanbanCards/UI/SharedCardEditor.swift:108",
+            "macos/KanbanCards/Core/SharedCardEditingSession.swift:277"
+          ]
+        },
+        "ios": {
+          "status": "partial",
+          "detail": "Explicit Save exists, but opening a Card shows a read-only detail view, Edit opens a separate sheet, and a confirmed save dismisses that sheet.",
+          "sources": [
+            "ios/KanbanCards/UI/Views.swift:256",
+            "ios/KanbanCards/UI/Editors.swift:103",
+            "ios/KanbanCards/UI/Editors.swift:184"
+          ]
+        },
+        "web": {
+          "status": "partial",
+          "detail": "Opening a Card immediately edits it, but text blur and selection changes autosave; existing Cards have no explicit ordinary Save action.",
+          "sources": [
+            "src/client/context-dock.ts:2404",
+            "src/client/context-dock.ts:2530",
+            "src/client/context-dock.ts:3375"
+          ]
+        }
+      }
+    },
+    {
+      "id": "feature-card-fields",
+      "name": "Read and edit every Card field",
+      "target": "Preserve Title, raw Description, Next actor, Next action, Priority, Blocker, and destination Column, including unset values. Ordinary text edits must not alter Comments or unrelated fields.",
+      "priority": "High",
+      "clients": {
+        "macos": {
+          "status": "aligned",
+          "detail": "Shared Card form exposes all text/choice fields and retains the stored Card identity/version.",
+          "sources": [
+            "macos/KanbanCards/UI/SharedCardEditor.swift:211",
+            "ios/KanbanCards/Core/Models.swift:93"
+          ]
+        },
+        "ios": {
+          "status": "aligned",
+          "detail": "Card form exposes all text/choice fields and uses the shared CardDraft model.",
+          "sources": [
+            "ios/KanbanCards/UI/Editors.swift:54",
+            "ios/KanbanCards/Core/Models.swift:93"
+          ]
+        },
+        "web": {
+          "status": "aligned",
+          "detail": "Card form, work-field controls, and create destination cover the same data fields; nullable actor/priority and empty text are supported.",
+          "sources": [
+            "src/client/context-dock.ts:1277",
+            "src/client/context-dock.ts:1330",
+            "src/client/context-dock.ts:1345"
+          ]
+        }
+      }
+    },
+    {
+      "id": "feature-draft-durability",
+      "name": "Keep drafts across relaunch",
+      "target": "Persist unfinished Card, Project, and Comment drafts locally as they change. Restore them after reload/relaunch, retaining submitted requests and confirmed cleanup receipts without sending them again.",
+      "priority": "High",
+      "clients": {
+        "macos": {
+          "status": "aligned",
+          "detail": "Atomic owner-scoped draft files and shared editing records persist unfinished requests and confirmation receipts.",
+          "sources": [
+            "macos/KanbanCards/Core/DraftStore.swift:41",
+            "macos/KanbanCards/Core/SharedCardEditingSession.swift:134",
+            "macos/KanbanCards/Core/SharedCardEditingSession.swift:186"
+          ]
+        },
+        "ios": {
+          "status": "aligned",
+          "detail": "Card, Project, and Comment editors load/persist owner-scoped atomic files, including submitted requests and confirmation receipts.",
+          "sources": [
+            "ios/KanbanCards/Core/DraftStore.swift:16",
+            "ios/KanbanCards/UI/Editors.swift:108",
+            "ios/KanbanCards/UI/Editors.swift:266",
+            "ios/KanbanCards/UI/Editors.swift:408"
+          ]
+        },
+        "web": {
+          "status": "missing",
+          "detail": "Card/Comment drafts, archive receipts, and pending request keys are Maps in page memory; browser storage persists routing preferences only.",
+          "sources": [
+            "src/client/context-dock.ts:324",
+            "src/client/context-dock.ts:1988"
+          ]
+        }
+      }
+    },
+    {
+      "id": "feature-draft-owner-isolation",
+      "name": "Isolate drafts by owner and resource",
+      "target": "Scope every draft and active editor by authenticated owner, Workspace origin/ID, Project, Card, and session. Hide private editor values immediately when authority changes, while allowing only the same owner to recover retained work.",
+      "priority": "High",
+      "clients": {
+        "macos": {
+          "status": "partial",
+          "detail": "Owner-scoped storage and current-owner/session predicates isolate private editor state. Existing Card fields also key exact Workspace origin, but creation/legacy Card, Project, and Comment draft keys omit origin and need a lossless scope migration to meet the target for every draft type.",
+          "sources": [
+            "macos/KanbanCards/Core/DraftStore.swift:95",
+            "macos/KanbanCards/Core/SharedCardEditingSession.swift:79",
+            "macos/KanbanCards/UI/Editors.swift:110",
+            "macos/KanbanCards/UI/Editors.swift:577",
+            "macos/KanbanCards/UI/Editors.swift:899",
+            "macos/KanbanCards/UI/Editors.swift:902"
+          ]
+        },
+        "ios": {
+          "status": "partial",
+          "detail": "Disk directories isolate owners, but Card/Comment resource keys omit Workspace and editor state lacks the explicit current-owner/session predicate used on Mac.",
+          "sources": [
+            "ios/KanbanCards/Core/DraftStore.swift:42",
+            "ios/KanbanCards/UI/Editors.swift:40",
+            "ios/KanbanCards/UI/Editors.swift:110",
+            "ios/KanbanCards/UI/Editors.swift:387"
+          ]
+        },
+        "web": {
+          "status": "partial",
+          "detail": "Sign-out/401 clears private Maps and selections, but there is no durable owner-scoped draft store or cross-tab editor/session coordination.",
+          "sources": [
+            "src/client/context-dock.ts:1685",
+            "src/client/context-dock.ts:3173"
+          ]
+        }
+      }
+    },
+    {
+      "id": "feature-draft-close-cancel",
+      "name": "Close, cancel, and discard drafts deliberately",
+      "target": "Closing or canceling an editor retains unfinished local work without a server write. Confirm Revert/Discard for Card, Project, and Comment drafts; reconcile an unknown submitted request before removing its operation identity. Closing never implies Save.",
+      "priority": "High",
+      "clients": {
+        "macos": {
+          "status": "partial",
+          "detail": "Cancel retains drafts and Card Revert reads latest state before replacement. Project/Comment Discard asks for confirmation but can remove an uncertain request identity without readback.",
+          "sources": [
+            "macos/KanbanCards/Core/SharedCardEditingSession.swift:382",
+            "macos/KanbanCards/UI/SharedCardEditor.swift:88",
+            "macos/KanbanCards/UI/Editors.swift:698",
+            "macos/KanbanCards/UI/Editors.swift:959"
+          ]
+        },
+        "ios": {
+          "status": "partial",
+          "detail": "Cancel retains drafts and Card/Project Discard asks for confirmation, but Comment has no Discard action and uncertain Card/Project attempts can be discarded without readback.",
+          "sources": [
+            "ios/KanbanCards/UI/Editors.swift:97",
+            "ios/KanbanCards/UI/Editors.swift:124",
+            "ios/KanbanCards/UI/Editors.swift:253",
+            "ios/KanbanCards/UI/Editors.swift:389"
+          ]
+        },
+        "web": {
+          "status": "partial",
+          "detail": "Card Close retains an in-memory draft, but blur can save before Close; Project Cancel drops its form draft and ordinary Card editing lacks a Revert action.",
+          "sources": [
+            "src/client/context-dock.ts:2124",
+            "src/client/context-dock.ts:2463",
+            "src/client/context-dock.ts:2922",
+            "src/client/context-dock.ts:3375"
+          ]
+        }
+      }
+    },
+    {
+      "id": "feature-move",
+      "name": "Move independently of editing",
+      "target": "Use a standalone Move command that changes only destination and position against the current Card version. Keep unrelated unsaved text local, retain the requested destination after failure, and reconcile stale state before retry.",
+      "priority": "High",
+      "clients": {
+        "macos": {
+          "status": "partial",
+          "detail": "Standalone Move reloads the Card and sends a destination-only payload, but the ordinary shared editor also permits changing Column through a full Card save.",
+          "sources": [
+            "macos/KanbanCards/UI/CardWindowView.swift:262",
+            "macos/KanbanCards/Core/AppModel.swift:570",
+            "macos/KanbanCards/Core/MacKanbanAPIClient.swift:240",
+            "macos/KanbanCards/UI/SharedCardEditor.swift:216"
+          ]
+        },
+        "ios": {
+          "status": "partial",
+          "detail": "Column can be changed in the Card editor and saved with every edited field; no standalone destination-only Move command is exposed.",
+          "sources": [
+            "ios/KanbanCards/UI/Editors.swift:56",
+            "ios/KanbanCards/UI/Editors.swift:147",
+            "ios/KanbanCards/Core/KanbanAPIClient.swift:217"
+          ]
+        },
+        "web": {
+          "status": "partial",
+          "detail": "Move sends only the destination and retains stale destination intent, but it first flushes blur autosaves and refuses remaining unsaved changes instead of preserving unrelated dirty fields locally.",
+          "sources": [
+            "src/client/context-dock.ts:2671",
+            "src/client/context-dock.ts:2715",
+            "src/client/context-dock.ts:2748",
+            "src/client/context-dock.ts:2772"
+          ]
+        }
+      }
+    },
+    {
+      "id": "feature-comment-post",
+      "name": "Post a Comment explicitly",
+      "target": "Post a Comment only after explicit submission. Keep each unsent Comment separate from Card edits, freeze an uncertain submitted body/key, and distinguish a confirmed Post from a failed follow-up refresh.",
+      "priority": "High",
+      "clients": {
+        "macos": {
+          "status": "aligned",
+          "detail": "Inline Post/standalone Add Comment uses its own durable draft, submitted body/key, confirmation receipt, and refresh warning.",
+          "sources": [
+            "macos/KanbanCards/UI/CardWindowView.swift:192",
+            "macos/KanbanCards/UI/Editors.swift:1161",
+            "macos/KanbanCards/Core/AppModel.swift:517"
+          ]
+        },
+        "ios": {
+          "status": "aligned",
+          "detail": "Comment composer has explicit Send, a separate durable draft/key, and confirmed-mutation refresh recovery.",
+          "sources": [
+            "ios/KanbanCards/UI/Editors.swift:373",
+            "ios/KanbanCards/UI/Editors.swift:440",
+            "ios/KanbanCards/UI/AppModel.swift:325"
+          ]
+        },
+        "web": {
+          "status": "partial",
+          "detail": "Add Comment is explicit and uses a separate body/key with confirmed-write refresh handling; unsent and uncertain Comment state remains page-memory only.",
+          "sources": [
+            "src/client/context-dock.ts:2960",
+            "src/client/context-dock.ts:331"
+          ]
+        }
+      }
+    },
+    {
+      "id": "feature-markdown-preview",
+      "name": "Preview Description without changing its source",
+      "target": "Keep the raw Description source editable and offer a safe Markdown preview. Preview must not save, rewrite source, execute HTML, or fetch embedded images.",
+      "priority": "Medium",
+      "clients": {
+        "macos": {
+          "status": "missing",
+          "detail": "Native Description uses TextEditor; saved Description presentation uses verbatim text and has no Markdown preview switch.",
+          "sources": [
+            "macos/KanbanCards/UI/SharedCardEditor.swift:255",
+            "macos/KanbanCards/UI/Editors.swift:1215"
+          ]
+        },
+        "ios": {
+          "status": "missing",
+          "detail": "Native editor uses TextEditor and detail shows Text(verbatim:); no Markdown preview is exposed.",
+          "sources": [
+            "ios/KanbanCards/UI/Editors.swift:72",
+            "ios/KanbanCards/UI/Views.swift:307"
+          ]
+        },
+        "web": {
+          "status": "aligned",
+          "detail": "Write/Preview renders the current raw draft; switching captures selection without initiating a save. Markdown safety is covered by the browser source test.",
+          "sources": [
+            "src/client/context-dock.ts:2635",
+            "tests/browser/context-dock.spec.ts:114",
+            "src/client/markdown.ts:1"
+          ]
+        }
+      }
+    },
+    {
+      "id": "feature-archive-restore",
+      "name": "Browse and restore archived Cards",
+      "target": "Archive without deleting a Card, browse archived Cards independently of an Undo receipt, and restore to the stored Column using the current version while preserving Card fields and Comments.",
+      "priority": "High",
+      "clients": {
+        "macos": {
+          "status": "aligned",
+          "detail": "Include archived exposes saved archived Cards; Card actions offer confirmed archive/restore using archive-only mutation.",
+          "sources": [
+            "macos/KanbanCards/UI/BoardView.swift:669",
+            "macos/KanbanCards/UI/CardWindowView.swift:124",
+            "macos/KanbanCards/Core/AppModel.swift:604"
+          ]
+        },
+        "ios": {
+          "status": "aligned",
+          "detail": "Archived Cards view opens retained Cards whose detail offers Restore Card; model uses archive-only API calls.",
+          "sources": [
+            "ios/KanbanCards/UI/Views.swift:311",
+            "ios/KanbanCards/UI/Views.swift:276",
+            "ios/KanbanCards/UI/AppModel.swift:351"
+          ]
+        },
+        "web": {
+          "status": "partial",
+          "detail": "Archive and session Undo are implemented; general archived-Card browsing/restoration is absent from the shipped interface.",
+          "sources": [
+            "src/client/context-dock.ts:1114",
+            "src/client/context-dock.ts:3022",
+            "src/client/context-dock.ts:3062",
+            "src/client/context-dock.ts:1096"
+          ]
+        }
+      }
+    },
+    {
+      "id": "feature-project-activity",
+      "name": "Inspect Project Activity",
+      "target": "Provide a Project-wide Activity view using saved server events, separate from Card-specific history, with clear scope and chronological ordering.",
+      "priority": "Medium",
+      "clients": {
+        "macos": {
+          "status": "aligned",
+          "detail": "Project Activity is available from the board; its shared view omits a Card filter for Project-wide events.",
+          "sources": [
+            "macos/KanbanCards/UI/BoardView.swift:344",
+            "macos/KanbanCards/UI/BoardView.swift:832"
+          ]
+        },
+        "ios": {
+          "status": "aligned",
+          "detail": "Project view links to ActivityView without a Card ID, displaying all loaded Project events.",
+          "sources": [
+            "ios/KanbanCards/UI/Views.swift:188",
+            "ios/KanbanCards/UI/Views.swift:325"
+          ]
+        },
+        "web": {
+          "status": "missing",
+          "detail": "Shipped UI renders only Card-filtered Activity despite the server Project Activity endpoint.",
+          "sources": [
+            "src/client/context-dock.ts:1325",
+            "src/server.ts:862"
+          ]
+        }
+      }
+    },
+    {
+      "id": "feature-card-activity",
+      "name": "Inspect Card Activity",
+      "target": "Provide saved Activity for the chosen Card without another Card's events, using consistent scope and access to the retained event history.",
+      "priority": "Medium",
+      "clients": {
+        "macos": {
+          "status": "aligned",
+          "detail": "Card action opens ProjectActivity with that Card ID; the view filters the loaded event set.",
+          "sources": [
+            "macos/KanbanCards/UI/CardWindowView.swift:167",
+            "macos/KanbanCards/UI/BoardView.swift:832"
+          ]
+        },
+        "ios": {
+          "status": "aligned",
+          "detail": "Card detail links to ActivityView with cardID and the view filters loaded events.",
+          "sources": [
+            "ios/KanbanCards/UI/Views.swift:273",
+            "ios/KanbanCards/UI/Views.swift:325"
+          ]
+        },
+        "web": {
+          "status": "partial",
+          "detail": "Activity tab filters the selected Card correctly but displays only the last twelve matching events with no older-history control.",
+          "sources": [
+            "src/client/context-dock.ts:1325"
+          ]
+        }
+      }
+    },
+    {
+      "id": "feature-search",
+      "name": "Search Card text",
+      "target": "Apply the exact search rule in docs/shared-interactions/README.md: normalize each query/field with NFC, Unicode default locale-independent full casefold, then NFC. Trim only Unicode White_Space at the query ends; preserve interior spacing and diacritics. Match a literal substring within any single Title, raw Description, Next action, or Blocker field. A blank query matches every Card in the active Project before AND filters.",
+      "priority": "Medium",
+      "clients": {
+        "macos": {
+          "status": "partial",
+          "detail": "Native search uses localizedStandardContains on Title, Description, and Next action. It omits Blocker and does not implement the specified locale-independent full-casefold and Unicode White_Space query rule.",
+          "sources": [
+            "macos/KanbanCards/WindowIdentity.swift:59",
+            "macos/KanbanCards/UI/BoardView.swift:342"
+          ]
+        },
+        "ios": {
+          "status": "missing",
+          "detail": "Project filters have actor, priority, and blocked state only; no text-search field or predicate exists.",
+          "sources": [
+            "ios/KanbanCards/UI/Views.swift:142",
+            "ios/KanbanCards/UI/Views.swift:226"
+          ]
+        },
+        "web": {
+          "status": "missing",
+          "detail": "Shipped board renders structured filters and Columns without a Card text-search control or predicate.",
+          "sources": [
+            "src/client/context-dock.ts:740",
+            "src/client/context-dock.ts:1265"
+          ]
+        }
+      }
+    },
+    {
+      "id": "feature-filters",
+      "name": "Combine actor, priority, and blocked filters",
+      "target": "Combine Next actor, Priority, and Blocked with AND and the shared search predicate, supporting unset/unassigned values. A Card is blocked exactly when Blocker contains at least one character outside the explicit Unicode White_Space set in docs/shared-interactions/README.md. Clear filters preserves search; Clear search leaves structured filters unchanged.",
+      "priority": "High",
+      "clients": {
+        "macos": {
+          "status": "partial",
+          "detail": "AND filters and separate search clearing exist, but Blocker uses isEmpty instead of the shared explicit Unicode White_Space set, and search uses localizedStandardContains with incomplete field coverage.",
+          "sources": [
+            "macos/KanbanCards/WindowIdentity.swift:40",
+            "macos/KanbanCards/UI/BoardView.swift:506",
+            "src/server.ts:678"
+          ]
+        },
+        "ios": {
+          "status": "partial",
+          "detail": "AND filters support unset/unassigned values, but Blocker uses isEmpty instead of the shared explicit Unicode White_Space set and there is no text search to combine.",
+          "sources": [
+            "ios/KanbanCards/UI/Views.swift:142",
+            "ios/KanbanCards/UI/Views.swift:226",
+            "src/server.ts:678"
+          ]
+        },
+        "web": {
+          "status": "partial",
+          "detail": "Structured AND filters use JavaScript trim for Blocker; that language-defined set differs from the shared explicit Unicode White_Space set. Text search and separate search clearing are absent.",
+          "sources": [
+            "src/client/context-dock.ts:729",
+            "src/client/context-dock.ts:740"
+          ]
+        }
+      }
+    },
+    {
+      "id": "feature-refresh",
+      "name": "Refresh saved state without losing work",
+      "target": "Refresh from the shared API while preserving valid local drafts and resource scope. Keep a confirmed mutation visible if the follow-up read fails, and reject reads from an older session or revision.",
+      "priority": "High",
+      "clients": {
+        "macos": {
+          "status": "aligned",
+          "detail": "Scoped caches reject older revisions and obsolete sessions; confirmed writes update cached resources before refresh and retain a separate refresh warning.",
+          "sources": [
+            "macos/KanbanCards/Core/AppModel.swift:389",
+            "macos/KanbanCards/Core/AppModel.swift:805",
+            "macos/KanbanCards/Core/AppModel.swift:819"
+          ]
+        },
+        "ios": {
+          "status": "aligned",
+          "detail": "Project reads check session/mutation generations and revisions; confirmed writes update cache before follow-up refresh warnings.",
+          "sources": [
+            "ios/KanbanCards/UI/AppModel.swift:257",
+            "ios/KanbanCards/UI/AppModel.swift:386",
+            "ios/KanbanCards/UI/AppModel.swift:399"
+          ]
+        },
+        "web": {
+          "status": "partial",
+          "detail": "Refresh retains context/drafts and applies confirmed write responses before reads, but there is no owner/session generation fence equivalent to native requests.",
+          "sources": [
+            "src/client/context-dock.ts:795",
+            "src/client/context-dock.ts:3101",
+            "src/client/context-dock.ts:658"
+          ]
+        }
+      }
+    },
+    {
+      "id": "feature-conflict-reconciliation",
+      "name": "Reconcile independent field changes",
+      "target": "Compare base, local draft, and latest saved values field by field. Preserve non-overlapping server edits automatically; require an explicit choice for overlapping changes. Never overwrite unchanged fields with stale values.",
+      "priority": "High",
+      "clients": {
+        "macos": {
+          "status": "partial",
+          "detail": "Conflict review shows differing fields, but Keep My Draft advances the version and the next save submits the entire draft; no base/local/latest field merge exists.",
+          "sources": [
+            "macos/KanbanCards/Core/SharedCardEditingSession.swift:232",
+            "macos/KanbanCards/UI/SharedCardEditor.swift:261",
+            "macos/KanbanCards/UI/Editors.swift:1221"
+          ]
+        },
+        "ios": {
+          "status": "partial",
+          "detail": "Conflict view shows saved values, then Continue editing advances only the version before a full Card save.",
+          "sources": [
+            "ios/KanbanCards/UI/Editors.swift:76",
+            "ios/KanbanCards/Core/KanbanAPIClient.swift:217"
+          ]
+        },
+        "web": {
+          "status": "partial",
+          "detail": "Base fields detect differences from the saved baseline, but conflict Retry sends the complete draft against the latest version rather than merging non-overlapping fields.",
+          "sources": [
+            "src/client/context-dock.ts:1277",
+            "src/client/context-dock.ts:2422",
+            "src/client/context-dock.ts:2839"
+          ]
+        }
+      }
+    },
+    {
+      "id": "feature-unknown-response",
+      "name": "Recover uncertain mutation responses",
+      "target": "Retain the submitted body and retry identity after an unknown result, across relaunch. Reconcile current saved state before another mutation; a confirmed save with failed local cleanup or refresh must never be submitted again.",
+      "priority": "High",
+      "clients": {
+        "macos": {
+          "status": "partial",
+          "detail": "Submitted drafts, keys, and confirmed receipts persist, but uncertain versioned Card Retry Save resubmits the frozen PATCH before readback/reconciliation. Confirmed cleanup/refresh retries are separate.",
+          "sources": [
+            "macos/KanbanCards/Core/SharedCardEditingSession.swift:277",
+            "macos/KanbanCards/Core/SharedCardEditingSession.swift:346",
+            "macos/KanbanCards/Core/MacKanbanAPIClient.swift:231"
+          ]
+        },
+        "ios": {
+          "status": "partial",
+          "detail": "Submitted drafts/keys and receipts persist, but uncertain Card Retry Save resends PATCH before readback and errors below 500, including timeout 408, clear submitted state.",
+          "sources": [
+            "ios/KanbanCards/UI/Editors.swift:147",
+            "ios/KanbanCards/UI/Editors.swift:440",
+            "ios/KanbanCards/Core/KanbanAPIClient.swift:289"
+          ]
+        },
+        "web": {
+          "status": "partial",
+          "detail": "Uncertain creates/Comments retain request keys in memory and confirmed writes survive failed refresh; page reload loses submitted/retry state.",
+          "sources": [
+            "src/client/context-dock.ts:331",
+            "src/client/context-dock.ts:2890",
+            "src/client/context-dock.ts:3010"
+          ]
+        }
+      }
+    },
+    {
+      "id": "feature-local-write-failure",
+      "name": "Recover local draft-write failures",
+      "target": "Report a local write failure, retain text for the authenticated owner, block unsafe dismissal/mutations, and offer Retry plus Copy/Export. Never describe memory-only text as durably saved.",
+      "priority": "High",
+      "clients": {
+        "macos": {
+          "status": "aligned",
+          "detail": "DraftStore retains failed writes by owner; editing locks during persistence failure and exposes Retry, Copy, and native Export.",
+          "sources": [
+            "macos/KanbanCards/Core/DraftStore.swift:8",
+            "macos/KanbanCards/Core/SharedCardEditingSession.swift:186",
+            "macos/KanbanCards/UI/SharedCardEditor.swift:170",
+            "macos/KanbanCards/UI/Editors.swift:1244"
+          ]
+        },
+        "ios": {
+          "status": "partial",
+          "detail": "Local persistence errors block dismissal/save and keep the visible editor, but no owner recovery buffer, Copy/Export, or explicit local-write Retry control is exposed.",
+          "sources": [
+            "ios/KanbanCards/UI/Editors.swift:107",
+            "ios/KanbanCards/UI/Editors.swift:133",
+            "ios/KanbanCards/Core/DraftStore.swift:22"
+          ]
+        },
+        "web": {
+          "status": "missing",
+          "detail": "No durable draft-write path or local persistence error/recovery interface exists in the shipped browser.",
+          "sources": [
+            "src/client/context-dock.ts:324",
+            "src/client/context-dock.ts:1654"
+          ]
+        }
+      }
+    },
+    {
+      "id": "feature-signout",
+      "name": "Sign out without exposing or losing local work",
+      "target": "End the current server session, immediately clear private rendered state in every context, retain owner-isolated recoverable drafts, and expose retry when revocation or credential removal cannot be confirmed.",
+      "priority": "High",
+      "clients": {
+        "macos": {
+          "status": "aligned",
+          "detail": "Sign-out invalidates every shared editing session and clears windows before network/Keychain work; retained drafts remain owner-scoped and pending sign-out survives relaunch.",
+          "sources": [
+            "macos/KanbanCards/Core/AppModel.swift:323",
+            "macos/KanbanCards/Core/AppModel.swift:760",
+            "macos/KanbanCards/Core/SharedCardEditingSession.swift:423"
+          ]
+        },
+        "ios": {
+          "status": "partial",
+          "detail": "Sign-out clears loaded data and persists a revocation retry intent; durable draft files remain, but editor/session invalidation is less explicit than the Mac coordinator.",
+          "sources": [
+            "ios/KanbanCards/UI/AppModel.swift:206",
+            "ios/KanbanCards/UI/Editors.swift:110"
+          ]
+        },
+        "web": {
+          "status": "partial",
+          "detail": "Sign-out clears private values and offers retry on failure, but it deletes the only retained Card/Comment drafts because no durable owner store exists.",
+          "sources": [
+            "src/client/context-dock.ts:2079",
+            "src/client/context-dock.ts:1685"
+          ]
+        }
+      }
+    },
+    {
+      "id": "feature-session-expiry",
+      "name": "Handle session expiry and replaced sessions",
+      "target": "Stop writes when a session expires or is replaced, clear private rendered values, ignore obsolete responses, and allow only the same authenticated owner to recover retained drafts after sign-in.",
+      "priority": "High",
+      "clients": {
+        "macos": {
+          "status": "aligned",
+          "detail": "Session expiry validation, generation checks, scoped caches, and shared-editor invalidation clear current authority while retaining owner recovery records.",
+          "sources": [
+            "macos/KanbanCards/Core/AppModel.swift:679",
+            "macos/KanbanCards/Core/AppModel.swift:760",
+            "macos/KanbanCards/Core/MacKanbanAPIClient.swift:315"
+          ]
+        },
+        "ios": {
+          "status": "partial",
+          "detail": "API generation checks reject replaced-session responses and 401 clears cached data; editor-local pending state lacks the Mac session predicate and expiry is chiefly request/restore driven.",
+          "sources": [
+            "ios/KanbanCards/Core/KanbanAPIClient.swift:285",
+            "ios/KanbanCards/UI/AppModel.swift:364",
+            "ios/KanbanCards/UI/Editors.swift:110"
+          ]
+        },
+        "web": {
+          "status": "partial",
+          "detail": "401 clears private state, but drafts are deleted and requests lack a session generation guard against a late prior-session success.",
+          "sources": [
+            "src/client/context-dock.ts:3173",
+            "src/client/context-dock.ts:1685",
+            "src/client/context-dock.ts:658"
+          ]
+        }
+      }
+    },
+    {
+      "id": "feature-account-enrollment",
+      "name": "Enroll an owner account",
+      "target": "Enroll an owner through each client's UI, creating a private owner/Workspace after a verified passkey and requiring recovery-code acknowledgement. Native clients need native forms and deliberate backend authorization; browser delegation is a temporary exception.",
+      "priority": "Medium",
+      "clients": {
+        "macos": {
+          "status": "missing",
+          "detail": "Mac exposes existing-owner passkey sign-in; no native enrollment form or enrollment handoff action is present.",
+          "sources": [
+            "macos/KanbanCards/UI/BoardView.swift:54",
+            "ios/README.md:65"
+          ]
+        },
+        "ios": {
+          "status": "missing",
+          "detail": "Initial enrollment remains a browser operation; native root exposes existing-owner passkey sign-in.",
+          "sources": [
+            "ios/KanbanCards/UI/Views.swift:47",
+            "ios/README.md:65"
+          ]
+        },
+        "web": {
+          "status": "aligned",
+          "detail": "Public signup collects Workspace details, performs passkey enrollment, and shows the one-time recovery code until acknowledged.",
+          "sources": [
+            "src/client/context-dock.ts:955",
+            "src/client/context-dock.ts:627",
+            "tests/browser/workspace-access.spec.ts:79"
+          ]
+        }
+      }
+    },
+    {
+      "id": "feature-account-recovery",
+      "name": "Recover owner access",
+      "target": "Expose a supported recovery path, consume the saved recovery code once, replace the passkey and code, preserve owner data, and revoke prior sessions and agent keys.",
+      "priority": "High",
+      "clients": {
+        "macos": {
+          "status": "missing",
+          "detail": "Native account controls provide sign-out only; recovery remains a browser operation.",
+          "sources": [
+            "macos/KanbanCards/UI/BoardView.swift:180",
+            "ios/README.md:65"
+          ]
+        },
+        "ios": {
+          "status": "missing",
+          "detail": "Native Account view has sign-out and no recovery action; recovery remains a browser operation.",
+          "sources": [
+            "ios/KanbanCards/UI/Views.swift:80",
+            "ios/README.md:65"
+          ]
+        },
+        "web": {
+          "status": "aligned",
+          "detail": "Browser recovery form uses the saved code; passkey/recovery tests cover credential replacement and preserved owner data.",
+          "sources": [
+            "src/client/context-dock.ts:969",
+            "tests/browser/workspace-access.spec.ts:357",
+            "README.md:40"
+          ]
+        }
+      }
+    },
+    {
+      "id": "feature-account-passkeys",
+      "name": "Manage passkeys and recovery code",
+      "target": "Show current passkeys, add or remove an allowed passkey after fresh verification, and offer independent recovery-code replacement. Replacement requires fresh passkey verification, invalidates the old code, and displays the new code once for acknowledgement while preserving passkeys, owner data, active sessions, and agent keys. Lost-access recovery remains a separate operation.",
+      "priority": "Medium",
+      "clients": {
+        "macos": {
+          "status": "missing",
+          "detail": "Existing-owner system passkey sign-in exists, but native account UI has no passkey inventory/add/remove or independent recovery-code replacement controls.",
+          "sources": [
+            "macos/KanbanCards/Core/PasskeySignInCoordinator.swift:1",
+            "macos/KanbanCards/UI/BoardView.swift:180",
+            "ios/README.md:65"
+          ]
+        },
+        "ios": {
+          "status": "missing",
+          "detail": "Native account UI exposes sign-out only; passkey management and independent recovery-code replacement remain browser operations.",
+          "sources": [
+            "ios/KanbanCards/UI/Views.swift:80",
+            "ios/README.md:65"
+          ]
+        },
+        "web": {
+          "status": "aligned",
+          "detail": "Manage access lists/adds/removes passkeys and independently replaces the recovery code after recent verification. Replacement stores only the new hash, removes prior codes, and leaves passkeys, owner data, sessions, and agent keys untouched; the new raw code is shown until acknowledged.",
+          "sources": [
+            "src/client/context-dock.ts:1038",
+            "src/client/context-dock.ts:1052",
+            "src/client/context-dock.ts:627",
+            "src/client/context-dock.ts:3218",
+            "src/server.ts:235",
+            "src/server.ts:406",
+            "src/passkey-auth.ts:195"
+          ]
+        }
+      }
+    },
+    {
+      "id": "feature-account-sessions",
+      "name": "Inspect and revoke account sessions",
+      "target": "List current active browser/native sessions with accurate type and expiry, revoke a selected session or all sessions, and clear each affected client's private state.",
+      "priority": "Medium",
+      "clients": {
+        "macos": {
+          "status": "partial",
+          "detail": "Current native session can sign out, but no account-wide session inventory or selective remote revocation UI exists.",
+          "sources": [
+            "macos/KanbanCards/Core/AppModel.swift:323",
+            "macos/KanbanCards/UI/BoardView.swift:180"
+          ]
+        },
+        "ios": {
+          "status": "partial",
+          "detail": "Current native session can sign out, but Account view has no session list or selective remote revocation UI.",
+          "sources": [
+            "ios/KanbanCards/UI/AppModel.swift:206",
+            "ios/KanbanCards/UI/Views.swift:80"
+          ]
+        },
+        "web": {
+          "status": "partial",
+          "detail": "Manage access can revoke listed/all sessions, but the server combines native/browser records without a type field and UI labels all records as browser sessions.",
+          "sources": [
+            "src/server.ts:387",
+            "src/client/context-dock.ts:1038"
+          ]
+        }
+      }
+    },
+    {
+      "id": "feature-agent-keys",
+      "name": "Manage scoped agent keys",
+      "target": "Create, inspect, and revoke named Workspace-scoped agent keys with explicit scopes/expiry, fresh verification when required, and one-time secret display.",
+      "priority": "Medium",
+      "clients": {
+        "macos": {
+          "status": "missing",
+          "detail": "Native sidebar/account actions expose no agent-key management interface.",
+          "sources": [
+            "macos/KanbanCards/UI/BoardView.swift:180",
+            "README.md:72"
+          ]
+        },
+        "ios": {
+          "status": "missing",
+          "detail": "Native Account view exposes no agent-key management interface.",
+          "sources": [
+            "ios/KanbanCards/UI/Views.swift:80",
+            "README.md:72"
+          ]
+        },
+        "web": {
+          "status": "aligned",
+          "detail": "Agent connections support scopes, expiry, fresh verification, one-time key display, and revocation.",
+          "sources": [
+            "src/client/context-dock.ts:1066",
+            "src/client/context-dock.ts:1932",
+            "src/client/context-dock.ts:1955"
+          ]
+        }
+      }
+    },
+    {
+      "id": "feature-native-controls",
+      "name": "Use standard platform controls",
+      "target": "Use standard Apple controls and system behavior on macOS/iOS, and semantic keyboard-operable browser controls on web. Match action meaning and recovery behavior across clients without copying platform-specific window chrome.",
+      "priority": "High",
+      "clients": {
+        "macos": {
+          "status": "aligned",
+          "detail": "SwiftUI forms/lists and AppKit-backed native pop-up/pull-down controls provide the existing editing and navigation surfaces; source guard documents the native boundary.",
+          "sources": [
+            "macos/KanbanCards/UI/NativePopUpPicker.swift:1",
+            "macos/KanbanCards/UI/SharedCardEditor.swift:211",
+            "macos/README.md:39"
+          ]
+        },
+        "ios": {
+          "status": "aligned",
+          "detail": "SwiftUI List, Form, NavigationStack, Picker, and system sheets implement the existing screens under the documented native-only requirement.",
+          "sources": [
+            "ios/KanbanCards/UI/Views.swift:94",
+            "ios/KanbanCards/UI/Editors.swift:43",
+            "ios/README.md:11"
+          ]
+        },
+        "web": {
+          "status": "aligned",
+          "detail": "Browser form helpers emit native input/select/textarea/button elements, with documented keyboard and focus behavior.",
+          "sources": [
+            "src/client/context-dock.ts:861",
+            "src/client/context-dock.ts:873",
+            "src/client/context-dock.ts:893",
+            "UI_CONTRACT.md:125"
+          ]
+        }
+      }
+    },
+    {
+      "id": "feature-cross-client-handoff",
+      "name": "Read saved changes on another client",
+      "target": "Use the same Workspace/Project/Card IDs, field values, versions, Comments, and Activity across clients. A deliberate Refresh loads another client's saved changes; unfinished local drafts remain local and require conflict reconciliation.",
+      "priority": "High",
+      "clients": {
+        "macos": {
+          "status": "aligned",
+          "detail": "Mac uses the shared tenant Project/Card routes and refreshes saved snapshots by version; drafts remain in its local store.",
+          "sources": [
+            "macos/KanbanCards/Core/MacKanbanAPIClient.swift:187",
+            "macos/KanbanCards/Core/AppModel.swift:389",
+            "macos/KanbanCards/Core/DraftStore.swift:34"
+          ]
+        },
+        "ios": {
+          "status": "aligned",
+          "detail": "iPhone uses the same tenant Project/Card routes and versioned models, with local draft files separate from saved resources.",
+          "sources": [
+            "ios/KanbanCards/Core/KanbanAPIClient.swift:183",
+            "ios/KanbanCards/Core/KanbanAPIClient.swift:217",
+            "ios/KanbanCards/Core/DraftStore.swift:9"
+          ]
+        },
+        "web": {
+          "status": "aligned",
+          "detail": "Browser requests the same Project/Card API and manually refreshes snapshots; the product vision states updates appear on Refresh/Project load.",
+          "sources": [
+            "src/client/context-dock.ts:658",
+            "src/client/context-dock.ts:3101",
+            "docs/product-vision.md:60"
+          ]
+        }
+      }
+    },
+    {
+      "id": "feature-multiple-card-contexts",
+      "name": "Coordinate repeated Card contexts",
+      "target": "Keep one coordinated draft/write authority for the same owner/Workspace/Project/Card across that client's windows, tabs, or scenes. Separate Cards keep independent drafts, Comments, pending requests, and focus.",
+      "priority": "High",
+      "clients": {
+        "macos": {
+          "status": "partial",
+          "detail": "Existing Card fields share one owner/Workspace/origin/Project/Card editing session. Separate CommentEditor presentations each own pending state and write the same per-Card Comment resource key, so composers and unconfirmed identities are not coordinated and can replace retained drafts.",
+          "sources": [
+            "macos/KanbanCards/Core/AppModel.swift:197",
+            "macos/KanbanCards/Core/SharedCardEditingSession.swift:79",
+            "macos/KanbanCards/UI/Editors.swift:885",
+            "macos/KanbanCards/UI/Editors.swift:899",
+            "macos/KanbanCards/UI/Editors.swift:931",
+            "macos/KanbanCards/UI/Editors.swift:948",
+            "macos/KanbanCards/UI/CardWindowView.swift:215",
+            "macos/KanbanCards/UI/BoardView.swift:465"
+          ]
+        },
+        "ios": {
+          "status": "partial",
+          "detail": "Each Card editor owns separate @State pending data and writes one draft file; no shared editing-session coordinator exists for repeated scene/editor contexts.",
+          "sources": [
+            "ios/KanbanCards/UI/Editors.swift:14",
+            "ios/KanbanCards/UI/Editors.swift:20",
+            "ios/KanbanCards/UI/Editors.swift:40",
+            "ios/KanbanCards/KanbanCardsApp.swift:3"
+          ]
+        },
+        "web": {
+          "status": "partial",
+          "detail": "Each page has one selected inspector and page-local draft Maps; separate tabs do not coordinate a common draft or mutation authority.",
+          "sources": [
+            "src/client/context-dock.ts:300",
+            "src/client/context-dock.ts:324",
+            "src/client/context-dock.ts:1470"
+          ]
+        }
+      }
+    }
+  ]
+}

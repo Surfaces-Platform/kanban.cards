@@ -30,6 +30,31 @@ final class WorkspaceCreationTests: XCTestCase {
         if FileManager.default.fileExists(atPath: directory.path) { try FileManager.default.removeItem(at: directory) }
     }
 
+    func testHTTP408PreservesAmbiguityForPOSTAndPATCHTransport() async throws {
+        try await restore(workspaces: [original])
+        WorkspaceCreationProtocol.state.enqueue(path: "/api/workspaces", method: "POST", status: 408,
+            json: #"{"error":"Response timed out"}"#)
+        do { _ = try await client.createWorkspace(name: created.name, slug: created.slug); XCTFail("408 must retain POST uncertainty.") }
+        catch let error as APIError { XCTAssertEqual(error.statusCode, 408); XCTAssertTrue(error.isAmbiguousMutation) }
+        var draft = ProjectDraft()
+        draft.id = "project-timeout"; draft.revision = 3; draft.name = "Retained metadata"
+        WorkspaceCreationProtocol.state.enqueue(path: "/api/projects/project-timeout", method: "PATCH", status: 408,
+            json: #"{"error":"Response timed out"}"#)
+        do { _ = try await client.updateProject(draft, in: original); XCTFail("408 must retain PATCH uncertainty.") }
+        catch let error as APIError { XCTAssertEqual(error.statusCode, 408); XCTAssertTrue(error.isAmbiguousMutation) }
+    }
+
+    func testHTTP408CreationReconcilesCommittedInventoryWithoutAnotherPOST() async throws {
+        try await restore(workspaces: [original])
+        WorkspaceCreationProtocol.state.enqueue(path: "/api/workspaces", method: "POST", status: 408,
+            json: #"{"error":"Response timed out after commit"}"#)
+        try WorkspaceCreationProtocol.state.enqueue(Inventory(workspaces: [original, created]), path: "/api/workspaces")
+        let saved = try await model.createWorkspace(name: created.name, slug: created.slug)
+        XCTAssertEqual(saved, created)
+        XCTAssertEqual(model.workspaces, [original, created])
+        XCTAssertEqual(WorkspaceCreationProtocol.state.requests.filter { $0.httpMethod == "POST" }.count, 1)
+    }
+
     func testDemoCreationIsEmptyAndPreservesExistingProjectAndDraft() async throws {
         let demo = AppModel(drafts: DraftStore(directory: directory), defaults: defaults, demo: true)
         let existing = try XCTUnwrap(demo.workspaces.first)

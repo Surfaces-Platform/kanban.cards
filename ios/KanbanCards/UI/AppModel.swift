@@ -10,6 +10,8 @@ final class AppModel {
     let drafts: DraftStore
     private let defaults: UserDefaults
     private let passkeys = PasskeySignInCoordinator()
+    private var cardEditingSessions: [String: CardEditingSession] = [:]
+    private var commentEditingSessions: [String: CommentEditingSession] = [:]
     private var projectMutationGenerations: [String: UUID] = [:]
     private var workspaceMutationGenerations: [String: UUID] = [:]
     private var workspaceRefreshes: [String: UUID] = [:]
@@ -53,10 +55,38 @@ final class AppModel {
             let project = Project(id: "demo-project", name: "iPhone app", description: "Isolated sample data for simulator verification.", columns: [Column(id: "next", name: "Next", position: 0), Column(id: "doing", name: "Doing", position: 1), Column(id: "done", name: "Done", position: 2)], cards: [card], activity: [], revision: 1, createdAt: timestamp, updatedAt: timestamp)
             loadedProjects[project.id] = project
             updateSummary(project, workspaceID: "demo-workspace")
+            #if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("--demo-unreadable-creation-drafts"),
+               let workspace = workspaces.first {
+                let records = [(project.id, "card:\(project.id):new"), ("new", "project:\(workspace.id):new")]
+                for (projectID, resource) in records {
+                    let key = drafts.scopedKey(workspace: workspace, projectID: projectID, resourceKey: resource)
+                    // Valid JSON of the wrong type exercises the real decode failure.
+                    try? drafts.save("Synthetic unread creation record; retain operation-key-\(resource)",
+                        ownerID: "demo-owner", resourceKey: key)
+                }
+            }
+            #endif
         }
     }
 
     var ownerID: String { isDemo ? "demo-owner" : api.credential?.owner.id ?? "signed-out" }
+
+    func cardEditingSession(workspace: Workspace, projectID: String, card: Card) -> CardEditingSession {
+        let key = ownerID + ":" + drafts.scopedKey(workspace: workspace, projectID: projectID, resourceKey: "card:" + card.id)
+        if let session = cardEditingSessions[key] { session.receive(card); return session }
+        let session = CardEditingSession(model: self, workspace: workspace, projectID: projectID, card: card)
+        cardEditingSessions[key] = session
+        return session
+    }
+
+    func commentEditingSession(workspace: Workspace, projectID: String, cardID: String) -> CommentEditingSession {
+        let key = ownerID + ":" + drafts.scopedKey(workspace: workspace, projectID: projectID, resourceKey: "comment:" + cardID)
+        if let session = commentEditingSessions[key] { return session }
+        let session = CommentEditingSession(model: self, workspace: workspace, projectID: projectID, cardID: cardID)
+        commentEditingSessions[key] = session
+        return session
+    }
 
     var canCreateWorkspace: Bool {
         let credentialIsCurrent = isDemo || api.credential.flatMap { ServerTimestamp.date(from: $0.expiresAt) }.map { $0 > .now } == true
@@ -297,7 +327,8 @@ final class AppModel {
         return loadedProjects[project.id] ?? project
     }
 
-    func saveCard(_ proposed: CardDraft, projectID: String, in workspace: Workspace, key: String) async throws -> Card {
+    func saveCard(_ proposed: CardDraft, projectID: String, in workspace: Workspace, key: String,
+                  onConfirmed: ((Card) -> Void)? = nil) async throws -> Card {
         let draft = proposed
         let card: Card
         if isDemo {
@@ -305,7 +336,7 @@ final class AppModel {
             if let id = draft.id, let current = project.cards.first(where: { $0.id == id }), current.version != draft.version { throw AppFailure.conflict }
             let timestamp = ServerTimestamp.string()
             let previous = project.cards.first { $0.id == draft.id }
-            card = Card(id: draft.id ?? UUID().uuidString, externalKey: draft.externalKey, title: draft.title, body: draft.body, nextActor: draft.nextActor, nextAction: draft.nextAction, priority: draft.priority, blockedReason: draft.blockedReason, columnId: draft.columnId, position: draft.position, version: (previous?.version ?? 0) + 1, archivedAt: draft.archivedAt, createdAt: previous?.createdAt ?? timestamp, updatedAt: timestamp, comments: previous?.comments ?? [])
+            card = Card(id: draft.id ?? UUID().uuidString, externalKey: previous?.externalKey ?? draft.externalKey, title: draft.title, body: draft.body, nextActor: draft.nextActor, nextAction: draft.nextAction, priority: draft.priority, blockedReason: draft.blockedReason, columnId: previous?.columnId ?? draft.columnId, position: previous?.position ?? draft.position, version: (previous?.version ?? 0) + 1, archivedAt: previous?.archivedAt, createdAt: previous?.createdAt ?? timestamp, updatedAt: timestamp, comments: previous?.comments ?? [])
             project.cards.removeAll { $0.id == card.id }
             project.cards.append(card)
             project.revision += 1
@@ -316,13 +347,16 @@ final class AppModel {
             if draft.id == nil { card = try await api.createCard(draft, projectID: projectID, in: workspace, idempotencyKey: key) }
             else { card = try await api.updateCard(draft, projectID: projectID, in: workspace) }
             cacheConfirmedCard(card, projectID: projectID, workspaceID: workspace.id)
+            onConfirmed?(card)
             // Failure to refresh does not undo the confirmed save or require resubmission.
             await refreshAfterConfirmedMutation(projectID: projectID, in: workspace, confirmation: "Card saved.")
         }
+        if isDemo { onConfirmed?(card) }
         return card
     }
 
-    func addComment(_ body: String, cardID: String, projectID: String, in workspace: Workspace, key: String) async throws {
+    func addComment(_ body: String, cardID: String, projectID: String, in workspace: Workspace, key: String,
+                    onConfirmed: (() -> Void)? = nil) async throws {
         if isDemo {
             guard var project = loadedProjects[projectID], let index = project.cards.firstIndex(where: { $0.id == cardID }) else { throw AppFailure.missingProject }
             project.cards[index].comments.append(Comment(id: UUID().uuidString, body: body, author: "Demo owner", createdAt: ServerTimestamp.string()))
@@ -344,15 +378,40 @@ final class AppModel {
                 }
                 loadedProjects[projectID] = project
             }
+            onConfirmed?()
             await refreshAfterConfirmedMutation(projectID: projectID, in: workspace, confirmation: "Comment sent.")
         }
+        if isDemo { onConfirmed?() }
+    }
+
+    func moveCard(_ card: Card, to columnID: String, projectID: String, in workspace: Workspace) async throws -> Card {
+        if isDemo {
+            guard var project = loadedProjects[projectID], let index = project.cards.firstIndex(where: { $0.id == card.id }),
+                  project.cards[index].version == card.version, project.columns.contains(where: { $0.id == columnID }) else { throw AppFailure.conflict }
+            project.cards[index].columnId = columnID
+            project.cards[index].position = (project.cards.filter { $0.columnId == columnID && $0.id != card.id }.map(\.position).max() ?? -1) + 1
+            project.cards[index].version += 1
+            project.revision += 1
+            record("Moved \(card.title).", cardID: card.id, project: &project)
+            loadedProjects[projectID] = project
+            updateSummary(project, workspaceID: workspace.id)
+            return project.cards[index]
+        }
+        let moved = try await api.moveCard(card, to: columnID, projectID: projectID, in: workspace)
+        cacheConfirmedCard(moved, projectID: projectID, workspaceID: workspace.id)
+        await refreshAfterConfirmedMutation(projectID: projectID, in: workspace, confirmation: "Card moved.")
+        return moved
     }
 
     func archive(_ card: Card, projectID: String, in workspace: Workspace, archived: Bool) async throws {
         if isDemo {
-            var draft = CardDraft(card: card)
-            draft.archivedAt = archived ? ServerTimestamp.string() : nil
-            _ = try await saveCard(draft, projectID: projectID, in: workspace, key: UUID().uuidString)
+            guard var project = loadedProjects[projectID], let index = project.cards.firstIndex(where: { $0.id == card.id }), project.cards[index].version == card.version else { throw AppFailure.conflict }
+            project.cards[index].archivedAt = archived ? ServerTimestamp.string() : nil
+            project.cards[index].version += 1
+            project.revision += 1
+            record(archived ? "Archived \(card.title)." : "Restored \(card.title).", cardID: card.id, project: &project)
+            loadedProjects[projectID] = project
+            updateSummary(project, workspaceID: workspace.id)
         } else {
             let saved = try await api.archiveCard(card: card, archived: archived, projectID: projectID, in: workspace)
             cacheConfirmedCard(saved, projectID: projectID, workspaceID: workspace.id)

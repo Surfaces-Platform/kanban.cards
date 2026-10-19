@@ -59,11 +59,12 @@ async function startFixture() {
   const server = createServer(createApp({ host: "kanban.cards", rootHost: "kanban.cards", passkeyAuthConfig: CONFIG, apiToken: "retired-global-bearer", accessStore, workspaceStoreResolver: resolver, dataPath: path.join(directory, "default.json"), requireDatabase: false, trustForwardedHost: true }));
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  async function request(host: string, route: string, options: { method?: string; cookie?: string; origin?: string; token?: string; body?: unknown; form?: Record<string,string> } = {}) {
+  async function request(host: string, route: string, options: { method?: string; cookie?: string; origin?: string; token?: string; body?: unknown; form?: Record<string,string>; expectedOwner?: string } = {}) {
     const headers: Record<string,string> = { Host: host, "X-Forwarded-Host": host, "X-Forwarded-Proto": "https" };
     if (options.cookie) headers.Cookie = options.cookie;
     if (options.origin) headers.Origin = options.origin;
     if (options.token) headers.Authorization = `Bearer ${options.token}`;
+    if (options.expectedOwner !== undefined) headers["X-Kanban-Expected-Owner"] = options.expectedOwner;
     if (options.body !== undefined) headers["Content-Type"] = "application/json";
     if (options.form) headers["Content-Type"] = "application/x-www-form-urlencoded";
     const response = await fetch(`${base}${route}`, { method: options.method || "GET", headers, redirect: "manual", body: options.form ? new URLSearchParams(options.form) : options.body !== undefined ? JSON.stringify(options.body) : undefined });
@@ -185,4 +186,41 @@ test("logout durably revokes root, tenant, and outstanding handoff access", asyn
   assert.equal((await f.request("kanban.cards", "/api/session", { cookie: f.rootCookie })).data.authenticated, false);
   assert.equal((await f.request("mike.kanban.cards", "/api/projects", { cookie: f.tenantCookie })).status, 401);
   assert.equal((await f.request("mike.kanban.cards", "/api/workspace-handoff", { method: "POST", origin: ROOT, form: { token: handoff.data.handoffToken } })).status, 401);
+}));
+
+
+test("browser recovery ownerId comes only from verified owner identity and exposes no authentication secrets", async () => fixture(async f => {
+  const root = await f.request("kanban.cards", "/api/session", { cookie: f.rootCookie });
+  const tenant = await f.request("mike.kanban.cards", "/api/session", { cookie: f.tenantCookie });
+  const other = await f.request("other.kanban.cards", "/api/session", { cookie: f.secondCookie });
+  assert.equal(root.data.ownerId, f.owner.id); assert.equal(tenant.data.ownerId, f.owner.id); assert.equal(other.data.ownerId, f.other.id);
+  assert.notEqual(other.data.ownerId, f.owner.id);
+  for (const response of [root, tenant, other]) {
+    const serialized = JSON.stringify(response.data);
+    for (const secret of [SECRET, f.rootCookie, f.tenantCookie, "passkey-session-one", "passkey-session-two"]) assert.equal(serialized.includes(secret), false);
+    assert.match(response.headers.get("cache-control") || "", /(?:^|,\s*)no-store(?:\s*,|$)/);
+  }
+  for (const [host, cookie] of [["mike.kanban.cards", undefined], ["other.kanban.cards", f.tenantCookie], ["auth.kanban.cards", f.rootCookie]] as const) {
+    const anonymous = await f.request(host, "/api/session", { cookie });
+    assert.equal(anonymous.data.authenticated, false); assert.equal("ownerId" in anonymous.data, false);
+  }
+  const key = await f.accessStore.createAgentConnection({ providerSubject: f.owner.id, workspaceId: f.first.id, label: "Synthetic reader", scopes: ["read"] });
+  const agent = await f.request("mike.kanban.cards", "/api/session", { token: key.credential });
+  assert.equal("ownerId" in agent.data, false); assert.equal(JSON.stringify(agent.data).includes(key.credential), false);
+}));
+
+
+test("expected-owner fence rejects swapped cookies atomically before Project, Workspace or handoff side effects", async () => fixture(async f => {
+  const otherRoot = (await createRootSessionCookie({ providerSubject: f.other.id, email: "", displayName: "Other owner", sessionId: "passkey-session-two", rootOrigin: ROOT }, SECRET, true)).split(";")[0];
+  // Model a browser that read owner A, then sent its old intent with owner B's replacement cookie.
+  const beforeRegistry = await f.accessStore.read();
+  const beforeProjects = await f.request("other.kanban.cards", "/api/projects", { cookie: f.secondCookie });
+  assert.equal((await f.request("other.kanban.cards", "/api/projects", { method: "POST", cookie: f.secondCookie, origin: "https://other.kanban.cards", expectedOwner: f.owner.id, body: { name: "Old owner intent must not create" } })).status, 401);
+  assert.deepEqual((await f.request("other.kanban.cards", "/api/projects", { cookie: f.secondCookie })).data, beforeProjects.data);
+  assert.equal((await f.request("kanban.cards", "/api/workspaces", { method: "POST", cookie: otherRoot, origin: ROOT, expectedOwner: f.owner.id, body: { name: "Old intent", slug: "old-intent" } })).status, 401);
+  assert.equal((await f.request("kanban.cards", "/api/workspace-handoffs", { method: "POST", cookie: otherRoot, origin: ROOT, expectedOwner: f.owner.id, body: { slug: "other" } })).status, 401);
+  const afterRegistry = await f.accessStore.read();
+  assert.deepEqual(afterRegistry.workspaces, beforeRegistry.workspaces); assert.deepEqual(afterRegistry.handoffs, beforeRegistry.handoffs);
+  assert.equal((await f.request("other.kanban.cards", "/api/projects", { method: "POST", cookie: f.secondCookie, origin: "https://other.kanban.cards", expectedOwner: f.other.id, body: { name: "Verified owner intent" } })).status, 201);
+  assert.equal((await f.request("other.kanban.cards", "/api/projects", { method: "POST", origin: "https://other.kanban.cards", expectedOwner: f.other.id, body: { name: "Header alone grants nothing" } })).status, 401);
 }));

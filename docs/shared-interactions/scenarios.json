@@ -1,0 +1,1418 @@
+{
+  "schemaVersion": 1,
+  "basis": {
+    "commit": "f3406b38b0c89bfdd65b909ce07c507f313a0084",
+    "interpretation": "Future shared acceptance targets. Scenario presence is not a current implementation, test, pass result or permission to operate live data."
+  },
+  "runtimeAcceptance": "pending",
+  "fixture": {
+    "kind": "synthetic-only",
+    "resetBeforeEachScenario": true,
+    "timestamp": "2026-10-01T12:00:00.000Z",
+    "owners": [
+      {
+        "id": "owner-a",
+        "displayName": "Owner A"
+      },
+      {
+        "id": "owner-b",
+        "displayName": "Owner B"
+      }
+    ],
+    "workspaces": [
+      {
+        "id": "workspace-a",
+        "slug": "synthetic-a",
+        "name": "Synthetic Workspace A",
+        "url": "https://synthetic-a.kanban.example.invalid",
+        "ownerIds": [
+          "owner-a"
+        ]
+      },
+      {
+        "id": "workspace-b",
+        "slug": "synthetic-b",
+        "name": "Synthetic Workspace B",
+        "url": "https://synthetic-b.kanban.example.invalid",
+        "ownerIds": [
+          "owner-b"
+        ]
+      }
+    ],
+    "project": {
+      "id": "project-a",
+      "workspaceId": "workspace-a",
+      "name": "Synthetic Release",
+      "description": "Shared acceptance fixture.",
+      "revision": 20,
+      "columns": [
+        {
+          "id": "next",
+          "name": "Next",
+          "position": 0
+        },
+        {
+          "id": "doing",
+          "name": "Doing",
+          "position": 1
+        },
+        {
+          "id": "done",
+          "name": "Done",
+          "position": 2
+        },
+        {
+          "id": "review",
+          "name": "Custom review",
+          "position": 3
+        }
+      ],
+      "cards": [
+        {
+          "id": "card-a",
+          "title": "Prepare release notes",
+          "body": "Source line one.\n\nKeep trailing spaces.  \n",
+          "nextActor": "human",
+          "nextAction": "Draft summary",
+          "priority": "Medium",
+          "blockedReason": "",
+          "columnId": "next",
+          "position": 0,
+          "version": 7,
+          "archivedAt": null,
+          "comments": []
+        },
+        {
+          "id": "card-b",
+          "title": "Verify installation",
+          "body": "Read the saved build receipt.",
+          "nextActor": null,
+          "nextAction": "",
+          "priority": null,
+          "blockedReason": "",
+          "columnId": "doing",
+          "position": 0,
+          "version": 4,
+          "archivedAt": null,
+          "comments": []
+        }
+      ],
+      "activity": []
+    }
+  },
+  "scenarios": [
+    {
+      "id": "SI-001",
+      "title": "Edit stays local until explicit Save",
+      "priority": "High",
+      "platforms": [
+        "macos",
+        "ios",
+        "web"
+      ],
+      "capabilityIds": [
+        "feature-card-edit-save",
+        "feature-card-fields",
+        "feature-draft-durability"
+      ],
+      "given": [
+        "Owner A opens Card A at version 7 with the baseline fields."
+      ],
+      "when": [
+        "Change title, Description and priority; leave each field and visit another Card section without Save.",
+        "Activate Save once."
+      ],
+      "then": [
+        "Before Save the server remains at baseline version 7; blur, choice changes and section navigation send no Card mutation.",
+        "The complete proposed values remain a recoverable local draft.",
+        "One version-checked Save commits the proposed fields and preserves untouched fields, Comments and identity.",
+        "The UI distinguishes requested values from confirmed saved values and uses the returned version."
+      ],
+      "fixture": {
+        "proposed": {
+          "title": "Revised release notes",
+          "body": "Local source\n\nKeep spaces.  \n",
+          "priority": "High"
+        }
+      },
+      "expectedEffects": {
+        "requests": [
+          "No Card mutation before Save",
+          "One versioned PATCH after Save"
+        ],
+        "stored": {
+          "title": "Revised release notes",
+          "body": "Local source\n\nKeep spaces.  \n",
+          "priority": "High",
+          "columnId": "next"
+        },
+        "localDraft": "Retained until confirmation; completion does not depend on successful follow-up refresh."
+      }
+    },
+    {
+      "id": "SI-002",
+      "title": "Create commits one Card only after explicit Create",
+      "priority": "High",
+      "platforms": [
+        "macos",
+        "ios",
+        "web"
+      ],
+      "capabilityIds": [
+        "feature-card-create",
+        "feature-card-fields",
+        "feature-draft-close-cancel"
+      ],
+      "given": [
+        "Owner A starts a new Card in the custom review Column."
+      ],
+      "when": [
+        "Enter all supported fields, choose review, close the form and reopen the retained draft.",
+        "Activate Create once."
+      ],
+      "then": [
+        "Close creates no server Card; reopening restores every field and selected Column.",
+        "Create adds exactly one Card with stable identity and correct append placement in review.",
+        "Existing Cards, Columns and other Projects remain unchanged; a fresh read includes the new Card."
+      ]
+    },
+    {
+      "id": "SI-003",
+      "title": "Cancel and Close retain drafts across relaunch; explicit Discard removes unsubmitted drafts",
+      "priority": "High",
+      "platforms": [
+        "macos",
+        "ios",
+        "web"
+      ],
+      "capabilityIds": [
+        "feature-draft-close-cancel",
+        "feature-draft-durability",
+        "feature-card-edit-save",
+        "feature-comment-post"
+      ],
+      "given": [
+        "Owner A has separate unsubmitted Card, Project and Comment drafts."
+      ],
+      "when": [
+        "Cancel, Close or use native Back from each editing surface; terminate and relaunch.",
+        "Sign in as Owner A, reopen each resource, then explicitly Discard or Revert each draft after confirmation."
+      ],
+      "then": [
+        "Cancel, Close, Back and relaunch perform no server mutation.",
+        "Each complete draft returns to its own resource, including whitespace, Column and optional fields; the UI distinguishes local from saved values.",
+        "Explicit Discard or Revert removes only the selected unsubmitted draft; another draft is unaffected.",
+        "Discarded drafts do not return after another relaunch and server values remain unchanged.",
+        "Discarding an unknown submitted operation is governed by SI-010 and SI-011; local discard never promises server undo."
+      ]
+    },
+    {
+      "id": "SI-004",
+      "title": "Local draft write failure leaves an accessible recovery path",
+      "priority": "High",
+      "platforms": [
+        "macos",
+        "ios",
+        "web"
+      ],
+      "capabilityIds": [
+        "feature-local-write-failure",
+        "feature-draft-durability",
+        "feature-draft-close-cancel"
+      ],
+      "given": [
+        "Inject a local storage write failure while Owner A edits Card A or a Comment; newest text exists only in memory."
+      ],
+      "when": [
+        "Try leaving the editor; retry persistence after storage recovers.",
+        "Repeat with storage unavailable and use an explicit copy or export recovery action."
+      ],
+      "then": [
+        "The UI names local persistence failure and never claims that the newest draft is durable.",
+        "Leaving cannot silently destroy the only copy; newest text remains accessible.",
+        "Copy or export contains the full draft and no credentials; Retry persists the same newest draft and relaunch restores it.",
+        "Local recovery sends no server mutation; server Save or Send remains explicit.",
+        "Keep useful failed-write recovery owner-scoped in the running client; hide retained content during sign-out and expose it only after verified same-owner authentication. Relaunch restores only persisted records, never promises recovery of lost memory."
+      ]
+    },
+    {
+      "id": "SI-005",
+      "title": "Dirty title then Move Next to Done then Save preserves Done",
+      "priority": "High",
+      "platforms": [
+        "macos",
+        "ios",
+        "web"
+      ],
+      "capabilityIds": [
+        "feature-move",
+        "feature-card-edit-save",
+        "feature-conflict-reconciliation"
+      ],
+      "given": [
+        "Card A is saved in Next at version 7; local title is Revised release notes and Column is untouched locally."
+      ],
+      "when": [
+        "Use the separate Move command to request Done and wait for confirmation.",
+        "Save the title draft."
+      ],
+      "then": [
+        "Until Move is confirmed the UI distinguishes requested Done from saved Next.",
+        "Move sends only columnId and optional placement/order data allowed by the API, never dirty title, Description or metadata.",
+        "Confirmed Done and current version rebase into the untouched local Column field while the dirty title remains.",
+        "Save commits Revised release notes and keeps Done; no stale snapshot moves the Card back to Next.",
+        "Every open presentation and a fresh second-client read show Done."
+      ],
+      "fixture": {
+        "draft": {
+          "title": "Revised release notes"
+        },
+        "moveTo": "done"
+      },
+      "expectedEffects": {
+        "requests": [
+          "Versioned Move PATCH contains columnId and optional position only",
+          "Later versioned Save preserves confirmed columnId done"
+        ],
+        "storedAfterMove": {
+          "title": "Prepare release notes",
+          "columnId": "done"
+        },
+        "storedAfterSave": {
+          "title": "Revised release notes",
+          "columnId": "done"
+        },
+        "localDraft": "Dirty title survives Move; untouched Column rebases to confirmed Done."
+      }
+    },
+    {
+      "id": "SI-006",
+      "title": "A separate Move reconciles a destination retained in a legacy draft",
+      "priority": "High",
+      "platforms": [
+        "macos",
+        "ios",
+        "web"
+      ],
+      "capabilityIds": [
+        "feature-move",
+        "feature-card-edit-save",
+        "feature-conflict-reconciliation"
+      ],
+      "given": [
+        "Card A is saved in Next; an existing retained legacy draft proposes title Revised release notes and Column Doing without a confirmed move.",
+        "In the target model, text Save never moves a Card; destination changes use a separate versioned Move command."
+      ],
+      "when": [
+        "Use separate Move to request Done and wait for confirmation.",
+        "Resolve the legacy destination disagreement by adopting saved Done, then Save text.",
+        "Repeat from baseline and choose the retained Doing destination by explicitly starting a separate Move to Doing, then Save text."
+      ],
+      "then": [
+        "The first Move submits only columnId Done and permitted position, never dirty title or metadata; the legacy Doing proposal remains recoverable.",
+        "The UI identifies saved Done versus retained legacy Doing and requires an explicit destination decision; a text Save never commits the legacy destination.",
+        "Adopting saved Done clears only the obsolete destination proposal; later text Save keeps Done and preserves the dirty title.",
+        "Choosing retained Doing starts a separate current-version Move; Doing is shown as requested until the server confirms it. Only that Move changes placement.",
+        "The following text Save preserves the confirmed destination and never moves the Card itself; Cancel of destination reconciliation preserves recoverable legacy values."
+      ],
+      "fixture": {
+        "legacyDraft": {
+          "title": "Revised release notes",
+          "columnId": "doing"
+        },
+        "moveTo": "done",
+        "resolutions": [
+          {
+            "choice": "adopt-saved-destination",
+            "expectedColumnId": "done"
+          },
+          {
+            "choice": "separate-move-to-legacy-destination",
+            "requestedMoveTo": "doing",
+            "expectedColumnId": "doing"
+          }
+        ]
+      },
+      "expectedEffects": {
+        "requests": [
+          "First versioned Move: columnId done and optional position only",
+          "Adopt saved Done branch: no further Move",
+          "Use legacy Doing branch: a separately confirmed versioned Move to doing",
+          "Text Save in either branch excludes columnId and position"
+        ],
+        "stored": "Placement changes only through confirmed Move commands. Text Save commits proposed text while preserving the last confirmed placement.",
+        "localDraft": "Legacy destination is retained until an explicit destination decision; dirty text is never silently discarded."
+      }
+    },
+    {
+      "id": "SI-007",
+      "title": "Comment version advance does not create a text conflict",
+      "priority": "High",
+      "platforms": [
+        "macos",
+        "ios",
+        "web"
+      ],
+      "capabilityIds": [
+        "feature-comment-post",
+        "feature-conflict-reconciliation",
+        "feature-card-edit-save"
+      ],
+      "given": [
+        "Owner A has a dirty title draft at version 7; saved editable fields still match its baseline."
+      ],
+      "when": [
+        "Another context posts Comment C1, advancing Card version without changing editable fields.",
+        "Refresh or reconcile, then Save title."
+      ],
+      "then": [
+        "C1 appears exactly once with server attribution and time.",
+        "Dirty title survives and a version advance alone does not create a same-field conflict.",
+        "Save uses current version, retains C1 and changes only intended editable values.",
+        "A compact Comment receipt does not prove unseen Card field values."
+      ],
+      "fixture": {
+        "comment": {
+          "id": "comment-c1",
+          "body": "Review completed.",
+          "author": "Owner A"
+        }
+      },
+      "expectedEffects": {
+        "requests": [
+          "One idempotent Comment POST",
+          "Current Card read before reconciliation where the receipt lacks full fields",
+          "One versioned title Save"
+        ],
+        "stored": "One Comment C1 plus intended title; untouched Card fields preserved.",
+        "localDraft": "Dirty title remains recoverable through Comment/version refresh."
+      }
+    },
+    {
+      "id": "SI-008",
+      "title": "External nonoverlapping edits rebase into untouched draft fields",
+      "priority": "High",
+      "platforms": [
+        "macos",
+        "ios",
+        "web"
+      ],
+      "capabilityIds": [
+        "feature-conflict-reconciliation",
+        "feature-card-edit-save",
+        "feature-refresh"
+      ],
+      "given": [
+        "Card A local draft changes title only; baseline priority is Medium and Column Next."
+      ],
+      "when": [
+        "Another client saves priority High and Column Done.",
+        "Refresh or reconcile, then Save the local title."
+      ],
+      "then": [
+        "Dirty title remains while saved High and Done replace only untouched local fields.",
+        "No same-field conflict decision is required for nonoverlapping changes.",
+        "The current-version Save preserves High, Done and all Comments.",
+        "No stale full-field payload restores Medium or Next."
+      ]
+    },
+    {
+      "id": "SI-009",
+      "title": "External same-field edits require deliberate reconciliation",
+      "priority": "High",
+      "platforms": [
+        "macos",
+        "ios",
+        "web"
+      ],
+      "capabilityIds": [
+        "feature-conflict-reconciliation",
+        "feature-card-edit-save",
+        "feature-draft-durability"
+      ],
+      "given": [
+        "Card A local draft changes title to Local title and Description to Local body."
+      ],
+      "when": [
+        "Another client saves Remote title; attempt Save or refresh.",
+        "Review baseline/draft/latest, choose saved title and Save remaining Description; repeat choosing local title."
+      ],
+      "then": [
+        "No silent overwrite occurs and complete draft stays accessible.",
+        "Conflict names title rather than treating every version advance as a field conflict.",
+        "Use saved yields Remote title plus Local body; Keep local deliberately yields Local title plus Local body.",
+        "Resolved Save uses current version; another intervening change requires another reconciliation."
+      ],
+      "fixture": {
+        "draft": {
+          "title": "Local title",
+          "body": "Local body"
+        },
+        "remote": {
+          "title": "Remote title"
+        }
+      }
+    },
+    {
+      "id": "SI-010",
+      "title": "Unknown POST outcome preserves frozen operation identity through retry or discard",
+      "priority": "High",
+      "platforms": [
+        "macos",
+        "ios",
+        "web"
+      ],
+      "capabilityIds": [
+        "feature-unknown-response",
+        "feature-card-create",
+        "feature-project-create-edit",
+        "feature-comment-post"
+      ],
+      "given": [
+        "Run Card create, Project create and Comment POST variants; server commits the initial POST but its response is lost."
+      ],
+      "when": [
+        "Relaunch with the pending operation, then Retry using its original key and payload.",
+        "Repeat by choosing Revert or Discard while the original outcome is unknown, then starting a new intent."
+      ],
+      "then": [
+        "Timeout stays unconfirmed rather than proving failure; requested values are not presented as a confirmed resource.",
+        "Retries reuse identical Idempotency-Key and semantic payload, including frozen destination, placement and external key for Card creation.",
+        "The original logical operation produces exactly one create effect across all of its retries; an old replay snapshot cannot replace newer saved fields after readback.",
+        "Revert/Discard removes local editing intent only, never implies server undo, and cannot destroy pending operation identity before reconciliation prevents duplicate POSTs.",
+        "A payload different from the frozen original requires an acknowledged separate intent and new key after the previous operation has been reconciled. If the owner explicitly submits that new intent, its separate effect is counted independently; no retry occurs under a different owner."
+      ],
+      "fixture": {
+        "operationKinds": [
+          "card-create",
+          "project-create",
+          "comment-create"
+        ],
+        "idempotencyKey": "synthetic-operation-si-010",
+        "fault": "drop-response-after-commit"
+      },
+      "expectedEffects": {
+        "requests": [
+          "Original POST may commit",
+          "Retry uses original operation identity and payload",
+          "Read current state after replay"
+        ],
+        "stored": "Exactly one created resource or Comment for the original logical operation across retries. A separately acknowledged and submitted new intent may deliberately create an additional effect under its own identity.",
+        "localDraft": "Frozen submission and owner-bound operation identity survive relaunch and unknown-outcome discard until reconciled."
+      }
+    },
+    {
+      "id": "SI-011",
+      "title": "Unknown versioned PATCH requires readback instead of assumed idempotency",
+      "priority": "High",
+      "platforms": [
+        "macos",
+        "ios",
+        "web"
+      ],
+      "capabilityIds": [
+        "feature-unknown-response",
+        "feature-conflict-reconciliation",
+        "feature-card-edit-save"
+      ],
+      "given": [
+        "Run commit-then-drop-response and drop-before-commit variants for a version-7 Card PATCH.",
+        "Repeating payload/version does not create a backend idempotency contract for PATCH."
+      ],
+      "when": [
+        "Preserve submitted snapshot and read current Card; compare baseline/submitted/latest.",
+        "Show observed saved values if latest matches; otherwise offer current-version retry or field reconciliation.",
+        "Repeat with Revert/Discard while the original PATCH is unknown."
+      ],
+      "then": [
+        "No blind PATCH replay is justified by an Idempotency-Key assumption.",
+        "Matching readback proves desired values are observed saved; matching values alone do not prove original request or actor identity.",
+        "Retry uses a reconciled current version and explicit resolution of intervening same-field changes.",
+        "Already matching state is not rewritten just to manufacture confirmation or Activity.",
+        "Local Revert/Discard never undoes a potentially committed server write; unknown submission identity remains available until reconciliation and never transfers to another owner."
+      ],
+      "fixture": {
+        "variants": [
+          "commit-then-drop-response",
+          "drop-before-commit"
+        ],
+        "initialVersion": 7,
+        "readbackProvesOperationIdentity": false
+      },
+      "expectedEffects": {
+        "requests": [
+          "Current authorized GET before retry decision",
+          "No extra PATCH when desired state already matches",
+          "Only reconciled versioned PATCH for an explicit retry"
+        ],
+        "stored": "No duplicate write solely for receipt recovery; intervening saved fields preserved.",
+        "localDraft": "Baseline, submitted snapshot, owner and uncertainty remain distinct until resolved."
+      }
+    },
+    {
+      "id": "SI-012",
+      "title": "Confirmed write survives failed refresh and local cleanup",
+      "priority": "High",
+      "platforms": [
+        "macos",
+        "ios",
+        "web"
+      ],
+      "capabilityIds": [
+        "feature-refresh",
+        "feature-unknown-response",
+        "feature-local-write-failure",
+        "feature-draft-durability"
+      ],
+      "given": [
+        "Server confirms Card Save or Comment Send."
+      ],
+      "when": [
+        "Fail follow-up Project/list refresh, then fail removal of completed draft.",
+        "Relaunch and Retry cleanup after storage recovers."
+      ],
+      "then": [
+        "Returned resource/version stays applied; UI distinguishes write success from incomplete refresh.",
+        "No confirmed mutation is resent to recover a failed read or cleanup.",
+        "Durable completion receipt prevents completed draft submission after relaunch.",
+        "Retry cleanup removes only the completed local record; explicit Refresh later reads current saved state."
+      ]
+    },
+    {
+      "id": "SI-013",
+      "title": "Archive and Restore preserve unfinished draft without submitting it",
+      "priority": "High",
+      "platforms": [
+        "macos",
+        "ios",
+        "web"
+      ],
+      "capabilityIds": [
+        "feature-archive-restore",
+        "feature-draft-durability",
+        "feature-conflict-reconciliation"
+      ],
+      "given": [
+        "Card A is saved in custom review and has a dirty title/Description draft."
+      ],
+      "when": [
+        "Archive locally or externally and refresh all presentations.",
+        "Restore, reopen retained draft, reconcile current version and explicitly Save."
+      ],
+      "then": [
+        "Archive changes archivedAt and server version only; dirty text is absent from its request.",
+        "Archived Card remains readable, leaves active board and rejects ordinary edits until restored; local draft stays recoverable.",
+        "Restore changes archivedAt to null using current version and preserves stored custom Column.",
+        "Post-restore Save commits retained text without restoring stale archive/placement values."
+      ]
+    },
+    {
+      "id": "SI-014",
+      "title": "Missing or unauthorized resources never trigger implicit recreation",
+      "priority": "High",
+      "platforms": [
+        "macos",
+        "ios",
+        "web"
+      ],
+      "capabilityIds": [
+        "feature-draft-durability",
+        "feature-conflict-reconciliation",
+        "feature-draft-owner-isolation"
+      ],
+      "given": [
+        "Owner A retains a draft whose Card, Project or Workspace disappears after a synthetic fixture reset or access change; run 404 and revoked-access variants."
+      ],
+      "when": [
+        "Refresh and reopen the retained draft, then use recovery or explicit local Discard."
+      ],
+      "then": [
+        "UI distinguishes unavailable/access-lost from an empty resource and blocks unauthorized mutations.",
+        "Authorized owner-local recovery identifies original owner, Workspace, Project and Card; no other resource inherits the draft.",
+        "No POST automatically recreates missing data.",
+        "Discard removes only selected local recovery and leaves server state unchanged."
+      ]
+    },
+    {
+      "id": "SI-015",
+      "title": "Drafts remain isolated by authenticated owner and Workspace identity",
+      "priority": "High",
+      "platforms": [
+        "macos",
+        "ios",
+        "web"
+      ],
+      "capabilityIds": [
+        "feature-draft-owner-isolation",
+        "feature-draft-durability",
+        "feature-signout"
+      ],
+      "given": [
+        "Owner A has drafts in Workspace A; Owner B later uses the same device/browser profile.",
+        "Repeat with identical resource display names in two Workspace origins."
+      ],
+      "when": [
+        "Sign in as Owner B and inspect navigation and recovery surfaces.",
+        "Sign out and sign back in as Owner A; reopen the original resources."
+      ],
+      "then": [
+        "Owner B sees no Owner A text, private names, receipts, previews or selection.",
+        "Draft identity includes authenticated owner, Workspace identity/origin, Project and resource, never labels alone.",
+        "Owner A can recover retained drafts only after authentication and current authorization; recovery sends no mutation.",
+        "No raw bearer, recovery code or credential enters draft payload; Workspace B never loads Workspace A drafts."
+      ]
+    },
+    {
+      "id": "SI-016",
+      "title": "Sign-out hides private state while revocation remains pending",
+      "priority": "High",
+      "platforms": [
+        "macos",
+        "ios",
+        "web"
+      ],
+      "capabilityIds": [
+        "feature-signout",
+        "feature-draft-owner-isolation",
+        "feature-unknown-response"
+      ],
+      "given": [
+        "Owner A has private data and a pending read/mutation; sign-out response will be lost."
+      ],
+      "when": [
+        "Sign out, then deliver old pending responses.",
+        "Relaunch and Retry revocation; repeat after a replacement Owner B session starts."
+      ],
+      "then": [
+        "Private saved and pending draft content disappears immediately; further owner writes are blocked.",
+        "Unconfirmed revocation remains durable and private content stays hidden after relaunch.",
+        "Only confirmed revocation or current-session rejection permits a completed sign-out claim.",
+        "Old successes/failures cannot restore Owner A state, remove Owner B credentials, alter Owner B drafts or retry an operation as Owner B.",
+        "Owner A recovery remains hidden and owner-bound until Owner A authenticates again."
+      ]
+    },
+    {
+      "id": "SI-017",
+      "title": "Expiry blocks writes without damaging a replacement session",
+      "priority": "High",
+      "platforms": [
+        "macos",
+        "ios",
+        "web"
+      ],
+      "capabilityIds": [
+        "feature-session-expiry",
+        "feature-draft-owner-isolation",
+        "feature-draft-durability"
+      ],
+      "given": [
+        "Owner A has durable unsaved work and its session expires or is revoked."
+      ],
+      "when": [
+        "Attempt Refresh/Save and receive current-session 401.",
+        "Authenticate again and recover deliberately; separately deliver old-session 401 after replacement authentication."
+      ],
+      "then": [
+        "Expired credential is no longer used, private data is hidden and no automatic save occurs.",
+        "Owner recovery requires matching authentication/current authorization and reconciliation with current saved state.",
+        "Old-session failure cannot invalidate replacement credentials or data.",
+        "No silent reauthentication or replay occurs; pending operations remain bound to their original owner."
+      ]
+    },
+    {
+      "id": "SI-018",
+      "title": "Concurrent Card presentations cannot silently overwrite local work",
+      "priority": "High",
+      "platforms": [
+        "macos",
+        "ios",
+        "web"
+      ],
+      "capabilityIds": [
+        "feature-multiple-card-contexts",
+        "feature-card-edit-save",
+        "feature-draft-durability",
+        "feature-conflict-reconciliation"
+      ],
+      "given": [
+        "Two contexts address Owner A / Workspace A / Project A / Card A: Mac windows, web tabs, or iOS editor plus another authorized context; extra iPhone windows are not required.",
+        "Also run two same-Card Comment composers, including different unsent bodies and an unknown submitted Comment POST in one context."
+      ],
+      "when": [
+        "Edit title in context one and Description in context two; vary save/persistence/refresh order.",
+        "Close one context and relaunch; repeat with competing title edits.",
+        "Edit both Comment drafts, lose one submitted response, close either context and relaunch; vary which draft persists last and which pending operation is retried."
+      ],
+      "then": [
+        "Presentations using one shared editing session show the same dirty values and resource identity.",
+        "Independent contexts coordinate local record ownership or retain distinguishable recovery drafts; last writer never silently destroys another unsaved draft.",
+        "Nonoverlapping saved changes survive; same-field disagreement requires deliberate current-version reconciliation.",
+        "Closing one presentation neither discards another draft nor reroutes Save; reopened recovery identifies correct Card/owner.",
+        "Same-Card Comment composers coordinate one shared draft or retain separately identifiable recoverable copies; one local write cannot silently replace another body or frozen POST key.",
+        "Closing either composer/presentation preserves the other intent and any unknown operation identity. Retrying the original pending Comment reuses its original owner, payload and key and creates exactly one Comment for that logical operation.",
+        "A deliberately separate Comment intent has its own key/effect only after explicit submission; neither composer can adopt or discard another pending key without reconciliation."
+      ],
+      "fixture": {
+        "variants": [
+          "nonoverlapping-card-fields",
+          "same-card-field-conflict",
+          "two-unsent-comment-bodies",
+          "unknown-comment-post-plus-other-local-body"
+        ],
+        "commentBodies": [
+          "First retained comment",
+          "Second retained comment"
+        ],
+        "pendingCommentKey": "synthetic-si-018-original-comment"
+      }
+    },
+    {
+      "id": "SI-019",
+      "title": "Project-scoped search and filters retain drafts and reachable keyboard focus",
+      "priority": "High",
+      "platforms": [
+        "macos",
+        "ios",
+        "web"
+      ],
+      "capabilityIds": [
+        "feature-search",
+        "feature-filters",
+        "feature-draft-close-cancel"
+      ],
+      "given": [
+        "Project A contains active/archived Cards and Card A has an open draft; another Project has matching text.",
+        "Include four blocker values: empty string, spaces, whitespace with a newline, and a nonempty word surrounded by spaces.",
+        "Search normalization is field/query NFC, default locale-independent full Unicode case folding, then NFC again. Trim Unicode White_Space at query ends only; retain interior whitespace and diacritics."
+      ],
+      "when": [
+        "Search title, Description, next action or blocker using every fixture search example, then combine Next actor/Priority/Blocked filters.",
+        "Clear search separately from filters; open and close a Card hidden by the resulting criteria using keyboard navigation.",
+        "Switch Project and return."
+      ],
+      "then": [
+        "Search is a literal substring within any one normalized title, Description, nextAction or blocker field, combined with selected filters using AND over active Project data only; text never joins across field boundaries. Other Projects never enter results.",
+        "Clear filters preserves search and Clear search preserves filters. If a Clear all action is exposed, it resets both; a separate Clear all control is not required.",
+        "Search/filter never changes saved data, closes a valid draft or silently archives a Card.",
+        "Criteria stay Project-local during the session and return with that Project.",
+        "Close returns focus to visible source Card or its visible Column/navigation fallback; obscured controls are not targets and focus stays visible.",
+        "Blocked filtering uses nonempty text after trimming the agreed Unicode White_Space set: space, tab, newline and NBSP-only values are Unblocked; a surrounding-space nonempty value is Blocked. Filtering never rewrites stored blocker source.",
+        "An empty or Unicode-White_Space-only query matches all active Cards before AND filters. NFC-equivalent and full-case-fold-equivalent text matches, without diacritic stripping or interior-whitespace collapsing; fixture true/false examples must agree on every platform."
+      ],
+      "fixture": {
+        "blockerVariants": [
+          {
+            "value": "",
+            "expectedBlocked": false
+          },
+          {
+            "value": "   ",
+            "expectedBlocked": false
+          },
+          {
+            "value": " \n\t ",
+            "expectedBlocked": false
+          },
+          {
+            "value": " ",
+            "expectedBlocked": false
+          },
+          {
+            "value": "  Waiting  ",
+            "expectedBlocked": true
+          }
+        ],
+        "searchNormalization": {
+          "unicodeNormalizationBefore": "NFC",
+          "caseFolding": "default locale-independent full Unicode case folding",
+          "unicodeNormalizationAfter": "NFC",
+          "trimQueryEnds": "Unicode White_Space property set defined in the governing README",
+          "interiorWhitespace": "preserve",
+          "matching": "literal substring within a single allowed field",
+          "stripDiacritics": false,
+          "emptyQueryMatches": "all active Project Cards before AND filters"
+        },
+        "searchExamples": [
+          {
+            "query": "  RELEASE ",
+            "fields": {
+              "title": "Prepare release notes"
+            },
+            "expectedMatch": true
+          },
+          {
+            "query": "CAFÉ",
+            "fields": {
+              "title": "Café"
+            },
+            "expectedMatch": true
+          },
+          {
+            "query": "cafe",
+            "fields": {
+              "title": "café"
+            },
+            "expectedMatch": false
+          },
+          {
+            "query": "STRASSE",
+            "fields": {
+              "title": "Straße"
+            },
+            "expectedMatch": true
+          },
+          {
+            "query": " \t ",
+            "fields": {
+              "title": "Any active Card"
+            },
+            "expectedMatch": true
+          },
+          {
+            "query": "release  notes",
+            "fields": {
+              "title": "release notes"
+            },
+            "expectedMatch": false
+          },
+          {
+            "query": "release notes",
+            "fields": {
+              "title": "release",
+              "body": "notes"
+            },
+            "expectedMatch": false
+          },
+          {
+            "query": "waiting",
+            "fields": {
+              "blockedReason": "  Waiting on review  "
+            },
+            "expectedMatch": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "SI-020",
+      "title": "Workspace create and select Cancel preserve current context",
+      "priority": "Medium",
+      "platforms": [
+        "macos",
+        "ios",
+        "web"
+      ],
+      "capabilityIds": [
+        "feature-workspace-create",
+        "feature-workspace-switch",
+        "feature-draft-close-cancel"
+      ],
+      "given": [
+        "Owner A has Workspace A selected and a retained Card draft; also run an owner-with-zero-Workspaces variant."
+      ],
+      "when": [
+        "Enter valid New Workspace values then Cancel; separately cancel Workspace selection.",
+        "Create Synthetic New Workspace and switch back to Workspace A."
+      ],
+      "then": [
+        "Cancel sends no creation request and preserves selection/draft.",
+        "Confirmed create returns a validated owned URL, selects new Workspace and shows empty Projects.",
+        "Zero-Workspace owner can reach creation without another owner private data.",
+        "Switching back restores recovery without submitting it; credentials go only to validated owned origins."
+      ],
+      "fixture": {
+        "newWorkspace": {
+          "name": "Synthetic New Workspace",
+          "slug": "synthetic-new"
+        }
+      }
+    },
+    {
+      "id": "SI-021",
+      "title": "Unknown Workspace creation reconciles exact owned inventory",
+      "priority": "High",
+      "platforms": [
+        "macos",
+        "ios",
+        "web"
+      ],
+      "capabilityIds": [
+        "feature-workspace-create",
+        "feature-unknown-response",
+        "feature-draft-owner-isolation"
+      ],
+      "given": [
+        "Capture original inventory; server creates synthetic-new but response is lost. Workspace POST has no assumed idempotency contract."
+      ],
+      "when": [
+        "Retry same normalized name/address and reconcile current owned inventory.",
+        "Repeat with known identical Workspace, different name at address, quota failure, invalid receipt origin and owner change."
+      ],
+      "then": [
+        "Exact newly owned name/address absent from original baseline may confirm creation without a second create effect.",
+        "Ordinary conflict or known preexisting Workspace never masquerades as new success.",
+        "Failed/unmatched reconciliation stays unconfirmed, retains form/previous selection and never adopts unrelated Workspace.",
+        "Invalid origin never receives credentials; late receipt cannot populate replacement owner inventory."
+      ],
+      "fixture": {
+        "name": "Synthetic New Workspace",
+        "slug": "synthetic-new",
+        "knownBaselineWorkspaceIds": [
+          "workspace-a"
+        ]
+      }
+    },
+    {
+      "id": "SI-022",
+      "title": "Project and custom Column changes preserve resource identities",
+      "priority": "Medium",
+      "platforms": [
+        "macos",
+        "ios",
+        "web"
+      ],
+      "capabilityIds": [
+        "feature-project-create-edit",
+        "feature-project-archive-restore",
+        "feature-column-create-rename"
+      ],
+      "given": [
+        "Project A has four stable ordered Columns and Cards in custom review."
+      ],
+      "when": [
+        "Create another Project; edit Project A metadata, append a Column and rename review through explicit actions.",
+        "Archive and Restore Project A, then read from every client."
+      ],
+      "then": [
+        "New Project defaults to exactly Next, Doing, Done; existing Project is not truncated.",
+        "Metadata changes preserve Column IDs/order and placement; rename keeps the same Column identity.",
+        "Append creates one stable ID after the complete stored list using current Project revision.",
+        "Cancel or stale/unknown operation cannot overwrite newer Columns/Cards.",
+        "Archived Projects stay readable but reject ordinary edits until restored; Restore preserves resources and recovery drafts."
+      ],
+      "fixture": {
+        "rename": {
+          "id": "review",
+          "name": "Ready for review"
+        },
+        "append": {
+          "name": "Released"
+        }
+      }
+    },
+    {
+      "id": "SI-023",
+      "title": "Interim management navigation identifies unsupported native capabilities",
+      "priority": "Medium",
+      "platforms": [
+        "macos",
+        "ios",
+        "web"
+      ],
+      "capabilityIds": [
+        "feature-account-enrollment",
+        "feature-account-recovery",
+        "feature-account-passkeys",
+        "feature-account-sessions",
+        "feature-agent-keys",
+        "feature-native-controls"
+      ],
+      "given": [
+        "Registry identifies enrollment, recovery, passkeys, sessions and agent keys on every platform, including unsupported native operations.",
+        "This interim navigation case cannot pass the complete-management outcomes in SI-027 through SI-031."
+      ],
+      "when": [
+        "Enter each management action; inspect explicit availability and deliberate browser handoff where native support is absent.",
+        "Cancel and repeat without required authority."
+      ],
+      "then": [
+        "Every required capability has an agreed implementation or clearly named supported destination; unsupported actions never appear to succeed.",
+        "Native owner bearer never substitutes for recent browser verification, recovery authority or agent credentials.",
+        "No credential, recovery or permission effect is claimed before supported backend ceremony confirms it; Cancel preserves current context.",
+        "Native screens use standard Apple controls; a system-browser destination is identified before leaving. Embedded webpages never become native application screens.",
+        "Passing this interim navigation case does not close enrollment, recovery, passkey, session or agent-key parity. Native completion remains pending until the corresponding SI-027 through SI-031 flow succeeds inside the native app against an explicitly approved authorization contract."
+      ]
+    },
+    {
+      "id": "SI-024",
+      "title": "Saved cross-client handoff transfers stored work, never an unsaved draft",
+      "priority": "High",
+      "platforms": [
+        "macos",
+        "ios",
+        "web"
+      ],
+      "capabilityIds": [
+        "feature-cross-client-handoff",
+        "feature-card-fields",
+        "feature-card-activity",
+        "feature-refresh"
+      ],
+      "given": [
+        "Owner A opens the same authorized Project in two different clients; writer has an unsaved draft."
+      ],
+      "when": [
+        "Refresh reader before Save.",
+        "Writer explicitly saves nextActor agent, nextAction Review release notes, priority High and proposed Description; refresh reader.",
+        "Repeat all ordered platform pairs."
+      ],
+      "then": [
+        "Reader never presents writer-local unsaved values as saved.",
+        "After confirmation/refresh, identity, fields, Column, version and recorded Activity agree.",
+        "Stored actor identifies authenticated write path; nextActor never starts an agent, grants authority or produces approval.",
+        "Reader keeps unrelated local drafts during refresh."
+      ],
+      "fixture": {
+        "writerReaderPairs": [
+          [
+            "macos",
+            "ios"
+          ],
+          [
+            "macos",
+            "web"
+          ],
+          [
+            "ios",
+            "macos"
+          ],
+          [
+            "ios",
+            "web"
+          ],
+          [
+            "web",
+            "macos"
+          ],
+          [
+            "web",
+            "ios"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "SI-025",
+      "title": "Description source and passive preview follow one content contract",
+      "priority": "Medium",
+      "platforms": [
+        "macos",
+        "ios",
+        "web"
+      ],
+      "capabilityIds": [
+        "feature-markdown-preview",
+        "feature-card-fields",
+        "feature-card-edit-save"
+      ],
+      "given": [
+        "Description uses the exact LF-terminated source in this scenario fixture, including leading/trailing spaces, Markdown, raw HTML, safe HTTPS link, image reference and unsafe URL."
+      ],
+      "when": [
+        "Read, edit source, inspect passive preview where agreed, then Cancel.",
+        "Reopen, Save and read source from another client."
+      ],
+      "then": [
+        "Cancel never writes server content or strips leading/trailing whitespace from the source.",
+        "Save preserves the fixture source exactly as UTF-8 text, including every LF and leading/trailing space; rendered HTML never replaces source. No unspecified normalization exception can waive this assertion.",
+        "Preview cannot execute HTML, fetch remote images or activate unsafe URLs; safe links use the platform-selected external destination.",
+        "Required missing preview is recorded as a capability gap and never passes parity by showing source alone.",
+        "A separate CRLF variant, if supported, must declare its exact expected bytes before execution. Until that target is specified, CRLF normalization has pending acceptance rather than an implied allowance."
+      ],
+      "fixture": {
+        "body": "  # Source\n\n- Keep whitespace  \n\n<script>alert(1)</script>\n[Safe](https://example.invalid/review)\n![Image](https://example.invalid/image.png)\n[Unsafe](javascript:alert(1))\n",
+        "encoding": "UTF-8",
+        "lineEndings": "LF",
+        "expectedStoredBody": "  # Source\n\n- Keep whitespace  \n\n<script>alert(1)</script>\n[Safe](https://example.invalid/review)\n![Image](https://example.invalid/image.png)\n[Unsafe](javascript:alert(1))\n"
+      }
+    },
+    {
+      "id": "SI-026",
+      "title": "Refresh and Activity report saved changes without displacing drafts",
+      "priority": "Medium",
+      "platforms": [
+        "macos",
+        "ios",
+        "web"
+      ],
+      "capabilityIds": [
+        "feature-refresh",
+        "feature-project-activity",
+        "feature-card-activity",
+        "feature-draft-durability"
+      ],
+      "given": [
+        "Project/Card Activity exists and Card B has an unrelated dirty draft; an old read began before a confirmed mutation/newer read."
+      ],
+      "when": [
+        "Use explicit and foreground/reentry refresh; open Project Activity and Card A Activity.",
+        "Deliver old response after newer read; repeat after sign-out/session replacement."
+      ],
+      "then": [
+        "Refresh shows current saved data; Card Activity includes only that Card, while Project Activity includes its recorded changes newest first.",
+        "Activity uses stored actor/time without claiming verified human identity or agent execution.",
+        "Draft B, valid selection and reachable focus survive; reads never submit local work.",
+        "Lower revisions/old sessions cannot replace newer data or restore private state after sign-out.",
+        "Refresh does not imply realtime synchronization or an offline mutation queue."
+      ]
+    },
+    {
+      "id": "SI-027",
+      "title": "Complete enrollment binds the correct owner and Workspace and acknowledges recovery",
+      "priority": "High",
+      "platforms": [
+        "macos",
+        "ios",
+        "web"
+      ],
+      "capabilityIds": [
+        "feature-account-enrollment",
+        "feature-workspace-create"
+      ],
+      "given": [
+        "A synthetic new applicant has no account; Owner A already owns Workspace A and its resources. Run public-signup and explicitly authorized existing-owner-setup variants separately.",
+        "The existing-owner variant has a synthetic, unexpired single-use setup authorization bound to exactly Owner A.",
+        "Native enrollment and management require explicit backend authorization extensions. The current general native bearer does not confer enrollment, recovery, recent-verification or agent-key issuance authority; a browser handoff cannot pass this complete-native case."
+      ],
+      "when": [
+        "Complete the supported registration ceremony from each platform, create its discoverable passkey with user verification and inspect the one-time recovery code.",
+        "Try entering the board before acknowledging that the recovery code is saved; acknowledge deliberately, then open the owned Workspace.",
+        "Repeat with canceled or invalid registration, replayed/expired setup authorization and attempts to claim Owner A by email or display name."
+      ],
+      "then": [
+        "No owner, Workspace or credential effect is claimed before verified registration. Cancellation before server commitment creates no owner/Workspace and revokes no existing credential; late committed responses follow the unknown-outcome contract.",
+        "Public signup atomically creates a distinct internal owner, its private first Workspace, bound passkey and recovery-code hash. It cannot inherit Owner A identity, memberships, storage or board data.",
+        "Trusted existing-owner setup adds the passkey to exactly Owner A, consumes setup authorization once and preserves existing owner/Workspace/storage/resource identities. Setup replay or expiry cannot enroll another credential.",
+        "The recovery code appears only in the successful one-time issuance surface; server storage contains its hash. Board entry is gated by explicit recovery-code acknowledgement; acknowledgement is not proof that an external copy was actually saved.",
+        "The resulting authenticated context enumerates and enters only the intended owner Workspaces; exact origin/RP, challenge purpose, freshness, replay and owner binding remain enforced.",
+        "No credential, setup secret, recovery code or handoff token enters URLs, logs or durable UI storage; approved user-requested copying/export of the recovery code is distinct from implicit storage.",
+        "Complete native enrollment stays pending while only an external browser can perform registration; no native app reuses an ordinary bearer as setup or registration authority."
+      ],
+      "fixture": {
+        "variants": [
+          "public-signup-new-owner",
+          "trusted-existing-owner-setup"
+        ],
+        "existingOwnerId": "owner-a",
+        "existingWorkspaceIds": [
+          "workspace-a"
+        ],
+        "nativeAuthorizationPrerequisite": "approved-enrollment-contract",
+        "recoveryAcknowledgementRequired": true
+      }
+    },
+    {
+      "id": "SI-028",
+      "title": "Complete recovery rotates credentials and revokes old authority without losing resources",
+      "priority": "High",
+      "platforms": [
+        "macos",
+        "ios",
+        "web"
+      ],
+      "capabilityIds": [
+        "feature-account-recovery",
+        "feature-account-enrollment",
+        "feature-account-sessions",
+        "feature-agent-keys"
+      ],
+      "given": [
+        "Owner A has existing Workspace/Project/Card identities, two passkeys, browser and native sessions, pending root/tenant handoffs and agent keys. A synthetic unused recovery code belongs only to Owner A.",
+        "Owner B has independent credentials, sessions, keys and resources.",
+        "Native enrollment and management require explicit backend authorization extensions. The current general native bearer does not confer enrollment, recovery, recent-verification or agent-key issuance authority; a browser handoff cannot pass this complete-native case."
+      ],
+      "when": [
+        "Inspect the warning about recovery revocation, supply the saved code, complete replacement passkey registration and acknowledge the new one-time code before board entry.",
+        "Test canceled/failed replacement registration, invalid/consumed code, replay and concurrent recovery attempts from a fresh fixture."
+      ],
+      "then": [
+        "Canceled or failed replacement registration does not consume the recovery code, revoke existing authority or change resources.",
+        "Successful recovery atomically consumes the old code, revokes Owner A old passkeys, browser/native sessions, pending handoffs and agent keys, and enrolls the replacement passkey with a rotated recovery-code hash.",
+        "Exactly the intended Owner A identity, Workspace membership, storage IDs, Projects, Columns, Cards, Comments and Activity survive; Owner B authority/resources remain unchanged.",
+        "Old passkeys, sessions, handoffs, recovery code and agent keys are rejected after recovery. The replacement passkey/new session opens the same owned resources.",
+        "Only one successful recovery consumes the original code; concurrent or replayed attempts cannot create a second rotation or recover another owner.",
+        "The new code is shown once and requires explicit acknowledgement before board entry; raw recovery material is neither logged nor stored as plaintext by the server.",
+        "Agents must be explicitly reconnected with newly authorized keys; recovery never silently reissues agent credentials. Complete native recovery cannot pass through a browser-only handoff."
+      ],
+      "fixture": {
+        "ownerId": "owner-a",
+        "unaffectedOwnerId": "owner-b",
+        "passkeys": [
+          "passkey-old-1",
+          "passkey-old-2"
+        ],
+        "sessions": [
+          "browser-a",
+          "native-a"
+        ],
+        "handoffs": [
+          "auth-handoff-a",
+          "workspace-handoff-a"
+        ],
+        "agentConnections": [
+          "agent-key-a"
+        ],
+        "nativeAuthorizationPrerequisite": "approved-native-recovery-contract"
+      }
+    },
+    {
+      "id": "SI-029",
+      "title": "Complete passkey and recovery-code management requires recent owner verification",
+      "priority": "High",
+      "platforms": [
+        "macos",
+        "ios",
+        "web"
+      ],
+      "capabilityIds": [
+        "feature-account-passkeys",
+        "feature-account-recovery"
+      ],
+      "given": [
+        "Owner A has one valid passkey and an old recovery code. Exercise fresh verification and verification older than five minutes; Owner B owns a separate passkey.",
+        "Native enrollment and management require explicit backend authorization extensions. The current general native bearer does not confer enrollment, recovery, recent-verification or agent-key issuance authority; a browser handoff cannot pass this complete-native case."
+      ],
+      "when": [
+        "As Owner A complete recent verification, add a second passkey, list keys and remove a selected passkey.",
+        "Attempt removing the last active passkey, a foreign key and a ninth active key; cancel an addition before registration commits.",
+        "Replace the recovery code after recent verification, acknowledge the newly issued code and attempt the old code."
+      ],
+      "then": [
+        "Stale verification blocks credential changes until a valid new owner passkey verification succeeds. Ordinary native bearer or agent key alone cannot satisfy recent verification; failed/canceled verification grants no credential mutation authority.",
+        "A confirmed added passkey belongs to the same internal Owner A and authenticates that owner. Removing a selected key disables only that key; the remaining key stays usable.",
+        "Removing the last active passkey or exceeding the current eight-passkey limit is rejected without losing existing access; foreign keys are not listed or revocable.",
+        "Canceled uncommitted enrollment creates no new key. Existing session absolute expiry is not extended merely by recent verification.",
+        "Recovery-code replacement invalidates the previous code and stores only the replacement hash; the raw new code is issued once, requires explicit acknowledgement and cannot be retrieved again from settings.",
+        "Replacing the recovery code alone preserves existing passkeys, sessions, agent keys and board data; full recovery revocation happens only through the distinct recovery flow.",
+        "Complete passkey and recovery-code management requires each platform approved authority; native browser handoff observation alone leaves SI-029 pending."
+      ],
+      "fixture": {
+        "ownerId": "owner-a",
+        "unaffectedOwnerId": "owner-b",
+        "recentVerificationMaximumAgeSeconds": 300,
+        "activePasskeyLimit": 8,
+        "variants": [
+          "fresh-proof",
+          "stale-proof",
+          "canceled-proof",
+          "last-key",
+          "foreign-key",
+          "key-limit",
+          "recovery-code-rotation"
+        ],
+        "nativeAuthorizationPrerequisite": "approved-native-recent-verification-contract"
+      }
+    },
+    {
+      "id": "SI-030",
+      "title": "Complete session management lists and revokes only intended owner sessions",
+      "priority": "High",
+      "platforms": [
+        "macos",
+        "ios",
+        "web"
+      ],
+      "capabilityIds": [
+        "feature-account-sessions",
+        "feature-signout",
+        "feature-session-expiry"
+      ],
+      "given": [
+        "Owner A has two browser sessions and two native sessions with different absolute expiries; include one expired/revoked record. Owner B has an independent active session.",
+        "Root/tenant browser cookies within one browser session share the same server session ID; native sessions have separate IDs.",
+        "Native enrollment and management require explicit backend authorization extensions. The current general native bearer does not confer enrollment, recovery, recent-verification or agent-key issuance authority; a browser handoff cannot pass this complete-native case."
+      ],
+      "when": [
+        "Open the complete session list, revoke one named active native session and then one named browser session.",
+        "From a remaining authenticated Owner A session choose end all sessions; test foreign/nonexistent IDs and canceled revocation."
+      ],
+      "then": [
+        "List includes only current owner unrevoked/unexpired browser and native records with IDs, created/expiry data, accurate browser/native kind labels and correct current-session indication; native records are never mislabeled Browser session. No raw credential or Owner B session is exposed.",
+        "Individual revocation affects only the selected server session and associated pending handoffs; a browser session revocation affects its root/tenant family but not independent sessions.",
+        "End all revokes all Owner A browser/native sessions and pending handoffs associated with those sessions; Owner B sessions, passkeys, recovery code, agent keys and saved resources are unchanged.",
+        "Foreign/nonexistent IDs cannot revoke another session. Cancel before submission causes no revocation; an unknown submitted revocation stays unconfirmed until reconciled.",
+        "Affected clients reject further authority, hide private state and retain owner-scoped recovery safely; no completed revocation claim appears before confirmation or a current-session rejection.",
+        "Listing or recent verification never extends absolute session lifetime. Native full list/revoke-other/revoke-all requires its approved backend authorization extension; browser-only settings do not pass native completion."
+      ],
+      "fixture": {
+        "ownerId": "owner-a",
+        "activeSessions": [
+          {
+            "id": "browser-a-1",
+            "kind": "browser"
+          },
+          {
+            "id": "browser-a-2",
+            "kind": "browser"
+          },
+          {
+            "id": "native-a-1",
+            "kind": "native"
+          },
+          {
+            "id": "native-a-2",
+            "kind": "native"
+          }
+        ],
+        "unaffectedSession": {
+          "id": "browser-b-1",
+          "ownerId": "owner-b"
+        },
+        "nativeAuthorizationPrerequisite": "approved-native-session-management-contract"
+      }
+    },
+    {
+      "id": "SI-031",
+      "title": "Complete scoped agent-key management preserves one-time secrets and owned scope",
+      "priority": "High",
+      "platforms": [
+        "macos",
+        "ios",
+        "web"
+      ],
+      "capabilityIds": [
+        "feature-agent-keys",
+        "feature-account-passkeys",
+        "feature-draft-owner-isolation"
+      ],
+      "given": [
+        "Owner A has current membership in Workspace A and a separately owned Workspace C; Owner B owns Workspace B. No existing credential is supplied through the scenario files.",
+        "Freshness, scope, expiry and quota variants use synthetic records and isolated time.",
+        "Native enrollment and management require explicit backend authorization extensions. The current general native bearer does not confer enrollment, recovery, recent-verification or agent-key issuance authority; a browser handoff cannot pass this complete-native case."
+      ],
+      "when": [
+        "After recent owner passkey verification, create a named read-only key bound to Workspace A; separately create a read/write key and an expiring key.",
+        "Inspect listing after the issuance surface closes, then exercise each key against permitted/forbidden APIs and another Workspace.",
+        "Revoke one exact connection, test expired credentials and limits, cancel an unsubmitted creation, and attempt creation with stale verification or an agent/native ordinary bearer."
+      ],
+      "then": [
+        "Successful issuance creates one durable AgentConnection bound to authenticated Owner A, exact Workspace A, owner-chosen label, explicit scopes and optional expiry. Request body/headers cannot select another owner, Workspace or actor identity.",
+        "Raw credential is shown only in its one-time successful issuance surface for explicit setup/copy; server persists only its hash. Later listings show safe metadata and never recover the secret; no secret enters URLs, logs, draft storage or repository files.",
+        "Read-only key may read authorized Project data and cannot mutate it; write-enabled key may perform only its allowed Workspace operations. No agent key may enroll/manage owner credentials, create Workspaces or issue another key.",
+        "Foreign Workspace, expired and revoked credentials are rejected. Individual revocation disables only the intended owned connection and preserves unrelated keys/resources; successful API Activity uses durable stored connection ID/label.",
+        "At the current limits, the 51st unrevoked key for one owner/Workspace is rejected, and more than 100 successful issuances per owner/hour are rate limited across Workspaces. Revoking a key frees a slot but does not reset the issuance window.",
+        "Canceled unsubmitted creation issues no key; stale or missing recent owner proof blocks creation. Ordinary native session or agent bearer alone grants no issuance authority.",
+        "Native key creation/list/revocation remains pending until an explicit authorized backend/native implementation passes these effects; browser handoff alone cannot close complete native parity."
+      ],
+      "fixture": {
+        "ownerId": "owner-a",
+        "workspaceId": "workspace-a",
+        "otherOwnedWorkspaceId": "workspace-c",
+        "foreignWorkspaceId": "workspace-b",
+        "scopes": [
+          [
+            "read"
+          ],
+          [
+            "read",
+            "write"
+          ]
+        ],
+        "recentVerificationMaximumAgeSeconds": 300,
+        "unrevokedKeysPerOwnerWorkspaceLimit": 50,
+        "successfulKeysPerOwnerHourLimit": 100,
+        "nativeAuthorizationPrerequisite": "approved-native-agent-key-management-contract"
+      }
+    }
+  ]
+}

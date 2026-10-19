@@ -238,6 +238,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     if (!context.identity || context.auth?.method !== "cookie") throw httpError(401, "Owner sign-in required.");
     const active = await activeOwnerSession(accessStore, context.identity.sessionId);
     if (!active) throw httpError(401, "Owner sign-in required.");
+    assertExpectedOwner(req, active.owner.id);
     if (fresh && Date.now() - Date.parse(active.session.verifiedAt) > 5 * 60_000) throw httpError(403, "Fresh passkey verification required.");
     return { ...active, context };
   }
@@ -294,7 +295,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     }
     const context = await resolveAccessContext(req, contextConfig);
     const family = context.hostFamily || primaryHostFamily;
-    res.json({ authenticated: Boolean(context.auth), context: context.kind, rootUrl: family.rootOrigin, authMode: passkeyAuthConfig ? "passkey" : "local", loginUrl: passkeyAuthConfig ? `${authOrigin}/sign-in` : "", ...(context.auth ? { label: context.auth.actor.label, email: context.identity?.email } : {}), ...(context.auth?.method === "native" ? { authenticationMethod: "native", expiresAt: context.auth.expiresAt } : {}), ...(context.workspace ? { workspace: publicAccessWorkspace(context.workspace, family) } : {}), setupAvailable: Boolean(passkeyAuthConfig?.setupOwnerId && !((await accessStore.read()).setupConsumed)) });
+    res.json({ authenticated: Boolean(context.auth), context: context.kind, rootUrl: family.rootOrigin, authMode: passkeyAuthConfig ? "passkey" : "local", loginUrl: passkeyAuthConfig ? `${authOrigin}/sign-in` : "", ...(context.auth ? { label: context.auth.actor.label, email: context.identity?.email, ...(context.identity ? { ownerId: context.identity.providerSubject } : context.kind === "local" ? { ownerId: "local-owner" } : {}) } : {}), ...(context.auth?.method === "native" ? { authenticationMethod: "native", expiresAt: context.auth.expiresAt } : {}), ...(context.workspace ? { workspace: publicAccessWorkspace(context.workspace, family) } : {}), setupAvailable: Boolean(passkeyAuthConfig?.setupOwnerId && !((await accessStore.read()).setupConsumed)) });
   }));
   app.post("/api/auth-start", asyncHandler(async (req, res) => {
     noStore(res);
@@ -452,6 +453,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       identity = await verifiedRootIdentity(req, passkeyAuthConfig, trustForwardedHost, accessStore);
     }
     if (!identity) throw httpError(401, "Owner sign-in required.");
+    assertExpectedOwner(req, identity.providerSubject);
     rejectWorkspaceSelectors(req, true);
     const body = asRecord(req.body);
     const slug = workspaceSlug(body.slug);
@@ -483,6 +485,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     if (!passkeyAuthConfig) throw httpError(404, "API route not found.");
     const identity = await verifiedRootIdentity(req, passkeyAuthConfig, trustForwardedHost, accessStore);
     if (!identity) throw httpError(401, "Owner sign-in required.");
+    assertExpectedOwner(req, identity.providerSubject);
     const slug = workspaceSlug(asRecord(req.body).slug);
     const workspace = (await accessStore.listWorkspacesForOwner(identity.providerSubject)).find((candidate) => candidate.slug === slug);
     if (!workspace) throw httpError(404, "Workspace unavailable.");
@@ -545,6 +548,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       rejectWorkspaceSelectors(req, req.method !== "GET" && req.method !== "HEAD");
       const context = await resolveAccessContext(req, contextConfig);
       if (!context.auth || context.auth.method !== "cookie" || !context.identity || !context.workspace) throw httpError(401, "Owner sign-in required.");
+      if (req.method !== "GET" && req.method !== "HEAD") assertExpectedOwner(req, context.identity.providerSubject);
       if (req.method !== "GET" && req.method !== "HEAD") assertRequestOrigin(req, true, trustForwardedHost);
       req.ownerAuth = context.auth;
       next();
@@ -615,6 +619,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       const context = await resolveAccessContext(req, contextConfig);
       const auth = context.auth;
       if (!auth || context.kind === "root") throw httpError(401, "Authentication required.");
+      if (req.method !== "GET" && req.method !== "HEAD") assertExpectedOwner(req, context.identity?.providerSubject || (context.kind === "local" ? "local-owner" : null));
       if (context.workspace?.storageId === DEFAULT_WORKSPACE_ID) await requireExistingLegacyState();
       req.ownerAuth = auth;
       if (req.method !== "GET" && req.method !== "HEAD" && auth.method === "cookie") assertRequestOrigin(req, true, trustForwardedHost);
@@ -1477,6 +1482,13 @@ function parseCookies(header: string): Record<string, string> {
     }
   }
   return cookies;
+}
+
+// Optional browser intent fence. The header never establishes authority; the
+// authenticated owner resolved from this very request remains the only authority.
+function assertExpectedOwner(req: Request, verifiedOwnerId: string | null): void {
+  const expected = req.get("X-Kanban-Expected-Owner");
+  if (expected !== undefined && (!verifiedOwnerId || expected !== verifiedOwnerId)) throw httpError(401, "The signed-in owner changed. Sign in again before retrying this action.");
 }
 
 function assertRequestOrigin(req: Request, requireOrigin: boolean, trustForwardedHost = false): void {

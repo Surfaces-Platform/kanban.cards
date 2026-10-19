@@ -224,3 +224,103 @@ enum ServerTimestamp {
             .time(includingFractionalSeconds: true).timeZone(separator: .omitted))
     }
 }
+
+// Shared SI-005/SI-007/SI-008/SI-009 domain reconciliation. Platform UI stays separate.
+enum CardDraftField: String, Codable, CaseIterable, Hashable, Sendable {
+    case title, body, nextActor, nextAction, priority, blockedReason, placement
+
+    var label: String {
+        switch self {
+        case .title: "Title"
+        case .body: "Description"
+        case .nextActor: "Next actor"
+        case .nextAction: "Next action"
+        case .priority: "Priority"
+        case .blockedReason: "Blocker"
+        case .placement: "Column"
+        }
+    }
+}
+
+struct CardDraftReconciliation: Sendable {
+    var draft: CardDraft
+    var conflicts: Set<CardDraftField>
+    var localChanged: Set<CardDraftField>
+    var serverChanged: Set<CardDraftField>
+}
+
+extension CardDraft {
+    func matches(_ other: CardDraft, field: CardDraftField) -> Bool {
+        switch field {
+        case .title: title == other.title
+        case .body: body == other.body
+        case .nextActor: nextActor == other.nextActor
+        case .nextAction: nextAction == other.nextAction
+        case .priority: priority == other.priority
+        case .blockedReason: blockedReason == other.blockedReason
+        case .placement: columnId == other.columnId && position == other.position
+        }
+    }
+
+    mutating func adopt(_ other: CardDraft, field: CardDraftField) {
+        switch field {
+        case .title: title = other.title
+        case .body: body = other.body
+        case .nextActor: nextActor = other.nextActor
+        case .nextAction: nextAction = other.nextAction
+        case .priority: priority = other.priority
+        case .blockedReason: blockedReason = other.blockedReason
+        case .placement: columnId = other.columnId; position = other.position
+        }
+    }
+
+    func value(for field: CardDraftField) -> String {
+        switch field {
+        case .title: title
+        case .body: body
+        case .nextActor: nextActor?.label ?? "Unassigned"
+        case .nextAction: nextAction
+        case .priority: priority?.rawValue ?? "Unset"
+        case .blockedReason: blockedReason
+        case .placement: columnId
+        }
+    }
+
+    func reconcile(base: Card, latest: Card) -> CardDraftReconciliation {
+        let original = CardDraft(card: base)
+        let saved = CardDraft(card: latest)
+        var merged = self
+        var conflicts = Set<CardDraftField>()
+        var localChanged = Set<CardDraftField>()
+        var serverChanged = Set<CardDraftField>()
+        for field in CardDraftField.allCases {
+            let local = !matches(original, field: field)
+            let remote = !saved.matches(original, field: field)
+            if local { localChanged.insert(field) }
+            if remote { serverChanged.insert(field) }
+            if field == .placement {
+                // Older drafts may contain an unsaved destination. Text Save cannot enact it.
+                if local && !matches(saved, field: field) { conflicts.insert(field) }
+                else { merged.adopt(saved, field: field) }
+            } else if !local {
+                merged.adopt(saved, field: field)
+            } else if remote && !matches(saved, field: field) {
+                conflicts.insert(field)
+            }
+        }
+        merged.id = latest.id
+        merged.version = latest.version
+        merged.archivedAt = latest.archivedAt
+        merged.externalKey = latest.externalKey
+        return CardDraftReconciliation(draft: merged, conflicts: conflicts,
+            localChanged: localChanged, serverChanged: serverChanged)
+    }
+
+    var editableFields: [CardDraftField] {
+        [.title, .body, .nextActor, .nextAction, .priority, .blockedReason]
+    }
+
+    func matchesEditableFields(of other: CardDraft) -> Bool {
+        editableFields.allSatisfy { matches(other, field: $0) }
+    }
+}

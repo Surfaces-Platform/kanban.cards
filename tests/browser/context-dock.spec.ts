@@ -48,7 +48,7 @@ test.afterAll(async () => {
   await harness?.stop();
 });
 
-test("desktop opens an adjacent Card inspector, autosaves on blur, and restores source focus", async ({ page }) => {
+test("desktop opens an adjacent Card inspector, saves explicitly, and restores source focus", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 1000 });
   const errors = monitorBrowserErrors(page);
   await authenticate(page, harness);
@@ -86,8 +86,9 @@ test("desktop opens an adjacent Card inspector, autosaves on blur, and restores 
   await expect(page.getByLabel("Active Project")).toBeHidden();
   await page.setViewportSize({ width: 1440, height: 1000 });
 
-  const savedBody = "Stored desktop body — autosaved browser change";
+  const savedBody = "Stored desktop body — explicit browser save";
   await page.getByLabel("Description", { exact: true }).fill(savedBody);
+  await page.getByRole("button", { name: "Save", exact: true }).click();
   await page.getByRole("tab", { name: "Activity", exact: true }).click();
   await expect(page.getByRole("tab", { name: "Activity", exact: true })).toHaveAttribute("aria-selected", "true");
   await expect.poll(async () => {
@@ -111,7 +112,7 @@ test("desktop opens an adjacent Card inspector, autosaves on blur, and restores 
   expectNoUnexpectedBrowserErrors(errors);
 });
 
-test("Markdown source survives Preview, Create, autosave, Card views, and API reads without duplicate writes", async ({ page }) => {
+test("Markdown source survives Preview, Create, explicit Save, Card views, and API reads without duplicate writes", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 1000 });
   const errors = monitorBrowserErrors(page);
   await authenticate(page, harness);
@@ -147,6 +148,7 @@ test("Markdown source survives Preview, Create, autosave, Card views, and API re
   const updatedSource = `${createdSource}\n## Updated\n\nTrailing source space  \n`;
   await description.fill(updatedSource);
   await page.getByRole("tab", { name: "Preview", exact: true }).click();
+  await page.getByRole("button", { name: "Save", exact: true }).click();
   await expect.poll(async () => {
     stored = await readSeededProject(harness, seed.projectId);
     return stored.cards.find((card) => card.id === created?.id)?.body;
@@ -218,6 +220,7 @@ test("retained drafts leave Card-local recovery cues instead of a workspace bann
   const savedSource = "Autosaved source clears the retained-draft cue.";
   await page.getByLabel("Description", { exact: true }).fill(savedSource);
   const titleField = page.getByLabel("Title", { exact: true });
+  await page.getByRole("button", { name: "Save", exact: true }).click();
   await titleField.focus();
   await expect.poll(async () => {
     const stored = await readSeededProject(harness, seed.projectId);
@@ -279,6 +282,7 @@ test("Markdown summaries and recovery states stay plain and contained at narrow 
   await expect(page.getByText("Image not shown: remote image", { exact: true })).toBeVisible();
   expect(await page.evaluate(() => (window as Window & { __markdownExecuted?: boolean }).__markdownExecuted)).toBeUndefined();
   expect(externalRequests).toEqual([]);
+  await page.getByRole("button", { name: "Save", exact: true }).click();
   await expect.poll(async () => {
     const stored = await readSeededProject(harness, seed.projectId);
     return stored.cards.find((card) => card.id === created.card.id)?.body;
@@ -303,13 +307,13 @@ test("Markdown summaries and recovery states stay plain and contained at narrow 
   const current = beforeConflict.cards.find((card) => card.id === created.card.id)!;
   const storedSource = `# Stored source\n\n<img src="${longUrl}.png" onerror="alert(1)">`;
   await updateSeededCard(harness, seed.projectId, current.id, current.version, { body: storedSource });
-  await page.getByRole("tab", { name: "Activity", exact: true }).click();
+  await page.getByRole("button", { name: "Save", exact: true }).click();
 
   await expect(page.getByRole("heading", { name: "The stored Card changed" })).toBeVisible();
   await expect(page.getByLabel("Description", { exact: true })).toHaveValue(draftSource);
   await expect(page.getByRole("tab", { name: "Preview", exact: true })).toBeDisabled();
-  await expect(page.locator(".stored-change")).toContainText(storedSource);
-  await expect(page.locator(".stored-change img, .stored-change script, .stored-change h1")).toHaveCount(0);
+  await expect(page.locator(".stale-review")).toContainText(storedSource);
+  await expect(page.locator(".stale-review img, .stale-review script, .stale-review h1")).toHaveCount(0);
   await expectNoHorizontalOverflow(page, "320px Markdown stale recovery");
   expectNoUnexpectedBrowserErrors(errors, [/status of 409/i, /409 \(Conflict\)/i]);
 });
@@ -325,27 +329,26 @@ test("desktop exposes an explicit Move chooser and a visible new-Card destinatio
   await expect(move).toHaveAttribute("aria-expanded", "false");
 
   const patchBodies: Array<Record<string, unknown>> = [];
-  let releaseAutosave!: () => void;
   let releaseMove!: () => void;
-  const autosaveGate = new Promise<void>((resolve) => { releaseAutosave = resolve; });
   const moveGate = new Promise<void>((resolve) => { releaseMove = resolve; });
   await page.route(`**/api/projects/${seed.projectId}/cards/${seed.cards.desktopDraft.id}`, async (route) => {
     if (route.request().method() !== "PATCH") return route.continue();
     const body = route.request().postDataJSON() as Record<string, unknown>;
     patchBodies.push(body);
     if (body.columnId) await moveGate;
-    else await autosaveGate;
     await route.continue();
   });
 
-  const sequencedBody = "Body autosave must commit before the explicit move";
+  const beforeMove = await readSeededProject(harness, seed.projectId);
+  const savedBodyBeforeMove = beforeMove.cards.find(card => card.id === seed.cards.desktopDraft.id)!.body;
+  const sequencedBody = "Body draft remains local during the explicit move";
   await page.getByLabel("Description", { exact: true }).fill(sequencedBody);
   await move.click();
   await expect(move).toHaveAttribute("aria-expanded", "true");
   await expect(page.getByRole("heading", { name: "Move Card", exact: true })).toBeVisible();
   await expect(page.getByText("Current Column: Next", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Move to Doing", exact: true })).toBeFocused();
-  await expect.poll(() => patchBodies.length).toBe(1);
+  expect(patchBodies).toHaveLength(0);
   await page.keyboard.press("Escape");
   await expect(move).toBeFocused();
   await expect(move).toHaveAttribute("aria-expanded", "false");
@@ -354,15 +357,9 @@ test("desktop exposes an explicit Move chooser and a visible new-Card destinatio
   await page.getByRole("button", { name: "Move to Doing", exact: true }).click();
   await expect(page.locator("body")).toHaveAttribute("data-state", "saving");
   await expect(page.locator("#card-status")).toBeFocused();
-  await expect(page.getByText("Preparing move", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Move…", exact: true })).toBeDisabled();
-  await expect(page.getByRole("button", { name: "Move to Doing", exact: true })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Close Card and return to Next" })).toBeDisabled();
-  expect(patchBodies.filter((body) => body.columnId === "doing")).toHaveLength(0);
-  await page.getByRole("button", { name: "Move to Doing", exact: true }).dispatchEvent("click");
-  releaseAutosave();
-  await expect.poll(() => patchBodies.filter((body) => body.columnId === "doing").length).toBe(1);
-  await expect(page.locator("#card-status")).toBeFocused();
+  await expect.poll(() => patchBodies.length).toBe(1);
   await expect(page.getByText("Moving Card", { exact: true })).toBeVisible();
   releaseMove();
 
@@ -373,8 +370,9 @@ test("desktop exposes an explicit Move chooser and a visible new-Card destinatio
     const stored = await readSeededProject(harness, seed.projectId);
     const card = stored.cards.find((candidate) => candidate.id === seed.cards.desktopDraft.id);
     return { body: card?.body, columnId: card?.columnId };
-  }).toEqual({ body: sequencedBody, columnId: "doing" });
-  expect(Object.hasOwn(patchBodies[0] || {}, "body")).toBe(true);
+  }).toEqual({ body: savedBodyBeforeMove, columnId: "doing" });
+  await expect(page.getByLabel("Description", { exact: true })).toHaveValue(sequencedBody);
+  expect(Object.hasOwn(patchBodies[0] || {}, "body")).toBe(false);
   expect(patchBodies.at(-1)).toEqual({ columnId: "doing" });
 
   await page.getByRole("tab", { name: "Activity", exact: true }).click();
@@ -502,74 +500,26 @@ test("desktop Move keeps every stored destination reachable in a many-Column Pro
   }
 });
 
-test("Move stays blocked when a pending Card autosave fails", async ({ page }) => {
-  await page.setViewportSize({ width: 1440, height: 1000 });
-  const errors = monitorBrowserErrors(page);
+test("Move keeps an unsaved Card text draft local until explicit Save", async ({ page }) => {
   await authenticate(page, harness);
   await openCard(page, seed.cards.privacy.title);
-
-  let autosaveReachedResolve!: () => void;
-  let releaseAutosave!: () => void;
-  const autosaveReached = new Promise<void>((resolve) => { autosaveReachedResolve = resolve; });
-  const autosaveGate = new Promise<void>((resolve) => { releaseAutosave = resolve; });
-  let movePatchCount = 0;
-  const autosaveRoute = `**/api/projects/${seed.projectId}/cards/${seed.cards.privacy.id}`;
-  await page.route(autosaveRoute, async (route) => {
-    if (route.request().method() !== "PATCH") return route.continue();
-    const body = route.request().postDataJSON() as Record<string, unknown>;
-    if (body.columnId) {
-      movePatchCount += 1;
-      await route.continue();
-      return;
-    }
-    autosaveReachedResolve();
-    await autosaveGate;
-    await route.fulfill({
-      status: 503,
-      contentType: "application/json",
-      body: JSON.stringify({ error: "Deterministic pending autosave failure" })
-    });
-  });
-
-  const unsavedBody = "This retained draft must not move before it saves";
-  await page.getByLabel("Description", { exact: true }).fill(unsavedBody);
+  const before = await readSeededProject(harness, seed.projectId);
+  const original = before.cards.find(card => card.id === seed.cards.privacy.id)!;
+  await page.getByLabel("Description", { exact: true }).fill("Text draft survives an independent Move");
   await page.getByRole("button", { name: "Move…", exact: true }).click();
-  await autosaveReached;
   await page.getByRole("button", { name: "Move to Doing", exact: true }).click();
-  await expect(page.getByText("Preparing move", { exact: true })).toBeVisible();
-  await expect(page.locator("#card-status")).toBeFocused();
-  releaseAutosave();
-
-  await expect(page.getByText("Changes not saved", { exact: true })).toBeVisible();
-  await expect(page.getByText(/Deterministic pending autosave failure/)).toBeVisible();
-  await expect(page.locator("body")).toHaveAttribute("data-state", "selected");
-  await expect(page.getByLabel("Title", { exact: true })).toBeFocused();
-  await expect(page.getByLabel("Description", { exact: true })).toHaveValue(unsavedBody);
-  await expect(page.getByRole("button", { name: "Move…", exact: true })).toHaveAttribute("aria-expanded", "false");
-  expect(movePatchCount).toBe(0);
-  const stored = await readSeededProject(harness, seed.projectId);
-  const unmoved = stored.cards.find((card) => card.id === seed.cards.privacy.id);
-  expect(unmoved?.body).toBe(seed.cards.privacy.body);
-  expect(unmoved?.columnId).toBe("next");
-
-  await page.unroute(autosaveRoute);
-  const recoveredBody = `${unsavedBody} after recovery`;
-  await page.getByLabel("Description", { exact: true }).fill(recoveredBody);
-  await page.getByLabel("Title", { exact: true }).focus();
-  await expect.poll(async () => {
-    const recovered = await readSeededProject(harness, seed.projectId);
-    return recovered.cards.find((card) => card.id === seed.cards.privacy.id)?.body;
-  }).toBe(recoveredBody);
-  await expect(page.getByText("Changes not saved", { exact: true })).toHaveCount(0);
-  await expect(page.getByRole("tab", { name: "Preview", exact: true })).toBeEnabled();
-  await expect(page.getByLabel("Title", { exact: true })).toBeFocused();
-  const afterRecovery = await readSeededProject(harness, seed.projectId);
-  const recovered = afterRecovery.cards.find((card) => card.id === seed.cards.privacy.id)!;
-  await updateSeededCard(harness, seed.projectId, recovered.id, recovered.version, { body: seed.cards.privacy.body });
-  expectNoUnexpectedBrowserErrors(errors, [/503/]);
+  await expect(page.getByRole("button", { name: "Close Card and return to Doing" })).toBeVisible();
+  const moved = (await readSeededProject(harness, seed.projectId)).cards.find(card => card.id === original.id)!;
+  expect(moved.body).toBe(original.body);
+  await expect(page.getByLabel("Description", { exact: true })).toHaveValue("Text draft survives an independent Move");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.getByText("Card updated", { exact: true })).toBeVisible();
+  const saved = (await readSeededProject(harness, seed.projectId)).cards.find(card => card.id === original.id)!;
+  expect(saved).toMatchObject({ body: "Text draft survives an independent Move", columnId: "doing" });
+  await updateSeededCard(harness, seed.projectId, saved.id, saved.version, { body: original.body, columnId: original.columnId });
 });
 
-test("390px mobile presents a full-height Card view, autosaves on blur, and restores source focus", async ({ page }) => {
+test("390px mobile presents a full-height Card view, saves explicitly, and restores source focus", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   const errors = monitorBrowserErrors(page);
   await authenticate(page, harness);
@@ -584,8 +534,9 @@ test("390px mobile presents a full-height Card view, autosaves on blur, and rest
   await expect(page.getByRole("button", { name: "Open account panel" })).toBeHidden();
   await expect(page.locator("dialog, [role='dialog']")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Close Card and return to Next" })).toBeVisible();
-  const mobileBody = "Stored mobile body — autosaved on blur";
+  const mobileBody = "Stored mobile body — explicit mobile save";
   await page.getByLabel("Description", { exact: true }).fill(mobileBody);
+  await page.getByRole("button", { name: "Save", exact: true }).click();
   await page.getByRole("tab", { name: "Activity", exact: true }).click();
   await expect.poll(async () => {
     const stored = await readSeededProject(harness, seed.projectId);
@@ -788,55 +739,27 @@ test("a committed move stays visible when its follow-up Refresh fails", async ({
   expectNoUnexpectedBrowserErrors(errors, [/503 .*\/api\/projects/i, /status of 503/i, /503 \(Service Unavailable\)/i]);
 });
 
-test("stale edits expose only Retry or Discard and both paths preserve explicit intent", async ({ page }) => {
-  await page.setViewportSize({ width: 1440, height: 1000 });
-  const errors = monitorBrowserErrors(page);
+test("stale edits require field choices or an explicit Revert without writing", async ({ page }) => {
   await authenticate(page, harness);
-
   await openCard(page, seed.cards.staleDiscard.title);
-  await page.getByLabel("Title", { exact: true }).fill("Browser draft to discard");
-  await updateSeededCard(
-    harness,
-    seed.projectId,
-    seed.cards.staleDiscard.id,
-    seed.cards.staleDiscard.version,
-    { title: "Stored API change for discard" }
-  );
-  await page.getByRole("tab", { name: "Activity", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "The stored Card changed" })).toBeFocused();
-  await expect(page.getByRole("button", { name: "Retry with draft" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Discard draft" })).toBeVisible();
-  const inspector = page.getByRole("complementary");
-  await expect(inspector.getByRole("button", { name: "Archive", exact: true })).toHaveCount(0);
-  await expect(page.getByLabel("Title", { exact: true })).toHaveValue("Browser draft to discard");
-
-  await page.getByRole("button", { name: "Discard draft" }).click();
-  await expect(page.getByLabel("Title", { exact: true })).toHaveValue("Stored API change for discard");
-  await expect(page.getByRole("button", { name: "Archive", exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Close Card and return to Next" }).click();
-
+  await page.getByLabel("Title", { exact: true }).fill("Browser draft to revert");
+  await updateSeededCard(harness, seed.projectId, seed.cards.staleDiscard.id, seed.cards.staleDiscard.version, { title: "Stored API change for revert" });
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "The stored Card changed" })).toBeVisible();
+  await expect(page.getByLabel("Title", { exact: true })).toHaveValue("Browser draft to revert");
+  page.once("dialog", dialog => dialog.accept());
+  await page.getByRole("button", { name: "Revert draft", exact: true }).click();
+  await expect(page.getByLabel("Title", { exact: true })).toHaveValue("Stored API change for revert");
+  await page.getByRole("button", { name: /Close Card/ }).click();
   await openCard(page, seed.cards.staleRetry.title);
-  await page.getByLabel("Title", { exact: true }).fill("Retried browser draft wins");
-  await updateSeededCard(
-    harness,
-    seed.projectId,
-    seed.cards.staleRetry.id,
-    seed.cards.staleRetry.version,
-    { title: "Stored API change before retry", columnId: "doing" }
-  );
-  await page.getByRole("tab", { name: "Activity", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "The stored Card changed" })).toBeFocused();
-  await expect(page.getByLabel("Title", { exact: true })).toHaveValue("Retried browser draft wins");
-  await page.getByRole("button", { name: "Retry with draft" }).click();
-  await expect(page.locator("#toast-region").getByText("Card updated", { exact: true })).toBeVisible();
-  await expect(page.getByLabel("Title", { exact: true })).toHaveValue("Retried browser draft wins");
-
-  const stored = await readSeededProject(harness, seed.projectId);
-  const retried = stored.cards.find((card) => card.id === seed.cards.staleRetry.id);
-  expect(retried?.title).toBe("Retried browser draft wins");
-  expect(retried?.columnId).toBe("doing");
-  // The two intentional stale writes return 409; all other console/runtime errors still fail the test.
-  expectNoUnexpectedBrowserErrors(errors, [/status of 409/i, /409 \(Conflict\)/i]);
+  await page.getByLabel("Title", { exact: true }).fill("Browser title chosen explicitly");
+  await updateSeededCard(harness, seed.projectId, seed.cards.staleRetry.id, seed.cards.staleRetry.version, { title: "Other saved title", columnId: "doing" });
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await page.getByRole("button", { name: "Keep draft", exact: true }).click();
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.getByText("Card updated", { exact: true })).toBeVisible();
+  const saved = (await readSeededProject(harness, seed.projectId)).cards.find(card => card.id === seed.cards.staleRetry.id)!;
+  expect(saved).toMatchObject({ title: "Browser title chosen explicitly", columnId: "doing" });
 });
 
 test("Project confirmations replace, expire, and preserve focus while resource changes remain visible", async ({ page }) => {
@@ -948,92 +871,28 @@ test("archive removes the active Card and Undo restores both resource and focus"
   expectNoUnexpectedBrowserErrors(errors);
 });
 
-test("sign-out hides private DOM while a pending autosave finishes before revocation", async ({ page, context }) => {
-  const signOutHarness = await startBrowserHarness();
-  const errors = monitorBrowserErrors(page);
-  let markAutosaveReached = (): void => undefined;
-  const autosaveReached = new Promise<void>((resolve) => { markAutosaveReached = resolve; });
-  let releaseAutosave = (): void => undefined;
-  const autosaveHold = new Promise<void>((resolve) => { releaseAutosave = resolve; });
-  let markRevocationReached = (): void => undefined;
-  const revocationReached = new Promise<void>((resolve) => { markRevocationReached = resolve; });
-  let releaseRevocation = (): void => undefined;
-  const revocationHold = new Promise<void>((resolve) => { releaseRevocation = resolve; });
-  let deleteRequests = 0;
-
+test("sign-out hides private DOM during revocation and retains unsent drafts without writing", async ({ page, context }) => {
+  const target = await startBrowserHarness();
   try {
-    const signOutSeed = await seedBrowserWorkspace(signOutHarness);
-    await page.setViewportSize({ width: 1440, height: 1000 });
-    await authenticate(page, signOutHarness);
-    const before = await readSeededProject(signOutHarness, signOutSeed.projectId);
-    const originalCard = before.cards.find((card) => card.id === signOutSeed.cards.privacy.id)!;
-    const pendingBody = "Private pending autosave must finish before sign-out revocation";
-    const autosaveRoute = `**/api/projects/${signOutSeed.projectId}/cards/${signOutSeed.cards.privacy.id}`;
-    await page.route(autosaveRoute, async (route) => {
-      if (route.request().method() !== "PATCH") {
-        await route.continue();
-        return;
-      }
-      markAutosaveReached();
-      await autosaveHold;
-      await route.continue();
-    });
-    await page.route("**/api/session", async (route) => {
-      if (route.request().method() !== "DELETE") {
-        await route.continue();
-        return;
-      }
-      deleteRequests += 1;
-      markRevocationReached();
-      await revocationHold;
-      await route.continue();
-    });
-
-    await openCard(page, originalCard.title);
-    await page.getByLabel("Description", { exact: true }).fill(pendingBody);
-    await page.getByRole("button", { name: "Close Card and return to Next" }).click();
-    await autosaveReached;
+    const resource = await seedBrowserWorkspace(target);
+    await authenticate(page, target); await openCard(page, resource.cards.privacy.title);
+    await page.getByLabel("Description", { exact: true }).fill("Private local draft across sign-out");
+    await page.getByRole("button", { name: /Close Card/ }).click();
+    let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; });
+    await page.route("**/api/session", async route => { if (route.request().method() === "DELETE") await gate; await route.continue(); });
     await page.getByRole("button", { name: "Open account panel" }).click();
-    await expect(page.getByText("Browser QA Owner", { exact: true })).toBeVisible();
-
     await page.getByRole("button", { name: "Sign out", exact: true }).click();
-    await expect(page.locator("body")).toHaveAttribute("data-state", "signing-out");
-    await expect(page.locator(".card-inspector")).toHaveCount(0);
-    await expect(page.getByText("Finishing sign out…", { exact: true })).toBeVisible();
-    const privateMarkers = ["Context Dock regression", originalCard.title, originalCard.body, pendingBody, "Browser QA Owner"];
-    const pendingText = await page.locator("body").innerText();
-    for (const privateText of privateMarkers) {
-      expect(pendingText).not.toContain(privateText);
-    }
-    expect(deleteRequests).toBe(0);
-
-    releaseAutosave();
-    await revocationReached;
-    expect(deleteRequests).toBe(1);
-    expect((await context.cookies()).some((cookie) => cookie.name === "kanban_cards_session")).toBe(true);
-    await expect(page.locator("body")).toHaveAttribute("data-state", "signing-out");
-    const revocationText = await page.locator("body").innerText();
-    expect(revocationText).toContain("Finishing sign out…");
-    for (const privateText of privateMarkers) {
-      expect(revocationText).not.toContain(privateText);
-    }
-    expect(await page.evaluate(() => window.localStorage.getItem("kanban.cards:project-id"))).toBeNull();
-    const saved = await readSeededProject(signOutHarness, signOutSeed.projectId);
-    expect(saved.cards.find((card) => card.id === originalCard.id)?.body).toBe(pendingBody);
-
-    releaseRevocation();
-    await expect(page.getByRole("heading", { name: "Open your workspace" })).toBeVisible();
-    await expect(page.getByText("Signed out", { exact: true })).toBeVisible();
-    expect((await context.cookies()).some((cookie) => cookie.name === "kanban_cards_session")).toBe(false);
-  } finally {
-    releaseAutosave();
-    releaseRevocation();
-    if (!page.isClosed()) {
-      await page.unrouteAll({ behavior: "wait" });
-    }
-    await signOutHarness.stop();
-  }
-  expectNoUnexpectedBrowserErrors(errors, [/DELETE .*\/api\/session: net::ERR_ABORTED/i]);
+    try {
+      await expect(page.locator("body")).toHaveAttribute("data-state", "signing-out");
+      await expect(page.locator("body")).not.toContainText("Private local draft");
+      await expect(page.locator("body")).not.toContainText(resource.cards.privacy.title);
+      expect((await readSeededProject(target, resource.projectId)).cards.find(card => card.id === resource.cards.privacy.id)?.body).toBe(resource.cards.privacy.body);
+    } finally { release(); }
+    await expect(page.getByLabel("Owner key")).toBeVisible();
+    expect((await context.cookies()).some(cookie => cookie.name === "kanban_cards_session")).toBe(false);
+    await page.getByLabel("Owner key").fill(target.ownerKey); await page.getByRole("button", { name: "Open workspace", exact: true }).click();
+    await openCard(page, resource.cards.privacy.title); await expect(page.getByLabel("Description", { exact: true })).toHaveValue("Private local draft across sign-out");
+  } finally { await page.unrouteAll({ behavior: "wait" }); await target.stop(); }
 });
 
 test("sign-out clears rendered, cookie, and local Project data before reauthentication", async ({ page, context }) => {

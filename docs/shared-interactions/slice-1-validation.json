@@ -1,0 +1,235 @@
+{
+  "schemaVersion": 1,
+  "scope": "First shared editing slice across macOS, iOS and web",
+  "status": "validated",
+  "recordedAt": "2026-10-19T17:36:29.520784+00:00",
+  "source": {
+    "baseCommit": "f3406b38b0c89bfdd65b909ce07c507f313a0084",
+    "branch": "codex/shared-editing-slice",
+    "manifest": "output/shared-editing-2026-10-19/candidate-010/source-manifest.json",
+    "manifestSHA256": "fe507d12e04f469742dbde15d531bb2ef9ffcbdce722d233a14b932bc72e19f0",
+    "snapshotFileCount": 370,
+    "allSnapshotFilesStillMatch": true,
+    "sourceEquivalence": {
+      "finalCandidate": "candidate-010",
+      "evidence": {
+        "web": {
+          "candidate": "candidate-007",
+          "changedTestedInputs": []
+        },
+        "native": {
+          "candidate": "candidate-008",
+          "changedTestedInputs": []
+        },
+        "handoff": {
+          "candidate": "candidate-009",
+          "changedTestedInputs": []
+        }
+      }
+    },
+    "commit": "Implementation remains local and uncommitted."
+  },
+  "implemented": [
+    "Direct Card editing with explicit Save and Revert",
+    "Durable owner/origin/Workspace/Project/resource draft recovery and explicit legacy association",
+    "Field reconciliation with baseline/local/latest comparison",
+    "Independent Move with durable unknown-operation recovery; text Save excludes placement",
+    "Coordinated Comment drafts and frozen POST identity",
+    "HTTP 408 ambiguity, PATCH readback, confirmed refresh/cleanup recovery and owner-intent fencing"
+  ],
+  "runner": {
+    "kind": "Disposable Tart macOS VM; iOS Simulator and Chromium ran inside it",
+    "taskVM": "kanban-shared-editing-20261019",
+    "macOS": "27.0",
+    "Xcode": "27 (27A266a)",
+    "simulator": "iPhone 17 / iOS 27.0",
+    "node": "22.16.0",
+    "chromium": "Playwright 1.62.1 installed guest-local",
+    "network": "External networking disabled after dependencies and handoffs; loopback remained available."
+  },
+  "validation": {
+    "sourceChecks": {
+      "status": "pass",
+      "command": "npm run check",
+      "log": "candidate-009/results/final-check.log"
+    },
+    "nodeAndAPI": {
+      "status": "pass",
+      "passed": 115,
+      "command": "node --import tsx --test tests/*.test.ts",
+      "log": "candidate-007/results/web-node-all.log"
+    },
+    "browser": {
+      "status": "all 80 cases have a passing result across two attempts",
+      "fullRun": {
+        "passed": 79,
+        "setupTimeouts": 1,
+        "exitCode": 1,
+        "report": "candidate-007/results/web-browser-all.json"
+      },
+      "unchangedExactCaseRetry": {
+        "passed": 1,
+        "failed": 0,
+        "case": "SI-009: a PATCH 409 preserves the actual per-field choices computed by the latest read",
+        "report": "candidate-007/results/web-SI009-retry.json"
+      },
+      "limitation": "The full-suite invocation was not a single uninterrupted green run. The original setup timeout and trace are retained."
+    },
+    "macOSUnit": {
+      "status": "pass",
+      "passed": 88,
+      "skipped": 1,
+      "skip": "Opt-in backend handoff test, executed separately below",
+      "bundle": "candidate-008/results/macos-unit.xcresult"
+    },
+    "iOSUnit": {
+      "status": "pass",
+      "passed": 69,
+      "skipped": 1,
+      "skip": "Opt-in backend handoff test, executed separately below",
+      "bundle": "candidate-010/results/ios-unit.xcresult"
+    },
+    "macOSUI": {
+      "status": "pass",
+      "passed": 5,
+      "bundle": "candidate-009/results/macos-ui.xcresult"
+    },
+    "iOSUI": {
+      "status": "pass",
+      "passed": 5,
+      "bundle": "candidate-010/results/ios-ui.xcresult"
+    },
+    "sharedFixture": {
+      "path": "tests/fixtures/shared-editing.json",
+      "sha256": "dda3f1a2bbb8f41071013c6c745cd1a34ba85a6144eb449e5ce1e6146197c63b",
+      "reconciliationVectors": 8,
+      "adapters": "Production web reconciler and both native production session/model tests"
+    },
+    "crossClient": {
+      "status": "pass",
+      "orderedPairs": 6,
+      "nativeOptInTestsPassed": 4,
+      "nativeOptInTestsSkipped": 0,
+      "evidence": "Actual web UI plus production native API clients against the same synthetic backend; native UI validated separately.",
+      "storedEffects": {
+        "status": "pass",
+        "patchCount": 6,
+        "titles": [
+          "Web saved A",
+          "Mac saved B",
+          "iOS saved C",
+          "Web saved D",
+          "iOS saved E",
+          "Mac saved F"
+        ],
+        "versionHeaders": [
+          "1",
+          "2",
+          "3",
+          "4",
+          "5",
+          "6"
+        ],
+        "placementFieldsSent": false
+      },
+      "report": "candidate-009/results/handoff/handoff-status.json"
+    }
+  },
+  "evidence": {
+    "root": "output/shared-editing-2026-10-19",
+    "hostVerification": {
+      "status": "pass",
+      "bundleCount": 23,
+      "fileCount": 2128,
+      "guestManifestSHA256": "19ec8546e0a106ba1715642602612d48d47601a862675d3e60acd0cbbf169de7",
+      "method": "Host byte hashes match guest-computed hashes after copy; failed and superseded bundles included."
+    },
+    "history": "All failed, superseded, cancelled and successful attempts remain separately recorded.",
+    "runnerNotes": [
+      "Guest OS dialogs interrupted an earlier Mac UI run; screenshot/AX evidence retained. The task VM was restarted without granting those requested permissions; final Mac UI run passed.",
+      "The synthetic backend trace was moved from concurrent shared-folder append to serialized guest-local writes after a fixture EIO.",
+      "The VM-only ad-hoc Mac test host retained its sandbox and was given the product network.client entitlement for API handoffs. No associated-domain/passkey claim follows."
+    ]
+  },
+  "preservation": {
+    "status": "preserved-with-concurrent-skill-file-changes",
+    "taskWritesToOriginalCheckouts": false,
+    "roots": {
+      "/Users/mike/.codex/worktrees/direction-a-port/kanban.cards": {
+        "headUnchanged": true,
+        "historicalEvidenceUnchanged": true,
+        "otherContentUnchanged": true,
+        "contentPaths": 358,
+        "evidencePaths": 248
+      },
+      "/Users/mike/.codex/worktrees/shared-interaction-model/kanban.cards": {
+        "headUnchanged": true,
+        "historicalEvidenceUnchanged": true,
+        "otherContentUnchanged": true,
+        "contentPaths": 357,
+        "evidencePaths": 184
+      },
+      "/Users/mike/kanban.cards": {
+        "headUnchanged": true,
+        "historicalEvidenceUnchanged": true,
+        "otherContentUnchanged": true,
+        "contentPaths": 550,
+        "evidencePaths": 2277
+      }
+    },
+    "observedConcurrentChanges": [
+      {
+        "root": "/Users/mike/kanban.cards",
+        "path": ".agents/skills/kanban-cards/SKILL.md",
+        "beforeSHA256": "5504a4b5145dede9c9e91f91c2a0d721df60f8738eacf8476c9ab1eb35ce6325",
+        "afterSHA256": "133f1cc48d6794a5f0eb31906826a2fd449bdc20cae096b9592f27be8dc1a42f",
+        "action": "left as found; not restored or moved"
+      },
+      {
+        "root": "/Users/mike/kanban.cards",
+        "path": ".agents/skills/kanban-cards/agents/openai.yaml",
+        "beforeSHA256": "586acf73c9fc22386dc0f99131da5087ad2e5338f7e884445ccf89f88f8aab68",
+        "afterSHA256": "734ece95e0577b006d205dde5abdd59d36e2460c43e36c6c8546a595e8b30292",
+        "action": "left as found; not restored or moved"
+      }
+    ],
+    "baselineSHA256": "44196e4c5c53be453bd8b28d26bf221d96b961d62465d890f61017d1097d3d54"
+  },
+  "vmCleanup": {
+    "status": "deleted",
+    "taskVM": "kanban-shared-editing-20261019",
+    "hostEvidenceVerifiedBeforeDeletion": true,
+    "protectedOriginalVMCount": 6,
+    "unchangedOriginalMetadataFiles": 18,
+    "homes": {
+      "/Users/mike/.tart": {
+        "remainingOriginalVMs": [
+          "ai-kernel-slice-01",
+          "ai-metal-slice-06",
+          "surfaceops-stage-a-base",
+          "surfaces-deployment",
+          "surfaces-source"
+        ],
+        "allStopped": true
+      },
+      "/Users/mike/Codex/kanban-macos-vm-pilot/tart": {
+        "remainingOriginalVMs": [
+          "kanban-ui-pilot"
+        ],
+        "allStopped": true
+      }
+    },
+    "cleanup": "Only the task clone was stopped and deleted; automatic cache pruning was disabled."
+  },
+  "authority": {
+    "committed": false,
+    "pushed": false,
+    "deployed": false,
+    "hostOrPhysicalDeviceInstallation": false
+  },
+  "remainingAcceptance": [
+    "Full 33-capability / 31-scenario contract remains pending; this is slice-level evidence.",
+    "Search, native Markdown preview and complete native account management remain separate work.",
+    "Hosted CI, Release signing, physical-device/passkey behavior, deployed TLS/associated domains and production behavior were not validated."
+  ]
+}

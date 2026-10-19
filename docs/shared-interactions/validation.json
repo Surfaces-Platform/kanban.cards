@@ -1,0 +1,190 @@
+{
+  "schemaVersion": 1,
+  "status": "specification-validated",
+  "runtimeAcceptance": "pending",
+  "verifiedAt": "2026-10-19T02:00:14.522478+00:00",
+  "baseCommit": "f3406b38b0c89bfdd65b909ce07c507f313a0084",
+  "branch": "codex/shared-interaction-model",
+  "workingTree": "uncommitted; not pushed or deployed",
+  "nodeVersion": "v22.16.0",
+  "capabilities": 33,
+  "scenarios": 31,
+  "clientStatusCells": 99,
+  "baselineSourceReferences": 282,
+  "independentReview": {
+    "status": "completed",
+    "result": "No remaining actionable specification contradictions after corrections",
+    "scope": "Source/document review, not runtime acceptance"
+  },
+  "checks": [
+    {
+      "command": [
+        "node",
+        "--check",
+        "scripts/check-shared-interactions.mjs"
+      ],
+      "exitCode": 0,
+      "output": ""
+    },
+    {
+      "command": [
+        "npm",
+        "run",
+        "check:shared-interactions"
+      ],
+      "exitCode": 0,
+      "output": "> kanban.cards@0.1.0 check:shared-interactions\n> node scripts/check-shared-interactions.mjs\n\nShared interaction specification valid: 33 capabilities, 31 scenarios, 32 baseline source files. Runtime acceptance remains pending for macos, ios, and web."
+    },
+    {
+      "command": [
+        "node",
+        "scripts/check-native-ui-contract.mjs"
+      ],
+      "exitCode": 0,
+      "output": "Native UI source contract passed for 10 Swift files. Verify the running system components separately."
+    },
+    {
+      "command": [
+        "node",
+        "scripts/check-macos-native-ui-contract.mjs"
+      ],
+      "exitCode": 0,
+      "output": "macOS native UI source contract passed for 17 Swift files. Verify running system components separately."
+    },
+    {
+      "command": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "exitCode": 0,
+      "output": ""
+    },
+    {
+      "command": [
+        "python3",
+        "/private/tmp/kanban-shared-workflow/probe-validator.py"
+      ],
+      "exitCode": 0,
+      "output": "{\n  \"scope\": \"Invalid specification rejection only; no product runtime tests\",\n  \"probes\": [\n    {\n      \"probe\": \"forged-runtime-pass\",\n      \"passed\": true,\n      \"exitCode\": 1,\n      \"expectedDiagnostic\": \"must not claim runtime acceptance\"\n    },\n    {\n      \"probe\": \"unknown-capability\",\n      \"passed\": true,\n      \"exitCode\": 1,\n      \"expectedDiagnostic\": \"unknown capability feature-nonexistent\"\n    },\n    {\n      \"probe\": \"invalid-source-line\",\n      \"passed\": true,\n      \"exitCode\": 1,\n      \"expectedDiagnostic\": \"source line outside file\"\n    },\n    {\n      \"probe\": \"omitted-client\",\n      \"passed\": true,\n      \"exitCode\": 1,\n      \"expectedDiagnostic\": \"must cover all three clients exactly once\"\n    },\n    {\n      \"probe\": \"forged-cell-runtime-result\",\n      \"passed\": true,\n      \"exitCode\": 1,\n      \"expectedDiagnostic\": \"runtime evidence belongs in separate receipts\"\n    },\n    {\n      \"probe\": \"null-root\",\n      \"passed\": true,\n      \"exitCode\": 1,\n      \"expectedDiagnostic\": \"top-level JSON object required\"\n    }\n  ]\n}"
+    },
+    {
+      "command": [
+        "python3",
+        "/private/tmp/kanban-shared-workflow/preserve.py",
+        "verify"
+      ],
+      "exitCode": 0,
+      "output": "{\n  \"status\": \"unchanged\",\n  \"baselineSHA256\": \"f420c2577568b0726051631e01fcae66608baccad86136616f77d22ae55f9499\",\n  \"roots\": {\n    \"/Users/mike/kanban.cards\": {\n      \"contentPaths\": 550,\n      \"evidencePaths\": 2277\n    },\n    \"/Users/mike/.codex/worktrees/direction-a-port/kanban.cards\": {\n      \"contentPaths\": 358,\n      \"evidencePaths\": 248\n    }\n  }\n}"
+    }
+  ],
+  "negativeProbes": {
+    "scope": "Invalid specification rejection only; no product runtime tests",
+    "probes": [
+      {
+        "probe": "forged-runtime-pass",
+        "passed": true,
+        "exitCode": 1,
+        "expectedDiagnostic": "must not claim runtime acceptance"
+      },
+      {
+        "probe": "unknown-capability",
+        "passed": true,
+        "exitCode": 1,
+        "expectedDiagnostic": "unknown capability feature-nonexistent"
+      },
+      {
+        "probe": "invalid-source-line",
+        "passed": true,
+        "exitCode": 1,
+        "expectedDiagnostic": "source line outside file"
+      },
+      {
+        "probe": "omitted-client",
+        "passed": true,
+        "exitCode": 1,
+        "expectedDiagnostic": "must cover all three clients exactly once"
+      },
+      {
+        "probe": "forged-cell-runtime-result",
+        "passed": true,
+        "exitCode": 1,
+        "expectedDiagnostic": "runtime evidence belongs in separate receipts"
+      },
+      {
+        "probe": "null-root",
+        "passed": true,
+        "exitCode": 1,
+        "expectedDiagnostic": "top-level JSON object required"
+      }
+    ]
+  },
+  "preservation": {
+    "status": "unchanged",
+    "baselineSHA256": "f420c2577568b0726051631e01fcae66608baccad86136616f77d22ae55f9499",
+    "roots": {
+      "/Users/mike/kanban.cards": {
+        "contentPaths": 550,
+        "evidencePaths": 2277
+      },
+      "/Users/mike/.codex/worktrees/direction-a-port/kanban.cards": {
+        "contentPaths": 358,
+        "evidencePaths": 248
+      }
+    }
+  },
+  "scopeAllowlist": [
+    ".github/workflows/release-policy.yml",
+    "DESIGN.md",
+    "README.md",
+    "UI_CONTRACT.md",
+    "package.json",
+    "scripts/check-shared-interactions.mjs",
+    "docs/shared-interactions/README.md",
+    "docs/shared-interactions/features.json",
+    "docs/shared-interactions/features.md",
+    "docs/shared-interactions/scenarios.json",
+    "docs/shared-interactions/acceptance.md",
+    "docs/shared-interactions/validation.json"
+  ],
+  "inputSHA256": {
+    ".github/workflows/release-policy.yml": "7e12105a6d0ddf1cbeb8938c5997973101bacb8ba8ccb49a0e075390e85cc73d",
+    "DESIGN.md": "13adc5606b7fd9077a80aa57a86a0ccf1d8689abcef7ac62b8cb776f0b61d8fa",
+    "README.md": "beda746109ae2df7267d8e97ebe70499c51f8418dbebc92198599f5cd44629c3",
+    "UI_CONTRACT.md": "e89c721eaeacc661c675d353599073dc321a08e4892a94d72e7e5619af25af22",
+    "package.json": "1a708fa44cf1fc2c96173eff11b9e082207680494fd1bbd77fe8bf8c50175e2d",
+    "scripts/check-shared-interactions.mjs": "02d567099a23e309f1eb257b3cd4d5b5fef14410c46e77f6dae40127ad388cd8",
+    "docs/shared-interactions/README.md": "c9c3cfe1a7a50327c4a937ad131a379aa3d3c8111f652bda99547389df0e9673",
+    "docs/shared-interactions/features.json": "971c36d531128dffdae73a94e9a39f9c2bdacbe4905a590caafddf3068cfceb7",
+    "docs/shared-interactions/features.md": "07a52956823ee81a7371c00caf980caa9af97782888e5d3751dff0d4c5c681fb",
+    "docs/shared-interactions/scenarios.json": "dbeb166a279812904a8bbeeed1e2169eaaef98f167b6e7f5b30b48d84b4b660d",
+    "docs/shared-interactions/acceptance.md": "9cb65f595360795d4a4ffd3552642614bab9e6e301e57056dcc51fdc91d5fbde"
+  },
+  "notRun": [
+    {
+      "scope": "Full npm check / runtime API tests",
+      "status": "not-run",
+      "reason": "No application implementation changes; targeted specification and source checks only"
+    },
+    {
+      "scope": "Web browser shared scenarios",
+      "status": "pending"
+    },
+    {
+      "scope": "macOS native unit/UI shared scenarios",
+      "status": "pending"
+    },
+    {
+      "scope": "iOS native unit/UI shared scenarios",
+      "status": "pending"
+    },
+    {
+      "scope": "Cross-client saved-state handoff",
+      "status": "pending"
+    },
+    {
+      "scope": "Hosted CI, commit, push, merge, deployment, promotion, installation",
+      "status": "not-performed"
+    }
+  ]
+}

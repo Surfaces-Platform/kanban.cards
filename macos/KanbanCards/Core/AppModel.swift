@@ -9,6 +9,7 @@ final class AppModel {
     let api: KanbanAPIClient
     let drafts: DraftStore
     @ObservationIgnored private var cardEditingSessions: [String: SharedCardEditingSession] = [:]
+    @ObservationIgnored private var commentEditingSessions: [String: SharedCommentEditingSession] = [:]
     private let defaults: UserDefaults
     private let passkeys = PasskeySignInCoordinator()
     private var projectMutationGenerations: [String: UUID] = [:]
@@ -201,6 +202,15 @@ final class AppModel {
         cardEditingSessions[key]?.invalidate()
         let session = SharedCardEditingSession(model: self, workspace: workspace, projectID: projectID, card: card)
         cardEditingSessions[key] = session
+        session.load()
+        return session
+    }
+
+    func commentEditingSession(workspace: Workspace, projectID: String, cardID: String) -> SharedCommentEditingSession {
+        let key = ownerID + MacDraftScope.key("shared-comment", workspace: workspace, projectID: projectID, resourceID: cardID)
+        if let session = commentEditingSessions[key], session.sessionIsCurrent { return session }
+        let session = SharedCommentEditingSession(model: self, workspace: workspace, projectID: projectID, cardID: cardID)
+        commentEditingSessions[key] = session
         session.load()
         return session
     }
@@ -478,13 +488,14 @@ final class AppModel {
                 let previous = current.cards.first { $0.id == draft.id }
                 if draft.id != nil {
                     guard let previous else { throw AppFailure.missingCard }
+                    guard previous.archivedAt == nil else { throw AppFailure.readOnlyCard }
                     guard previous.version == draft.version else { throw AppFailure.conflict }
                 }
                 let timestamp = ServerTimestamp.string()
                 saved = Card(id: draft.id ?? UUID().uuidString, externalKey: draft.externalKey,
                     title: draft.title, body: draft.body, nextActor: draft.nextActor, nextAction: draft.nextAction,
-                    priority: draft.priority, blockedReason: draft.blockedReason, columnId: draft.columnId,
-                    position: previous?.columnId == draft.columnId ? (previous?.position ?? draft.position) : draft.position, version: (previous?.version ?? 0) + 1,
+                    priority: draft.priority, blockedReason: draft.blockedReason, columnId: previous?.columnId ?? draft.columnId,
+                    position: previous?.position ?? draft.position, version: (previous?.version ?? 0) + 1,
                     archivedAt: previous?.archivedAt, createdAt: previous?.createdAt ?? timestamp,
                     updatedAt: timestamp, comments: previous?.comments ?? [])
                 current.cards.removeAll { $0.id == saved.id }
@@ -566,33 +577,42 @@ final class AppModel {
         }
     }
 
-    /// Reconcile an uncertain move by reading current state; never resend stale text fields.
     func moveCard(cardID: String, to columnID: String, projectID: String, in workspace: Workspace,
                   onRefreshFailure: ((String) -> Void)? = nil) async throws -> Card {
         try requireAccess(workspace)
+        let loadedForThisMove = project(id: projectID, in: workspace) == nil
+        if loadedForThisMove { try await loadProject(id: projectID, in: workspace) }
+        guard let card = project(id: projectID, in: workspace)?.cards.first(where: { $0.id == cardID }) else { throw AppFailure.missingCard }
+        return try await cardEditingSession(workspace: workspace, projectID: projectID, card: card)
+            .move(to: columnID, refreshBeforeMove: !loadedForThisMove, onRefreshFailure: onRefreshFailure)
+    }
+
+    /// The shared session durably protects this exact version/destination before calling.
+    func performCardMove(_ card: Card, to columnID: String, position: Double, projectID: String, in workspace: Workspace,
+                         onConfirmed: ((Card) -> Void)? = nil, onRefreshFailure: ((String) -> Void)? = nil) async throws -> Card {
+        try requireAccess(workspace)
         let operation = sessionID
         let session = api.sessionGeneration
-        try await loadProject(id: projectID, in: workspace)
-        guard let project = project(id: projectID, in: workspace) else { throw AppFailure.missingProject }
-        guard project.archivedAt == nil else { throw AppFailure.readOnlyProject }
-        guard let card = project.cards.first(where: { $0.id == cardID }) else { throw AppFailure.missingCard }
-        guard card.archivedAt == nil else { throw AppFailure.readOnlyCard }
+        guard let project = project(id: projectID, in: workspace), project.archivedAt == nil else { throw AppFailure.readOnlyProject }
+        guard let current = project.cards.first(where: { $0.id == card.id }), current.archivedAt == nil else { throw AppFailure.readOnlyCard }
         guard project.columns.contains(where: { $0.id == columnID }) else { throw AppFailure.missingColumn }
-        if card.columnId == columnID { return card }
-        let position = (project.cards.filter { $0.columnId == columnID && $0.id != cardID }.map(\.position).max() ?? -1) + 1
+        guard current.version == card.version else { throw AppFailure.conflict }
         if isDemo {
-            var draft = CardDraft(card: card)
-            draft.columnId = columnID
-            draft.position = position
-            return try await saveCard(draft, projectID: projectID, in: workspace, key: UUID().uuidString,
-                onRefreshFailure: onRefreshFailure)
+            var updated = project
+            guard let index = updated.cards.firstIndex(where: { $0.id == card.id }) else { throw AppFailure.missingCard }
+            updated.cards[index].columnId = columnID; updated.cards[index].position = position
+            updated.cards[index].version += 1; updated.cards[index].updatedAt = ServerTimestamp.string()
+            updated.revision += 1
+            record("Moved \(card.title).", cardID: card.id, project: &updated)
+            cacheConfirmedProject(updated, in: workspace)
+            let moved = updated.cards[index]; onConfirmed?(moved); return moved
         }
         do {
             let result = try await api.moveCard(card, to: columnID, position: position, projectID: projectID, in: workspace)
             try requireCurrent(operation, session: session, in: workspace)
             cacheConfirmedCard(result.card, projectRevision: result.projectRevision, projectID: projectID, in: workspace)
-            await refreshAfterConfirmedMutation(projectID: projectID, in: workspace,
-                confirmation: "Card moved.", onFailure: onRefreshFailure)
+            onConfirmed?(result.card)
+            await refreshAfterConfirmedMutation(projectID: projectID, in: workspace, confirmation: "Card moved.", onFailure: onRefreshFailure)
             try requireCurrent(operation, session: session, in: workspace)
             return result.card
         } catch {
@@ -760,6 +780,8 @@ final class AppModel {
     private func clearPrivateState() {
         for session in cardEditingSessions.values { session.invalidate() }
         cardEditingSessions.removeAll()
+        for session in commentEditingSessions.values { session.invalidate() }
+        commentEditingSessions.removeAll()
         sessionExpiryTask?.cancel()
         sessionExpiryTask = nil
         workspaceLoadID = nil

@@ -1,3 +1,4 @@
+import { RecoveryStore, RecoveryMap, reconcileCardValues, cardTextFields, type CardTextField, type ReconciliationField } from "./recovery";
 import { renderProductName } from "../brand";
 import { passkeyFormCopy, publicPageTitle, renderPublicHomepage, renderPublicWebsite, usesPublicWebsite } from "../public-website";
 import { syncPublicWebsiteMenu } from "./public-website-menu";
@@ -33,6 +34,7 @@ type StatusTone = "neutral" | "success" | "warning" | "error" | "receipt";
 
 interface Session {
   authenticated: boolean;
+  ownerId: string;
   label: string;
   context: AccessContext;
   email?: string;
@@ -141,6 +143,8 @@ interface CardDraft extends CardFields {
   title: string;
   body: string;
   columnId: string;
+  position: number;
+  basePosition: number;
   baseVersion: Revision | null;
   baseTitle: string;
   baseBody: string;
@@ -192,6 +196,7 @@ interface CardConflict {
   projectId: string;
   cardId: string;
   latestLoaded: boolean;
+  fields?: ReconciliationField[];
 }
 
 interface MoveConflict extends CardConflict {
@@ -210,6 +215,7 @@ interface RequestOptions {
   body?: unknown;
   revision?: Revision | null;
   idempotencyKey?: string;
+  expectedOwnerId?: string;
 }
 
 interface TextControlOptions {
@@ -224,6 +230,8 @@ interface TextControlOptions {
   ariaErrorMessage?: string;
   invalid?: boolean;
 }
+
+class LocalActionBlockedError extends Error {}
 
 class ApiError extends Error {
   readonly status: number;
@@ -241,7 +249,7 @@ const CONFIRMATION_DURATION_MS = 5_000;
 const ADD_COLUMN_PREPARING_STATUS: StatusMessage = {
   tone: "neutral",
   title: "Preparing Add Column",
-  message: "Finishing pending Card changes and loading the latest Project before adding a Column."
+  message: "Retaining your local Card draft and loading the latest Project before adding a Column."
 };
 const UI_CONTRACT_STATES = [
   "opening", "signed-out", "invalid-key", "workspace-route", "empty-workspace", "empty-project", "populated", "selected",
@@ -319,18 +327,37 @@ let descriptionView: DescriptionView = "write";
 let descriptionSelection: { start: number; end: number; direction: "forward" | "backward" | "none" } | null = null;
 let accountPanelOpen = false;
 let projectActionsOpen = false;
-let autosaveChain: Promise<void> = Promise.resolve();
+let sessionEpoch = 0;
+const recoveryStorage: Storage = {
+  get length() { return window.localStorage.length; },
+  key: index => window.localStorage.key(index),
+  getItem: key => window.localStorage.getItem(key),
+  setItem: (key, value) => window.localStorage.setItem(key, value),
+  removeItem: key => window.localStorage.removeItem(key),
+  clear: () => { throw new Error("Recovery storage must never be cleared in bulk."); }
+};
+const recoveryStore = new RecoveryStore(recoveryStorage, uniqueKey);
+const recoveryMaps: Array<RecoveryMap<any>> = [];
+function recoveryMap<T>(kind: string): RecoveryMap<T> { const map = new RecoveryMap<T>(recoveryStore, kind); recoveryMaps.push(map); return map; }
+function bindRecovery(): void {
+  recoveryStore.bind(session?.ownerId ? JSON.stringify([session.ownerId, window.location.origin, session.workspace?.id || "local"]) : "");
+  if (session?.ownerId) for (const map of recoveryMaps) map.load();
+}
+const projectDrafts = recoveryMap<ProjectEditorDraft>("project");
+const pendingPatches = recoveryMap<{ body: Record<string, unknown>; revision: Revision | null; response?: unknown; evidence?: "observed" }>("patch");
+let observedWrite = false;
+const sessionChannel = typeof BroadcastChannel === "function" ? new BroadcastChannel("kanban.cards:session") : null;
+sessionChannel?.addEventListener("message", event => { if (event.data === "signed-out") { captureVisibleDrafts(); clearPrivateState({ kind: "session-expired", title: "Your session ended", message: "Sign in again to recover your drafts." }); render(); } });
 
-const retainedDrafts = new Map<string, CardDraft>();
-const commentDrafts = new Map<string, string>();
+const retainedDrafts = recoveryMap<CardDraft>("card");
+const commentDrafts = recoveryMap<string>("comment");
 const displayedAt = new Map<string, string>();
 const archiveReceipts = new Map<string, ArchiveReceipt[]>();
 const mobileColumns = new Map<string, string>();
 const boardScrollPositions = new Map<string, number>();
 const projectCardFilters = new Map<string, CardFilters>();
-const pendingIdempotencyKeys = new Map<string, { fingerprint: string; key: string }>();
-const pendingAutosaves = new Set<string>();
-const repeatedAutosaves = new Set<string>();
+const pendingIdempotencyKeys = recoveryMap<{ fingerprint: string; key: string; response?: unknown }>("post");
+
 
 function escapeHtml(value: unknown): string {
   return String(value ?? "")
@@ -362,21 +389,24 @@ function idempotencyKeyFor(scope: string, body: unknown): string {
   const fingerprint = JSON.stringify(body);
   const existing = pendingIdempotencyKeys.get(scope);
   if (existing?.fingerprint === fingerprint) return existing.key;
-  if (existing) {
-    throw new Error("This create request has an unconfirmed earlier attempt with different content. Retry the original content, or explicitly start a separate attempt.");
-  }
+  if (existing) return existing.key;
   const key = uniqueKey();
   pendingIdempotencyKeys.set(scope, { fingerprint, key });
   return key;
 }
 
 function clearIdempotencyKey(scope: string): void {
-  pendingIdempotencyKeys.delete(scope);
+  // Keep the confirmed response receipt until every preceding local cleanup is durable.
+  if (!recoveryStore.failure) pendingIdempotencyKeys.delete(scope);
+}
+function completePatch(path: string): void {
+  if (!recoveryStore.failure) pendingPatches.delete(path);
 }
 
 function renderPendingPostAction(scope: string): string {
-  if (!pendingIdempotencyKeys.has(scope)) return "";
-  return `<div class="pending-post jk-status" data-kind="warning"><span class="jk-status-marker" aria-hidden="true">!</span><div><strong>Previous outcome unconfirmed</strong><p>Retry unchanged to reuse the safe request key. Starting a separate attempt may create another resource if the first request committed.</p>${renderButton("Start a separate attempt", "discard-pending-post", { data: `data-idempotency-scope="${escapeHtml(scope)}"` })}</div></div>`;
+  const attempt = pendingIdempotencyKeys.get(scope);
+  if (!attempt) return "";
+  return `<div class="pending-post jk-status" data-kind="warning"><span class="jk-status-marker" aria-hidden="true">!</span><div><strong>${attempt.response ? "Saved submission needs local recovery" : "Previous outcome unconfirmed"}</strong><p>Retry sends the frozen original submission with the same request key. Later edits remain a separate local draft.</p>${renderButton("Retry original submission", "retry-pending-post", { data: `data-idempotency-scope="${escapeHtml(scope)}"` })}</div></div>`;
 }
 
 function objectValue(value: unknown): Record<string, any> {
@@ -504,6 +534,7 @@ function normalizeSession(value: unknown): SessionEnvelope {
     authIntent: nextIntent, setupAvailable: result.setupAvailable === true,
     session: authenticated ? {
       authenticated: true,
+      ownerId: typeof result.ownerId === "string" ? result.ownerId : "",
       label: String(source.label || source.displayName || source.name || source.email || "Owner"), context,
       ...(source.email ? { email: String(source.email) } : {}), ...(workspace ? { workspace } : {})
     } : null
@@ -655,8 +686,62 @@ function normalizeWorkspaceAccess(value: unknown): WorkspaceAccess {
   };
 }
 
+function patchIntentKind(body: Record<string, unknown>): string {
+  if ("columnId" in body) return "placement";
+  if ("archivedAt" in body) return body.archivedAt === null ? "restore" : "archive";
+  if ("title" in body || "nextActor" in body || "blockedReason" in body) return "card-text";
+  return `project:${Object.keys(body).sort().join(",")}`;
+}
+
 async function api<T = unknown>(path: string, options: RequestOptions = {}): Promise<T> {
+  const epoch = sessionEpoch;
+  const mutation = options.method && options.method !== "GET" && path !== "/session";
+  if (mutation && session) {
+    if (!recoveryStore.retry()) throw new Error(recoveryStore.failure);
+    const verified = normalizeSession(await api("/session"));
+    if (!verified.session?.ownerId || verified.session.ownerId !== session.ownerId) throw new ApiError(401, "The signed-in owner changed. Sign in again to recover your drafts.");
+  }
+  if (epoch !== sessionEpoch) throw new ApiError(401, "The session changed before this request started.");
+  let postEntry: [string, { fingerprint: string; key: string; response?: unknown }] | undefined;
+  if (options.idempotencyKey) {
+    if (recoveryStore.failure) throw new Error(recoveryStore.failure);
+    postEntry = [...pendingIdempotencyKeys].find(([, attempt]) => attempt.key === options.idempotencyKey);
+    if (postEntry) {
+      if (postEntry[1].response) return postEntry[1].response as T;
+      options = { ...options, body: JSON.parse(postEntry[1].fingerprint) };
+    }
+  }
+  if (options.method === "PATCH") {
+    observedWrite = false;
+    const previous = pendingPatches.get(path);
+    if (previous) {
+      const requested = objectValue(options.body);
+      if (patchIntentKind(requested) !== patchIntentKind(previous.body) || (patchIntentKind(requested) === "placement" && requested.columnId !== previous.body.columnId)) throw new LocalActionBlockedError("An earlier different change has an unconfirmed outcome. Read back the original change before choosing another action.");
+      if (previous.response) { observedWrite = previous.evidence === "observed"; return previous.response as T; }
+      const projectPath = path.match(/^\/projects\/[^/]+/)?.[0];
+      if (!projectPath) throw new Error("Refresh the original resource before retrying this change.");
+      const payload = objectValue(await api(projectPath));
+      const project = normalizeProject(payload);
+      const cardId = path.match(/\/cards\/([^/]+)$/)?.[1];
+      const latest = cardId ? project.cards.find(card => card.id === decodeURIComponent(cardId)) : project;
+      if (!latest) throw new Error("The resource is unavailable. Your draft and original submission are retained.");
+      const matches = Object.entries(previous.body).every(([field, value]) => JSON.stringify(objectValue(latest)[field]) === JSON.stringify(value));
+      if (matches) {
+        observedWrite = true;
+        const observed = cardId ? { card: latest, projectRevision: project.revision } : { project };
+        pendingPatches.set(path, { ...previous, response: observed, evidence: "observed" });
+        return observed as T;
+      }
+      if (previous.response) throw new Error("The earlier write was confirmed and later changed. Refresh and review before saving again.");
+      pendingPatches.delete(path);
+      if (String(cardId ? (latest as ProjectCard).version : project.revision) !== String(previous.revision)) throw new ApiError(409, "The latest saved state differs from the unconfirmed submission. Review the draft before retrying.");
+      options = { ...options, body: previous.body, revision: previous.revision };
+    }
+    pendingPatches.set(path, { body: objectValue(options.body), revision: options.revision ?? null });
+    if (recoveryStore.failure) throw new Error(recoveryStore.failure);
+  }
   const headers = new Headers({ Accept: "application/json" });
+  if (options.method && options.method !== "GET" && (options.expectedOwnerId || session?.ownerId)) headers.set("X-Kanban-Expected-Owner", options.expectedOwnerId || session!.ownerId);
   if (options.body !== undefined) headers.set("Content-Type", "application/json");
   if (options.revision !== undefined && options.revision !== null) {
     headers.set("X-Kanban-Version", String(options.revision));
@@ -676,11 +761,17 @@ async function api<T = unknown>(path: string, options: RequestOptions = {}): Pro
       ? await response.json()
       : await response.text();
 
+  if (epoch !== sessionEpoch) throw new ApiError(401, "The session changed while the request was in progress. Its recovery record is retained.");
   if (!response.ok) {
+    if (response.status < 500 && response.status !== 401 && response.status !== 408) {
+      if (options.method === "PATCH") pendingPatches.delete(path);
+    }
     const record = objectValue(payload);
     const text = typeof payload === "string" && !payload.trimStart().startsWith("<") ? payload.slice(0, 240) : "";
     throw new ApiError(response.status, String(record.error || record.message || text || `Request failed (${response.status})`));
   }
+  if (options.method === "PATCH") pendingPatches.set(path, { body: objectValue(options.body), revision: options.revision ?? null, response: payload });
+  if (postEntry) pendingIdempotencyKeys.set(postEntry[0], { ...postEntry[1], response: payload });
   return payload as T;
 }
 
@@ -808,7 +899,7 @@ async function refreshCommittedProject(projectId: string): Promise<string | null
 }
 
 function outcomeIsUnconfirmed(error: unknown): boolean {
-  return !(error instanceof ApiError) || error.status >= 500;
+  return !(error instanceof LocalActionBlockedError) && (!(error instanceof ApiError) || error.status === 408 || error.status >= 500);
 }
 
 function workspaceLocked(): boolean {
@@ -1282,6 +1373,8 @@ function storedCardDraft(project: Project, card: ProjectCard | null): CardDraft 
     body: card?.body || "",
     ...normalizeCardFields(card || {}),
     columnId: card?.columnId || creatingColumnId || project.columns[0]?.id || "",
+    position: card?.position || 0,
+    basePosition: card?.position || 0,
     baseVersion: card?.version ?? null,
     baseTitle: card?.title || "",
     baseBody: card?.body || "",
@@ -1319,7 +1412,7 @@ function renderComments(card: ProjectCard): string {
     }),
     error: commentFieldError,
     errorId
-  })}<button class="jk-button" type="submit"${disabledAttribute()}>${mutationKind === "comment" ? "Adding…" : "Add Comment"}</button></form></section>`;
+  })}<button class="jk-button" type="submit"${disabledAttribute()}>${mutationKind === "comment" ? "Adding…" : "Add Comment"}</button>${draft ? renderButton("Discard Comment", "discard-comment") : ""}</form></section>`;
 }
 
 function renderActivity(card: ProjectCard): string {
@@ -1405,22 +1498,15 @@ function renderCardInspector(project: Project): string {
     ? project.columns.find((candidate) => candidate.id === card.columnId) || draftColumn
     : launchColumn;
   const conflict = Boolean(card && cardConflict?.projectId === project.id && cardConflict.cardId === card.id);
-  const latestConflictLoaded = cardConflict?.latestLoaded !== false;
   const titleError = cardFieldErrors.get("title") || "";
   const hasRetainedDraft = retainedDrafts.has(draftKey(project.id, card?.id || null));
   const status = cardStatus;
   const draftRetentionMarkup = hasRetainedDraft && !status && !addColumnPreparing
-    ? `<p class="draft-retained-note jk-help" role="status"><strong>Draft retained</strong><span>Your unsaved Card changes are restored below and remain available until they save or you discard them.</span></p>`
+    ? `<p class="draft-retained-note jk-help" role="status"><strong>Draft retained</strong><span>Your unsaved Card changes are restored below and remain available until you save or explicitly revert them.</span></p>`
     : "";
   const pendingCardCreate = card ? "" : renderPendingPostAction(`card:create:${project.id}`);
-  const retryLabel = card?.archivedAt ? "Retry and restore Card" : "Retry with draft";
-  const staleHeading = latestConflictLoaded ? "The stored Card changed" : "The latest stored Card is unavailable";
-  const staleGuidance = latestConflictLoaded
-    ? "Your complete draft is still in the fields below. Review the stored change, then retry or discard your draft."
-    : "Your complete draft is still in the fields below, but the latest stored Card could not be loaded. Refresh before retrying, or discard the draft.";
-  const storedLabel = latestConflictLoaded ? "Stored" : "Last displayed";
-  const storedWorkFields = card ? `<div><dt>${storedLabel} next actor</dt><dd>${card.nextActor === "human" ? "You" : card.nextActor === "agent" ? "Agent" : "Unassigned"}</dd></div><div><dt>${storedLabel} next action</dt><dd>${escapeHtml(card.nextAction || "None")}</dd></div><div><dt>${storedLabel} priority</dt><dd>${card.priority || "Unset"}</dd></div><div><dt>${storedLabel} blocker</dt><dd>${escapeHtml(card.blockedReason || "None")}</dd></div>` : "";
-  const staleMarkup = conflict && card ? `<section class="stale-review jk-status" data-kind="warning" aria-labelledby="stale-heading"><span class="jk-status-marker" aria-hidden="true">!</span><div><h3 id="stale-heading" tabindex="-1">${staleHeading}</h3><p>${staleGuidance}</p><dl class="stored-change"><div><dt>${storedLabel} state</dt><dd>${card.archivedAt ? "Archived" : "Active"}</dd></div><div><dt>${storedLabel} title</dt><dd>${escapeHtml(card.title)}</dd></div><div><dt>${storedLabel} Column</dt><dd>${escapeHtml(project.columns.find((candidate) => candidate.id === card.columnId)?.name || "Unknown Column")}</dd></div><div><dt>${storedLabel} body</dt><dd>${escapeHtml(card.body || "No body")}</dd></div>${storedWorkFields}</dl><div class="jk-actions">${latestConflictLoaded ? renderButton(retryLabel, "retry-save", { priority: "primary" }) : renderButton("Refresh latest", "refresh-project", { priority: "primary" })}${renderButton("Discard draft", "discard-draft")}</div></div></section>` : "";
+  const fields = cardConflict?.fields || [];
+  const staleMarkup = conflict && card ? `<section class="stale-review jk-status" data-kind="warning" aria-labelledby="stale-heading"><div><h3 id="stale-heading" tabindex="-1">The stored Card changed</h3>${card.archivedAt ? `<p>This Card is archived. Your draft remains local. Restore it separately before saving.</p>${renderButton("Restore Card", "restore-selected-card")}` : fields.length ? `<p>Choose a value for each field changed in both places.</p>${fields.map(field => field === "placement" ? `<fieldset><legend>Column</legend><p>The retained destination differs from the saved Column. Text Save never moves a Card.</p>${renderButton("Use saved Column", "resolve-card-field", { data: `data-field="placement" data-choice="saved"` })}${project.columns.some(column => column.id === draft.columnId) ? renderButton("Move to retained Column", "move-retained-placement", { data: `data-column-id="${escapeHtml(draft.columnId)}"` }) : ""}</fieldset>` : `<fieldset><legend>${escapeHtml(field)}</legend><p>Draft: <span class="conflict-source">${escapeHtml(draft[field] ?? "Unset")}</span></p><p>Saved: <span class="conflict-source">${escapeHtml(card[field] ?? "Unset")}</span></p>${renderButton("Keep draft", "resolve-card-field", { data: `data-field="${field}" data-choice="local"` })}${renderButton("Use saved", "resolve-card-field", { data: `data-field="${field}" data-choice="saved"` })}</fieldset>`).join("")}` : `<p>Refresh to load the latest saved Card before continuing.</p>${renderButton("Refresh latest", "refresh-project")}`}${pendingPatches.has(`/projects/${safeId(project.id)}/cards/${safeId(card.id)}`) ? renderButton("Check original save", "retry-save") : ""}${renderButton("Revert draft", "discard-draft")}</div></section>` : "";
   const moveConflictMarkup = card ? renderMoveConflict(project, card) : "";
   const recoveryActive = conflict || Boolean(moveConflictMarkup);
   const previewBlocked = addColumnPreparing || recoveryActive || Boolean(status && (status.tone === "error" || status.title.includes("outcome unconfirmed")));
@@ -1458,13 +1544,87 @@ function renderCardInspector(project: Project): string {
   const previewPanel = `<div id="description-preview-panel" class="description-view-panel markdown-preview" role="tabpanel" aria-labelledby="description-preview-tab" tabindex="0"${descriptionView === "preview" ? "" : " hidden"}>${previewContent}</div>`;
   const descriptionEditor = `<div class="jk-field surface-field card-body-field"><div class="description-field-header"><label for="card-body-input">Description</label>${descriptionTabs}</div><p class="jk-help" id="card-description-help">Markdown supports headings, lists, links, quotes, and code. HTML and images aren’t supported.</p>${writePanel}${previewPanel}</div>`;
   const createDestination = card ? "" : renderCreateDestination(project, draft);
-  const editor = `<form class="card-form surface-card-form" data-form="card" data-autosave="${card ? "true" : "false"}" data-card-id="${escapeHtml(card?.id || "")}" novalidate><div class="jk-field surface-field"><label class="jk-visually-hidden" for="card-title-input">Title</label>${titleControl}${titleError ? `<p class="jk-error" id="card-title-error">${escapeHtml(titleError)}</p>` : ""}</div><p id="card-filter-note" class="card-filter-note jk-help" role="status">${selectedCardFilterMessage(project, card)}</p>${draftRetentionMarkup}${descriptionEditor}${renderCardWorkFields(draft)}${createDestination}${conflict || moveConflictMarkup ? "" : card ? `<div class="inspector-actions">${renderButton("Archive", "archive-card", { priority: "risk", data: `data-card-id="${escapeHtml(card.id)}"` })}</div>` : `<div class="inspector-actions"><button class="jk-button" data-priority="primary" type="submit"${disabledAttribute()}>${mutationKind === "card" ? "Creating…" : "Create Card"}</button></div>`}</form>`;
-  const cardPanel = `<div id="card-panel" class="inspector-panel" role="tabpanel" aria-labelledby="card-tab">${status ? `<div class="card-status">${renderStatus(status, "card-status")}</div>` : renderStatus(null, "card-status")}${staleMarkup}${moveConflictMarkup}${pendingCardCreate}${editor}${card ? renderComments(card) : ""}</div>`;
+  const editor = `<form class="card-form surface-card-form" data-form="card" data-card-id="${escapeHtml(card?.id || "")}" novalidate><fieldset class="card-edit-fields"${card?.archivedAt ? " disabled" : ""}><div class="jk-field surface-field"><label class="jk-visually-hidden" for="card-title-input">Title</label>${titleControl}${titleError ? `<p class="jk-error" id="card-title-error">${escapeHtml(titleError)}</p>` : ""}</div><p id="card-filter-note" class="card-filter-note jk-help" role="status">${selectedCardFilterMessage(project, card)}</p>${draftRetentionMarkup}${descriptionEditor}${renderCardWorkFields(draft)}${createDestination}</fieldset>${conflict || moveConflictMarkup ? "" : card ? `<div class="inspector-actions"><button class="jk-button" data-priority="primary" type="submit"${disabledAttribute(Boolean(card.archivedAt))}>Save</button>${renderButton("Revert", "discard-draft")}${renderButton("Archive", "archive-card", { priority: "risk", data: `data-card-id="${escapeHtml(card.id)}"` })}</div>` : `<div class="inspector-actions"><button class="jk-button" data-priority="primary" type="submit"${disabledAttribute()}>${mutationKind === "card" ? "Creating…" : "Create Card"}</button>${renderButton("Discard", "discard-draft")}</div>`}</form>`;
+  const cardPanel = `<div id="card-panel" class="inspector-panel" role="tabpanel" aria-labelledby="card-tab">${status ? `<div class="card-status">${renderStatus(status, "card-status")}</div>` : renderStatus(null, "card-status")}${staleMarkup}${moveConflictMarkup}${pendingCardCreate}${editor}${card && !card.archivedAt ? renderComments(card) : ""}</div>`;
   const preparingStatus = addColumnPreparing && cardOnlyQuery.matches
     ? `<div class="card-status inspector-preparing-status">${renderStatus(ADD_COLUMN_PREPARING_STATUS, "add-column-preparing-status")}</div>`
     : "";
   const toolbarActions = `<div class="inspector-toolbar-actions">${card ? renderMoveDisclosure(project, card, conflict) : ""}<button class="close-button inspector-close" type="button" data-action="close-card" aria-label="${escapeHtml(closeLabel)}"${disabledAttribute()}><span aria-hidden="true">×</span></button></div>`;
-  return `<aside class="card-inspector jk-panel" aria-labelledby="card-tab"><div class="inspector-content"><header class="inspector-toolbar">${tabs}${toolbarActions}</header><div id="card-autosave-status" class="jk-visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div>${preparingStatus}${cardSelected ? cardPanel : card ? renderActivity(card) : cardPanel}</div></aside>`;
+  return `<aside class="card-inspector jk-panel" aria-labelledby="card-tab"><div class="inspector-content"><header class="inspector-toolbar">${tabs}${toolbarActions}</header>${preparingStatus}${cardSelected ? cardPanel : card ? renderActivity(card) : cardPanel}</div></aside>`;
+}
+
+function renderRecovery(): string {
+  const alternatives = recoveryMaps.flatMap(map => [...map.keys()].flatMap(key => map.alternatives(key).map(item => ({ ...item, kind: map.kind }))));
+  const missing = activeProject ? [...retainedDrafts].filter(([, draft]) => draft.projectId === activeProject!.id && draft.cardId && !activeProject!.cards.some(card => card.id === draft.cardId)) : [];
+  return `<section id="local-recovery" class="project-status-wrap" aria-label="Local draft recovery">${retainedDrafts.size || commentDrafts.size || projectDrafts.size || pendingIdempotencyKeys.size || pendingPatches.size ? `<details><summary>Local drafts and recovery</summary><p>Drafts stay on this browser for this signed-in owner and Workspace.</p>${renderButton("Copy recovery data", "copy-recovery")}</details>` : ""}${recoveryStore.failure ? `<div class="jk-status" data-kind="warning" role="alert"><div><strong>Local draft recovery needs attention</strong><p>${escapeHtml(recoveryStore.failure)}</p>${renderButton("Retry local storage", "retry-local-storage")}${renderButton("Copy recovery data", "copy-recovery")}${renderButton("Sign out", "sign-out")}</div></div>` : ""}${[...pendingPatches].map(([path]) => `<div class="jk-status" data-kind="warning"><div><strong>Original change needs reconciliation</strong><p>Read saved values before retrying or choosing a different action.</p>${renderButton("Read back original change", "read-back-patch", { data: `data-patch-path="${escapeHtml(path)}"` })}</div></div>`).join("")}${alternatives.length ? `<div class="jk-status" data-kind="warning"><div><strong>Other draft copies are retained</strong><p>Opening a copy keeps the current copy available.</p>${alternatives.map(item => renderButton(`Open draft copy (${new Date(item.updatedAt).toLocaleString()})`, "recover-copy", { data: `data-record-id="${escapeHtml(item.id)}" data-record-kind="${escapeHtml(item.kind)}"` })).join("")}</div></div>` : ""}${missing.length ? `<div class="jk-status" data-kind="warning"><div><strong>A Card with a local draft is unavailable</strong><p>Your draft is retained. Copy recovery data to keep its full text.</p>${renderButton("Copy recovery data", "copy-recovery")}</div></div>` : ""}</section>`;
+}
+function syncRecoveryNotice(): void {
+  if (!session) return;
+  const panel = root.querySelector("#local-recovery");
+  if (panel) panel.outerHTML = renderRecovery();
+}
+async function readBackPendingPatch(path: string): Promise<void> {
+  const operation = pendingPatches.get(path);
+  const projectPath = path.match(/^\/projects\/([^/]+)(?:\/cards\/([^/]+))?$/);
+  if (!operation || !projectPath || mutationInFlight) return;
+  const projectId = decodeURIComponent(projectPath[1]);
+  const cardId = projectPath[2] ? decodeURIComponent(projectPath[2]) : null;
+  setWorkspaceMutationsDisabled(true, "refresh");
+  try {
+    const latestProject = await fetchProject(projectId);
+    const latest = cardId ? latestProject.cards.find(card => card.id === cardId) : latestProject;
+    if (!latest) throw new Error("The original resource is unavailable. Its draft and submission are retained.");
+    const matches = Object.entries(operation.body).every(([field, value]) => JSON.stringify(objectValue(latest)[field]) === JSON.stringify(value));
+    if (matches) {
+      pendingPatches.set(path, { ...operation, response: cardId ? { card: latest, projectRevision: latestProject.revision } : { project: latestProject }, evidence: "observed" });
+      if (cardId && patchIntentKind(operation.body) === "card-text") {
+        const key = draftKey(projectId, cardId), local = retainedDrafts.get(key);
+        if (local && cardTextFields.every(field => objectValue(local)[field] === operation.body[field])) retainedDrafts.delete(key);
+      }
+      completePatch(path);
+    } else {
+      // A deliberate readback ends the unknown state without replaying a PATCH.
+      // The local draft still carries text intent; a requested move stays explicit.
+      pendingPatches.delete(path);
+      if (cardId && patchIntentKind(operation.body) === "placement") moveConflict = { projectId, cardId, destinationColumnId: String(operation.body.columnId), latestLoaded: true };
+    }
+    if (activeProject?.id === projectId) applyProjectSnapshot(latestProject);
+    const status: StatusMessage = matches
+      ? { tone: "success", title: "Saved state observed", message: "The latest saved values match the original submission. Readback does not identify the request or actor that saved them." }
+      : { tone: "warning", title: "Latest saved values read", message: "The original submission is not the current saved state. Your draft is retained. Review it, then explicitly choose Save or Move; no PATCH was replayed." };
+    if (selectedCardId === cardId && cardId) cardStatus = status; else projectStatus = status;
+  } finally { setWorkspaceMutationsDisabled(false); render(); }
+}
+
+async function resolveCardField(field: string, choice: string): Promise<void> {
+  const project = activeProject; const card = project?.cards.find(item => item.id === selectedCardId);
+  if (!project || !card || (!cardTextFields.includes(field as CardTextField) && field !== "placement")) return;
+  const key = draftKey(project.id, card.id); const draft = retainedDrafts.get(key);
+  if (!draft) return;
+  if (field === "placement") { retainedDrafts.set(key, { ...draft, columnId: card.columnId, position: card.position, baseColumnId: card.columnId, basePosition: card.position }); cardConflict = null; retainedDrafts.set(key, mergeCardDraft(retainedDrafts.get(key)!, card)); render(); return; }
+  const name = field as CardTextField;
+  const baseKey = `base${name[0].toUpperCase()}${name.slice(1)}`;
+  const next = { ...draft, [baseKey]: card[name], ...(choice === "saved" ? { [name]: card[name] } : {}) };
+  retainedDrafts.set(key, next);
+  cardConflict = null;
+  retainedDrafts.set(key, mergeCardDraft(next, card));
+  cardStatus = cardConflict ? cardStatus : null;
+  pendingFocusId = cardConflict ? "stale-heading" : "card-title-input";
+  render();
+}
+async function restoreSelectedCard(): Promise<void> {
+  const project = activeProject; const card = project?.cards.find(item => item.id === selectedCardId);
+  if (!project || !card || !card.archivedAt || mutationInFlight) return;
+  setWorkspaceMutationsDisabled(true, "undo");
+  const path = `/projects/${safeId(project.id)}/cards/${safeId(card.id)}`;
+  try {
+    const response = await api(path, { method: "PATCH", revision: card.version, body: { archivedAt: null } });
+    const restored = applyCardMutationResponse(project.id, response);
+    completePatch(path);
+    const key = draftKey(project.id, card.id); const draft = retainedDrafts.get(key);
+    cardConflict = null; if (draft) retainedDrafts.set(key, mergeCardDraft(draft, restored));
+    cardStatus = { tone: "success", title: observedWrite ? "Saved active state observed" : "Card restored", message: "Your text draft is still local. Use Save to store it." };
+  } finally { setWorkspaceMutationsDisabled(false); render(); }
 }
 
 function renderWorkspace(): string {
@@ -1477,7 +1637,7 @@ function renderWorkspace(): string {
         : project
           ? `${renderBoardPane(project)}${cardOpen ? renderCardInspector(project) : ""}`
           : renderEmptyWorkspace();
-  return `<a class="skip-link" href="#main-content">Skip to workspace</a><div class="workspace" data-card-open="${cardOpen ? "true" : "false"}" data-workspace-locked="${workspaceLocked() ? "true" : "false"}">${renderHeader()}${renderProjectReceipt()}<main id="main-content" class="workbench" tabindex="-1">${agentPanelOpen ? renderAgentConnections() : content}</main></div>`;
+  return `<a class="skip-link" href="#main-content">Skip to workspace</a><div class="workspace" data-card-open="${cardOpen ? "true" : "false"}" data-workspace-locked="${workspaceLocked() ? "true" : "false"}">${renderHeader()}${renderRecovery()}${renderProjectReceipt()}<main id="main-content" class="workbench" tabindex="-1">${agentPanelOpen ? renderAgentConnections() : content}</main></div>`;
 }
 
 function currentUiState(): string {
@@ -1599,6 +1759,7 @@ function captureProjectDraft(form: HTMLFormElement): void {
     description: formValue(data, "description"),
     columns: projectEditorDraft.columns.map((column, index) => ({ ...column, name: formValue(data, `column-${index}`) }))
   };
+  projectDrafts.set(projectEditorDraft.projectId || "new", projectEditorDraft);
 }
 
 function captureAddColumnDraft(form: HTMLFormElement): void {
@@ -1628,17 +1789,28 @@ function sameRevision(left: Revision | null, right: Revision | null): boolean {
   return left !== null && right !== null && String(left) === String(right);
 }
 
+function mergeCardDraft(draft: CardDraft, card: ProjectCard): CardDraft {
+  const base = { title: draft.baseTitle, body: draft.baseBody, nextActor: draft.baseNextActor, nextAction: draft.baseNextAction, priority: draft.basePriority, blockedReason: draft.baseBlockedReason, columnId: draft.baseColumnId, position: draft.basePosition ?? card.position };
+  const merged = reconcileCardValues(base, { ...draft, position: draft.position ?? base.position }, card);
+  const next = { ...rebaseDraft(draft, card), ...Object.fromEntries([...cardTextFields, "columnId", "position"].map(field => [field, objectValue(merged.value)[field]])) } as CardDraft;
+  // Conflicting base values remain intact until each field has an explicit choice.
+  for (const field of merged.conflicts) {
+    if (field === "placement") { next.baseColumnId = draft.baseColumnId; next.basePosition = draft.basePosition; continue; }
+    const baseKey = `base${field[0].toUpperCase()}${field.slice(1)}` as keyof CardDraft;
+    Object.assign(next, { [baseKey]: draft[baseKey] });
+  }
+  if (card.archivedAt || merged.conflicts.length) cardConflict = { projectId: draft.projectId, cardId: card.id, latestLoaded: true, fields: merged.conflicts };
+  else if (cardConflict?.cardId === card.id) cardConflict = null;
+  return next;
+}
 function storedCardMatchesDraftBase(card: ProjectCard, draft: CardDraft): boolean {
-  return cleanValue(card.title) === cleanValue(draft.baseTitle)
-    && cardBodyValue(card.body) === cardBodyValue(draft.baseBody)
-    && card.columnId === draft.baseColumnId
-    && card.archivedAt === draft.baseArchivedAt
-    && sameCardFields(card, { nextActor: draft.baseNextActor, nextAction: draft.baseNextAction, priority: draft.basePriority, blockedReason: draft.baseBlockedReason });
+  return cardTextFields.every(field => card[field] === draft[`base${field[0].toUpperCase()}${field.slice(1)}` as keyof CardDraft]) && card.archivedAt === draft.baseArchivedAt;
 }
 
 function rebaseDraft(draft: CardDraft, card: ProjectCard): CardDraft {
   return {
     ...draft,
+    basePosition: card.position,
     baseVersion: card.version,
     baseTitle: card.title,
     baseBody: card.body,
@@ -1656,8 +1828,9 @@ function captureCardDraft(form: HTMLFormElement): CardDraft | null {
   if (!project) return null;
   const cardId = form.dataset.cardId || null;
   const card = cardId ? project.cards.find((candidate) => candidate.id === cardId) || null : null;
-  const data = formData(form);
   const key = draftKey(project.id, cardId);
+  if (mutationInFlight || card?.archivedAt) return retainedDrafts.get(key) || storedCardDraft(project, card);
+  const data = formData(form);
   const existing = retainedDrafts.get(key);
   const base = existing || storedCardDraft(project, card);
   const draft: CardDraft = {
@@ -1667,6 +1840,8 @@ function captureCardDraft(form: HTMLFormElement): CardDraft | null {
     body: formValue(data, "body"),
     ...normalizeCardFields({ nextActor: formValue(data, "nextActor"), nextAction: formValue(data, "nextAction"), priority: formValue(data, "priority"), blockedReason: formValue(data, "blockedReason") }),
     columnId: formValue(data, "columnId") || base.columnId,
+    position: base.position,
+    basePosition: base.basePosition,
     baseVersion: base.baseVersion,
     baseTitle: base.baseTitle,
     baseBody: base.baseBody,
@@ -1682,8 +1857,16 @@ function captureCardDraft(form: HTMLFormElement): CardDraft | null {
   return draft;
 }
 
+function safeSessionRemove(key: string): void {
+  try { window.sessionStorage.removeItem(key); } catch { /* Optional preferences cannot prevent private state from leaving the screen. */ }
+}
+
 function clearPrivateState(notice: AuthNotice | null): void {
+  sessionEpoch++;
   session = null;
+  recoveryStore.scope = "";
+  projectDrafts.clear();
+  pendingPatches.clear();
   workspaceHandoffPending = false;
   workspaceChoices = [];
   workspaceMenuOpen = false;
@@ -1692,7 +1875,7 @@ function clearPrivateState(notice: AuthNotice | null): void {
   workspaceDraft = { name: "", slug: "" };
   createdWorkspace = null;
   uncertainWorkspaceCreations.clear();
-  window.sessionStorage.removeItem("kanban.cards:workspace-route");
+  safeSessionRemove("kanban.cards:workspace-route");
   agentConnections = [];
   agentPanelOpen = false;
   issuedAgentCredential = "";
@@ -1726,8 +1909,7 @@ function clearPrivateState(notice: AuthNotice | null): void {
   displayedAt.clear();
   archiveReceipts.clear();
   pendingIdempotencyKeys.clear();
-  pendingAutosaves.clear();
-  repeatedAutosaves.clear();
+
   mobileColumns.clear();
   boardScrollPositions.clear();
   projectCardFilters.clear();
@@ -1741,10 +1923,10 @@ function clearPrivateState(notice: AuthNotice | null): void {
   accountPanelOpen = false;
   projectActionsOpen = false;
   setWorkspaceMutationsDisabled(false);
-  window.localStorage.removeItem("kanban.cards:project-id");
-  window.sessionStorage.removeItem("kanban.cards:open-agents");
-  window.sessionStorage.removeItem("kanban.cards:open-access");
-  window.sessionStorage.removeItem("kanban.cards:add-passkey-after-verify");
+  try { window.localStorage.removeItem("kanban.cards:project-id"); } catch { /* Sign-out still hides private state. */ }
+  safeSessionRemove("kanban.cards:open-agents");
+  safeSessionRemove("kanban.cards:open-access");
+  safeSessionRemove("kanban.cards:add-passkey-after-verify");
   authNotice = notice;
 }
 
@@ -1757,6 +1939,7 @@ async function loadSession(): Promise<void> {
     authIntent = result.authIntent;
     setupAvailable = result.setupAvailable;
     session = result.session;
+    bindRecovery();
   } catch (error) {
     if (error instanceof ApiError && error.status === 401) session = null;
     else throw error;
@@ -1835,15 +2018,15 @@ async function showWorkspaceRoute(create: boolean): Promise<void> {
   const form = document.querySelector<HTMLFormElement>("form[data-form='card']");
   if (form) {
     captureCardDraft(form);
-    if (form.dataset.autosave === "true") queueCardAutosave(form);
+
   }
   setWorkspaceMutationsDisabled(true, "workspace");
   render();
-  await flushCardAutosaves();
+  await retainVisibleDrafts();
   if (!session) return;
-  if (retainedDrafts.size || commentDrafts.size || pendingIdempotencyKeys.size || cardConflict || moveConflict) {
+  if (recoveryStore.failure) {
     setWorkspaceMutationsDisabled(false);
-    projectStatus = { tone: "warning", title: "Workspace change paused", message: "Save or discard unsaved Card changes and Comments before leaving this Workspace." };
+    projectStatus = { tone: "warning", title: "Workspace change paused", message: "Retry local storage or export your drafts before leaving this Workspace." };
     pendingFocusId = "project-status";
     render();
     return;
@@ -1985,7 +2168,7 @@ async function fetchProject(projectId: string): Promise<Project> {
 function reconcileProjectContext(project: Project): void {
   activeProject = project;
   displayedAt.set(project.id, new Date().toISOString());
-  window.localStorage.setItem("kanban.cards:project-id", project.id);
+  try { window.localStorage.setItem("kanban.cards:project-id", project.id); } catch { /* Project selection is optional. Draft persistence reports its own failures. */ }
   if (selectedCardId) {
     const selected = project.cards.find((card) => card.id === selectedCardId);
     if (!selected) {
@@ -1997,15 +2180,8 @@ function reconcileProjectContext(project: Project): void {
       mobileColumns.set(project.id, selected.columnId);
       const key = draftKey(project.id, selected.id);
       const draft = retainedDrafts.get(key);
-      if (draft && !sameRevision(draft.baseVersion, selected.version)) {
-        if (storedCardMatchesDraftBase(selected, draft)) {
-          retainedDrafts.set(key, rebaseDraft(draft, selected));
-          if (cardConflict?.projectId === project.id && cardConflict.cardId === selected.id) cardConflict = null;
-        } else {
-          cardConflict = { projectId: project.id, cardId: selected.id, latestLoaded: true };
-          cardStatus = { tone: "warning", title: "Stored Card changed", message: "Your complete draft is retained. Retry it against the latest version or discard it." };
-          pendingFocusId = "stale-heading";
-        }
+      if (draft) {
+        retainedDrafts.set(key, mergeCardDraft(draft, selected));
       } else if (selected.archivedAt && !draft) {
         selectedCardId = null;
         creatingCard = false;
@@ -2034,7 +2210,8 @@ async function loadProjects(preferredId?: string): Promise<void> {
     activeProject = null;
     return;
   }
-  const storedId = window.localStorage.getItem("kanban.cards:project-id") || "";
+  let storedId = "";
+  try { storedId = window.localStorage.getItem("kanban.cards:project-id") || ""; } catch { /* Optional preference. */ }
   const candidateId = preferredId || activeProject?.id || storedId;
   const projectId = nextProjects.some((project) => project.id === candidateId) ? candidateId : nextProjects[0].id;
   const nextProject = await fetchProject(projectId);
@@ -2077,12 +2254,15 @@ async function signIn(form: HTMLFormElement): Promise<void> {
 }
 
 async function signOut(): Promise<void> {
+  const signingOutOwner = session?.ownerId;
+  captureVisibleDrafts();
+  sessionChannel?.postMessage("signed-out");
   signOutPending = true;
   render();
   try {
-    await flushCardAutosaves();
+    await retainVisibleDrafts();
     clearPrivateState(null);
-    const response = objectValue(await api("/session", { method: "DELETE" }));
+    const response = objectValue(await api("/session", { method: "DELETE", expectedOwnerId: signingOutOwner }));
     if (accessContext !== "local" && (response.signedOutHere !== true || response.globalSignOutComplete !== true)) throw new Error("Sign-out could not be confirmed.");
     if (accessContext !== "local" && rootUrl && rootUrl !== window.location.origin) {
       window.location.replace(`${rootUrl}/?signedout=1`);
@@ -2111,6 +2291,7 @@ function openProjectEditor(mode: Exclude<ProjectEditorMode, null>, trigger: HTML
       ? project.columns.map((column) => ({ id: column.id, name: column.name }))
       : DEFAULT_COLUMNS.map((name) => ({ id: null, name }))
   };
+  projectEditorDraft = projectDrafts.get(project?.id || "new") || projectEditorDraft;
   projectFieldErrors.clear();
   projectStatus = null;
   projectEditorReturnFocus = trigger.closest(".action-panel")
@@ -2126,7 +2307,7 @@ function cancelProjectEditor(): void {
   projectEditorDraft = null;
   projectFieldErrors.clear();
   projectStatus = null;
-  showConfirmation("Project unchanged", "No Project changes were saved.");
+  showConfirmation("Project draft retained", "Your unsaved Project details will return when you open this editor.");
   pendingFocusRestore = projectEditorReturnFocus;
   projectEditorReturnFocus = null;
   render();
@@ -2145,10 +2326,9 @@ async function openAddColumnEditor(trigger: HTMLElement): Promise<void> {
     ? cardOnlyQuery.matches ? "add-column-preparing-status" : "add-column-status"
     : "add-column-status";
   render();
-  await flushCardAutosaves();
+  await retainVisibleDrafts();
   if (!session) return;
-  const selectedDraftKey = selectedCardId ? draftKey(projectId, selectedCardId) : "";
-  if (cardConflict || moveConflict || (selectedDraftKey && retainedDrafts.has(selectedDraftKey))) {
+  if (cardConflict || moveConflict || recoveryStore.failure) {
     addColumnPreparing = false;
     setWorkspaceMutationsDisabled(false);
     inspectorTab = "card";
@@ -2264,6 +2444,7 @@ async function saveAddColumn(form: HTMLFormElement): Promise<void> {
       body: { columns }
     });
     const updated = normalizeProject(response);
+    completePatch(`/projects/${safeId(draft.projectId)}`);
     applyProjectSnapshot(updated);
     mobileColumns.set(updated.id, draft.id);
     selectedCardId = null;
@@ -2328,7 +2509,7 @@ function validateProjectDraft(draft: ProjectEditorDraft): boolean {
 async function saveProject(form: HTMLFormElement): Promise<void> {
   captureProjectDraft(form);
   const draft = projectEditorDraft;
-  if (!draft || !validateProjectDraft(draft)) return;
+  if (!draft || (!(draft.mode === "create" && pendingIdempotencyKeys.has("project:create")) && !validateProjectDraft(draft))) return;
   setWorkspaceMutationsDisabled(true, "project");
   projectStatus = { tone: "neutral", title: "Saving Project", message: "Conflicting actions are unavailable until the save finishes." };
   render();
@@ -2347,6 +2528,9 @@ async function saveProject(form: HTMLFormElement): Promise<void> {
       });
       const created = normalizeProject(response);
       if (!created.id) throw new Error("The Project was created without an id.");
+      const submitted = JSON.parse(pendingIdempotencyKeys.get(idempotencyScope)!.fingerprint);
+      projectDrafts.delete("new");
+      if (cleanValue(draft.name) !== submitted.name || cleanValue(draft.description) !== submitted.description || draft.columns.some((column, index) => cleanValue(column.name) !== submitted.columns[index]?.name)) projectDrafts.set(created.id, { ...draft, mode: "edit", projectId: created.id, columns: draft.columns.map((column, index) => ({ ...column, id: created.columns[index]?.id || null })) });
       clearIdempotencyKey(idempotencyScope);
       projectEditorMode = null;
       projectEditorDraft = null;
@@ -2364,16 +2548,13 @@ async function saveProject(form: HTMLFormElement): Promise<void> {
     } else {
       const project = activeProject;
       if (!project) return;
-      const response = await api(`/projects/${safeId(project.id)}`, {
-        method: "PATCH",
-        revision: project.revision,
-        body: {
-          name: cleanValue(draft.name),
-          description: cleanValue(draft.description),
-          columns: draft.columns.map((column, position) => ({ id: column.id, name: cleanValue(column.name), position }))
-        }
-      });
+      const body = { name: cleanValue(draft.name), description: cleanValue(draft.description), columns: draft.columns.map((column, position) => ({ id: column.id, name: cleanValue(column.name), position })) };
+      const submitted = pendingPatches.get(`/projects/${safeId(project.id)}`)?.body || body;
+      const response = await api(`/projects/${safeId(project.id)}`, { method: "PATCH", revision: project.revision, body });
       const updated = normalizeProject(response);
+      projectDrafts.delete(project.id);
+      if (JSON.stringify(body) !== JSON.stringify(submitted)) projectDrafts.set(project.id, draft);
+      completePatch(`/projects/${safeId(project.id)}`);
       projectEditorMode = null;
       projectEditorDraft = null;
       projectEditorReturnFocus = null;
@@ -2414,18 +2595,11 @@ function openCard(cardId: string, trigger: HTMLElement, allowArchived = false): 
   cardFieldErrors.clear();
   commentFieldError = "";
   const key = draftKey(project.id, card.id);
-  let draft = retainedDrafts.get(key);
-  if (draft && !sameRevision(draft.baseVersion, card.version) && storedCardMatchesDraftBase(card, draft)) {
-    draft = rebaseDraft(draft, card);
-    retainedDrafts.set(key, draft);
-  }
-  const hasStoredConflict = Boolean(draft
-    && !sameRevision(draft.baseVersion, card.version)
-    && !storedCardMatchesDraftBase(card, draft));
-  cardStatus = hasStoredConflict
-    ? { tone: "warning", title: "Stored Card changed", message: "Your complete draft is retained. Retry it against the latest version or discard it." }
-    : null;
-  cardConflict = hasStoredConflict ? { projectId: project.id, cardId: card.id, latestLoaded: true } : null;
+  const draft = retainedDrafts.get(key);
+  cardConflict = null;
+  if (draft) retainedDrafts.set(key, mergeCardDraft(draft, card));
+  const hasStoredConflict = Boolean(cardConflict);
+  cardStatus = hasStoredConflict ? { tone: "warning", title: "Stored Card changed", message: "Choose a value for each conflicting field. Your other changes are retained." } : null;
   resetMoveContext();
   inspectorTab = "card";
   resetDescriptionContext();
@@ -2465,7 +2639,7 @@ function closeCard(): void {
   if (!project) return;
   const cardId = selectedCardId;
   const key = draftKey(project.id, cardId);
-  if (retainedDrafts.has(key) && !pendingAutosaves.has(key)) {
+  if (retainedDrafts.has(key)) {
     projectStatus = null;
     showConfirmation("Draft retained", "Your unsaved Card changes will return when you open this Card again.");
   }
@@ -2494,142 +2668,13 @@ function validateCardDraft(draft: CardDraft): boolean {
   return false;
 }
 
-function announceAutosave(message: string): void {
-  const status = document.querySelector<HTMLElement>("#card-autosave-status");
-  if (status) status.textContent = message;
-}
-
-function updateRenderedBoardCard(card: ProjectCard): void {
-  const project = activeProject;
-  const board = root.querySelector<HTMLElement>(".board-pane");
-  if (project && board) {
-    const scrollTop = window.scrollY;
-    const columnsScrollLeft = board.querySelector(".columns")?.scrollLeft || 0;
-    const focused = document.activeElement instanceof HTMLElement && board.contains(document.activeElement) ? document.activeElement : null;
-    const focusId = focused?.id;
-    const focusTarget = focused ? focusTargetFor(focused) : null;
-    board.outerHTML = renderBoardPane(project);
-    const columns = root.querySelector(".board-pane .columns");
-    if (columns) columns.scrollLeft = columnsScrollLeft;
-    let nextFocus = focusId ? document.getElementById(focusId) : focusTarget ? findFocusTarget(focusTarget) : null;
-    if (!nextFocus && focusTarget?.action === "open-card") nextFocus = document.getElementById(`column-${safeId(card.columnId)}`);
-    nextFocus?.focus({ preventScroll: true });
-    window.scrollTo({ top: scrollTop });
-  }
-  if (selectedCardId === card.id && project) {
-    const note = root.querySelector<HTMLElement>("#card-filter-note");
-    if (note) note.textContent = selectedCardFilterMessage(project, card);
-    if (!retainedDrafts.has(draftKey(project.id, card.id))) root.querySelector(".draft-retained-note")?.remove();
-  }
-}
-
-function inspectorHasActiveControl(): boolean {
-  return document.activeElement instanceof HTMLElement && Boolean(document.activeElement.closest(".card-inspector"));
-}
-
-async function performCardAutosave(projectId: string, cardId: string): Promise<void> {
-  const project = activeProject;
-  if (!project || project.id !== projectId || cardConflict) return;
-  const card = project.cards.find((candidate) => candidate.id === cardId);
-  const key = draftKey(projectId, cardId);
-  const draft = retainedDrafts.get(key);
-  if (!card || !draft) return;
-  if (sameDraft(draft, storedCardDraft(project, card))) {
-    retainedDrafts.delete(key);
-    updateRenderedBoardCard(card);
-    return;
-  }
-  if (!cleanValue(draft.title)) {
-    cardFieldErrors.set("title", "Enter a Card title.");
-    cardStatus = { tone: "error", title: "Title required", message: "Add a title before this Card can be saved." };
-    descriptionView = "write";
-    if (selectedCardId === cardId) render();
-    return;
-  }
-
-  announceAutosave("Saving changes…");
-  try {
-    const response = await api(`/projects/${safeId(projectId)}/cards/${safeId(cardId)}`, {
-      method: "PATCH",
-      revision: draft.baseVersion ?? card.version,
-      body: { title: cleanValue(draft.title), body: cardBodyValue(draft.body), ...cardFieldsPayload(draft) }
-    });
-    const storedCard = applyCardMutationResponse(projectId, response);
-    recordBrowserActivity(project, `Updated ${storedCard.title}.`, storedCard.id);
-    const latestDraft = retainedDrafts.get(key);
-    if (!latestDraft || sameDraft(latestDraft, draft)) retainedDrafts.delete(key);
-    else retainedDrafts.set(key, rebaseDraft(latestDraft, storedCard));
-    cardFieldErrors.clear();
-    const hadVisibleSaveError = cardStatus?.tone === "error";
-    const activeControlId = document.activeElement instanceof HTMLElement && document.activeElement.closest(".card-inspector")
-      ? document.activeElement.id || null
-      : null;
-    cardStatus = null;
-    updateRenderedBoardCard(storedCard);
-    const shouldRefreshPreview = selectedCardId === cardId && inspectorTab === "card" && descriptionView === "preview";
-    if (shouldRefreshPreview || hadVisibleSaveError) {
-      pendingFocusId = shouldRefreshPreview ? "description-preview-tab" : activeControlId || "card-title-input";
-      render();
-    } else if (selectedCardId === cardId && !inspectorHasActiveControl() && inspectorTab === "activity") {
-      render();
-    }
-    announceAutosave("Changes saved.");
-  } catch (error) {
-    if (handlePrivateError(error)) return;
-    descriptionView = "write";
-    if (error instanceof ApiError && (error.status === 409 || error.status === 412)) {
-      let latestLoaded = false;
-      try {
-        await loadProject(projectId);
-        latestLoaded = true;
-      } catch (refreshError) {
-        if (handlePrivateError(refreshError)) return;
-      }
-      cardConflict = { projectId, cardId, latestLoaded };
-      cardStatus = latestLoaded
-        ? { tone: "warning", title: "Stored Card changed", message: "Your complete draft is retained. Retry it against the latest version or discard it." }
-        : { tone: "warning", title: "Latest Card unavailable", message: "Your complete draft is retained. Refresh the latest stored Card before retrying." };
-      inspectorTab = "card";
-      pendingFocusId = "stale-heading";
-    } else {
-      cardStatus = { tone: "error", title: "Changes not saved", message: `Your draft is retained. ${error instanceof Error ? error.message : "Try again."}` };
-      pendingFocusId = "card-title-input";
-    }
-    if (selectedCardId === cardId) render();
-  }
-}
-
-function scheduleCardAutosave(projectId: string, cardId: string): void {
-  const key = draftKey(projectId, cardId);
-  if (pendingAutosaves.has(key)) {
-    repeatedAutosaves.add(key);
-    return;
-  }
-  pendingAutosaves.add(key);
-  autosaveChain = autosaveChain
-    .catch(() => undefined)
-    .then(() => performCardAutosave(projectId, cardId))
-    .finally(() => {
-      pendingAutosaves.delete(key);
-      if (repeatedAutosaves.delete(key) && retainedDrafts.has(key)) scheduleCardAutosave(projectId, cardId);
-    });
-}
-
-function queueCardAutosave(form: HTMLFormElement): void {
-  const project = activeProject;
-  const cardId = form.dataset.cardId || "";
-  if (!project || !cardId || cardConflict) return;
-  captureCardDraft(form);
-  if (!retainedDrafts.has(draftKey(project.id, cardId))) return;
-  scheduleCardAutosave(project.id, cardId);
-}
-
-async function flushCardAutosaves(): Promise<void> {
-  while (pendingAutosaves.size) {
-    const pending = autosaveChain;
-    await pending.catch(() => undefined);
-    if (pending === autosaveChain && !pendingAutosaves.size) return;
-  }
+async function retainVisibleDrafts(): Promise<void> { captureVisibleDrafts(); }
+function captureVisibleDrafts(): void {
+  if (mutationInFlight) return;
+  const card = root.querySelector<HTMLFormElement>("form[data-form='card']");
+  if (card) captureCardDraft(card);
+  const project = root.querySelector<HTMLFormElement>("form[data-form='project']");
+  if (project) captureProjectDraft(project);
 }
 
 function showDescriptionView(nextView: DescriptionView): void {
@@ -2691,11 +2736,11 @@ async function moveCard(destinationColumnId: string, explicitRetry = false): Pro
   moveDestinationId = destination.id;
   if (!retryingConflict) movePanelOpen = true;
   setWorkspaceMutationsDisabled(true, "move");
-  cardStatus = { tone: "neutral", title: "Preparing move", message: `Finishing pending Card changes before moving ${card.title} to ${destination.name}.` };
+  cardStatus = { tone: "neutral", title: "Preparing move", message: `Your text draft stays local while ${card.title} moves to ${destination.name}.` };
   pendingFocusId = "card-status";
   render();
   try {
-    await flushCardAutosaves();
+    await retainVisibleDrafts();
     if (!session) return;
     const latestProject = activeProject;
     const latestCard = selectedCardId ? latestProject?.cards.find((candidate) => candidate.id === selectedCardId) : null;
@@ -2710,22 +2755,6 @@ async function moveCard(destinationColumnId: string, explicitRetry = false): Pro
     if (cardConflict) {
       movePanelOpen = false;
       moveDestinationId = destinationColumnId;
-      return;
-    }
-    const latestDraftKey = draftKey(latestProject.id, latestCard.id);
-    if (retainedDrafts.has(latestDraftKey)) {
-      movePanelOpen = false;
-      moveDestinationId = destinationColumnId;
-      if (!cardStatus) {
-        cardStatus = {
-          tone: "warning",
-          title: "Move paused",
-          message: "The Card still has unsaved changes. Correct or retry that save before moving it."
-        };
-        pendingFocusId = "card-status";
-      } else {
-        pendingFocusId = "card-title-input";
-      }
       return;
     }
     project = latestProject;
@@ -2745,13 +2774,15 @@ async function moveCard(destinationColumnId: string, explicitRetry = false): Pro
     cardStatus = { tone: "neutral", title: "Moving Card", message: `Moving ${card.title} to ${destination.name}. Conflicting actions are unavailable until the move finishes.` };
     pendingFocusId = "card-status";
     render();
+    observedWrite = false;
     const response = await api(`/projects/${safeId(project.id)}/cards/${safeId(card.id)}`, {
-      method: "PATCH",
-      revision: card.version,
-      body: { columnId: destination.id }
+      method: "PATCH", revision: card.version, body: { columnId: destination.id }
     });
     const movedCard = applyCardMutationResponse(project.id, response);
-    recordBrowserActivity(project, `Moved ${movedCard.title} to ${destination.name}.`, movedCard.id);
+    completePatch(`/projects/${safeId(project.id)}/cards/${safeId(card.id)}`);
+    const local = retainedDrafts.get(draftKey(project.id, card.id));
+    if (local) retainedDrafts.set(draftKey(project.id, card.id), mergeCardDraft({ ...local, columnId: movedCard.columnId, position: movedCard.position }, movedCard));
+    if (!observedWrite) recordBrowserActivity(project, `Moved ${movedCard.title} to ${destination.name}.`, movedCard.id);
     mobileColumns.set(project.id, destination.id);
     movePanelOpen = false;
     moveDestinationId = "";
@@ -2763,7 +2794,7 @@ async function moveCard(destinationColumnId: string, explicitRetry = false): Pro
       } else {
         cardStatus = null;
         projectStatus = null;
-        showConfirmation("Card moved", `${movedCard.title} moved to ${destination.name}.`);
+        showConfirmation(observedWrite ? "Saved destination observed" : "Card moved", observedWrite ? "The latest Column matches the original move. The original request outcome and actor are not confirmed." : `${movedCard.title} moved to ${destination.name}.`);
       }
       pendingFocusId = "move-card-trigger";
     }
@@ -2824,47 +2855,73 @@ async function moveCard(destinationColumnId: string, explicitRetry = false): Pro
 async function saveCard(form: HTMLFormElement | null, explicitRetry = false): Promise<void> {
   const project = activeProject;
   if (!project) return;
-  const card = selectedCardId ? project.cards.find((candidate) => candidate.id === selectedCardId) || null : null;
-  if (cardConflict && !explicitRetry) return;
+  let card = selectedCardId ? project.cards.find((candidate) => candidate.id === selectedCardId) || null : null;
+  if (cardConflict && !(card && pendingPatches.has(`/projects/${safeId(project.id)}/cards/${safeId(card.id)}`))) return;
   const key = draftKey(project.id, card?.id || null);
   const captured = form ? captureCardDraft(form) : null;
-  const draft = captured || retainedDrafts.get(key) || storedCardDraft(project, card);
-  if (!validateCardDraft(draft)) return;
+  let draft = captured || retainedDrafts.get(key) || storedCardDraft(project, card);
+  if (!(card === null && pendingIdempotencyKeys.has(`card:create:${project.id}`)) && !validateCardDraft(draft)) return;
   retainedDrafts.set(key, draft);
   setWorkspaceMutationsDisabled(true, "card");
   cardStatus = { tone: "neutral", title: "Saving Card", message: "Conflicting actions are unavailable until the save finishes." };
   render();
   try {
+    observedWrite = false;
     let storedCard: ProjectCard;
+    let submittedFields: Record<string, unknown> = {};
     if (card) {
+      const originalPatch = pendingPatches.get(`/projects/${safeId(project.id)}/cards/${safeId(card.id)}`);
+      if (originalPatch && patchIntentKind(originalPatch.body) !== "card-text") {
+        cardStatus = { tone: "warning", title: "Earlier change needs review", message: "Read back the original placement or archive change before saving text. Your text draft remains local." };
+        return;
+      }
+      const latest = await fetchProject(project.id);
+      const latestCard = latest.cards.find(candidate => candidate.id === card!.id);
+      if (!latestCard) throw new Error("The Card is unavailable. Your draft remains local.");
+      applyProjectSnapshot(latest);
+      if (!originalPatch) draft = mergeCardDraft(draft, latestCard);
+      retainedDrafts.set(key, draft);
+      card = latestCard;
+      if ((!originalPatch && cardConflict) || card.archivedAt) {
+        cardStatus = { tone: "warning", title: card.archivedAt ? "Card is archived" : "Stored Card changed", message: card.archivedAt ? "Your draft remains local. Restore the Card separately before saving." : "Choose a value for each conflicting field before saving." };
+        pendingFocusId = "stale-heading";
+        return;
+      }
+      if (!originalPatch && sameDraft(draft, storedCardDraft(latest, card))) {
+        retainedDrafts.delete(key); cardStatus = null; showConfirmation("No unsaved changes", "The fields already match the latest saved Card."); return;
+      }
       const body: Record<string, unknown> = {
         title: cleanValue(draft.title),
         body: cardBodyValue(draft.body),
         ...cardFieldsPayload(draft)
       };
-      if (explicitRetry && card.archivedAt) body.archivedAt = null;
+
+      submittedFields = originalPatch?.body || body;
       const response = await api(`/projects/${safeId(project.id)}/cards/${safeId(card.id)}`, {
         method: "PATCH",
-        revision: explicitRetry ? card.version : draft.baseVersion ?? card.version,
-        body
+        revision: originalPatch?.revision ?? card.version,
+        body: submittedFields
       });
       storedCard = applyCardMutationResponse(project.id, response);
-      recordBrowserActivity(project, `Updated ${storedCard.title}.`, storedCard.id);
+      if (!observedWrite) recordBrowserActivity(project, `Updated ${storedCard.title}.`, storedCard.id);
     } else {
       const body = { title: cleanValue(draft.title), body: cardBodyValue(draft.body), columnId: draft.columnId, ...cardFieldsPayload(draft) };
       const idempotencyScope = `card:create:${project.id}`;
+      const requestKey = idempotencyKeyFor(idempotencyScope, body);
+      submittedFields = JSON.parse(pendingIdempotencyKeys.get(idempotencyScope)!.fingerprint);
       const response = await api(`/projects/${safeId(project.id)}/cards`, {
-        method: "POST",
-        idempotencyKey: idempotencyKeyFor(idempotencyScope, body),
-        body
+        method: "POST", idempotencyKey: requestKey, body: submittedFields
       });
       storedCard = applyCardMutationResponse(project.id, response);
-      clearIdempotencyKey(idempotencyScope);
       creatingCard = false;
       creatingColumnId = "";
       recordBrowserActivity(project, `Created card ${storedCard.title}.`, storedCard.id);
     }
     retainedDrafts.delete(key);
+    const laterChanges = cardTextFields.some(field => objectValue(draft)[field] !== submittedFields[field]);
+    if (laterChanges) retainedDrafts.set(draftKey(project.id, storedCard.id), { ...rebaseDraft(draft, storedCard), cardId: storedCard.id, columnId: storedCard.columnId, position: storedCard.position });
+    if (!card) clearIdempotencyKey(`card:create:${project.id}`);
+    if (card) completePatch(`/projects/${safeId(project.id)}/cards/${safeId(card.id)}`);
     cardConflict = null;
     resetMoveContext();
     selectedCardId = storedCard.id;
@@ -2878,8 +2935,8 @@ async function saveCard(form: HTMLFormElement | null, explicitRetry = false): Pr
         cardStatus = null;
         projectStatus = null;
         showConfirmation(
-          card ? "Card updated" : "Card created",
-          card ? "The visible Card and its Activity reflect the saved change." : "The new Card is visible in its Column and ready for Comments."
+          observedWrite ? "Saved state observed" : card ? "Card updated" : "Card created",
+          observedWrite ? "The latest saved values match the original submission. The original request outcome and actor are not confirmed." : card ? "The visible Card and its Activity reflect the saved change." : "The new Card is visible in its Column and ready for Comments."
         );
       }
       pendingFocusId = "card-title-input";
@@ -2904,11 +2961,13 @@ async function saveCard(form: HTMLFormElement | null, explicitRetry = false): Pr
       } catch (refreshError) {
         if (handlePrivateError(refreshError)) return;
       }
-      cardConflict = { projectId: project.id, cardId: card.id, latestLoaded };
+      if (!latestLoaded) cardConflict = { projectId: project.id, cardId: card.id, latestLoaded: false };
+      // loadProject already reconciled baseline/local/latest and computed field
+      // choices. A version-only or nonoverlapping change must not invent a conflict.
       cardStatus = latestLoaded
-        ? { tone: "warning", title: "Stored Card changed", message: "Your complete draft is retained. Retry it against the latest version or discard it." }
+        ? { tone: "warning", title: cardConflict ? "Stored Card changed" : "Latest Card loaded", message: cardConflict ? "Choose a value for each conflicting field. Your other edits are retained." : "Your draft includes the latest unrelated changes. Review it, then use Save." }
         : { tone: "warning", title: "Latest Card unavailable", message: "Your complete draft is retained. Refresh the latest stored Card before retrying." };
-      pendingFocusId = "stale-heading";
+      pendingFocusId = cardConflict ? "stale-heading" : "card-title-input";
     } else {
       cardStatus = { tone: "error", title: "Card was not saved", message: `Your draft is retained. ${error instanceof Error ? error.message : "Try again."}` };
       pendingFocusId = "card-title-input";
@@ -2919,52 +2978,34 @@ async function saveCard(form: HTMLFormElement | null, explicitRetry = false): Pr
   }
 }
 
-function discardDraft(): void {
+async function discardDraft(): Promise<void> {
   const project = activeProject;
-  if (!project || !selectedCardId) return;
-  const card = project.cards.find((candidate) => candidate.id === selectedCardId) || null;
-  retainedDrafts.delete(draftKey(project.id, selectedCardId));
-  cardConflict = null;
-  cardFieldErrors.clear();
-  if (card?.archivedAt) {
-    selectedCardId = null;
-    resetMoveContext();
-    cardStatus = null;
-    projectStatus = null;
-    showConfirmation("Draft discarded", `${card.title} remains archived and is no longer on the active board.`);
-    pendingFocusId = "main-content";
-  } else {
-    cardStatus = null;
-    showConfirmation("Draft discarded", "The fields now show the latest stored Card.");
-    pendingFocusId = "card-title-input";
-  }
+  if (!project || !window.confirm("Revert this local draft? Saved changes will stay saved.")) return;
+  const key = draftKey(project.id, selectedCardId);
+  const path = selectedCardId ? `/projects/${safeId(project.id)}/cards/${safeId(selectedCardId)}` : "";
+  if (path && pendingPatches.has(path)) { cardStatus = { tone: "warning", title: "Save outcome unconfirmed", message: "Use Save to read back the original submission before reverting." }; render(); return; }
+  if (!selectedCardId && pendingIdempotencyKeys.has(`card:create:${project.id}`)) { cardStatus = { tone: "warning", title: "Create outcome unconfirmed", message: "Retry the original creation before discarding its draft." }; render(); return; }
+  if (selectedCardId) await loadProject(project.id);
+  retainedDrafts.delete(key);
+  cardConflict = null; cardFieldErrors.clear(); cardStatus = null;
+  showConfirmation("Draft reverted", "The fields show the latest saved Card.");
+  pendingFocusId = "card-title-input";
   render();
 }
 
-function discardPendingPost(scope: string): void {
-  if (!pendingIdempotencyKeys.has(scope)) return;
-  clearIdempotencyKey(scope);
-  if (scope === "project:create") {
-    projectStatus = { tone: "warning", title: "Separate Project attempt ready", message: "Submitting now will use a new request key and may create another Project if the earlier request committed." };
-    pendingFocusId = "project-name-input";
-  } else if (scope.startsWith("card:create:")) {
-    cardStatus = { tone: "warning", title: "Separate Card attempt ready", message: "Submitting now will use a new request key and may create another Card if the earlier request committed." };
-    pendingFocusId = "card-title-input";
-  } else {
-    cardStatus = { tone: "warning", title: "Separate Comment attempt ready", message: "Submitting now will use a new request key and may add another Comment if the earlier request committed." };
-    pendingFocusId = "comment-input";
-  }
-  render();
+function discardPendingPost(_scope: string): void {
+  throw new Error("The original submission must be reconciled before its recovery identity can be discarded.");
 }
 
 async function addComment(form: HTMLFormElement): Promise<void> {
-  await flushCardAutosaves();
+  await retainVisibleDrafts();
   const project = activeProject;
   const cardId = form.dataset.cardId || "";
   const card = project?.cards.find((candidate) => candidate.id === cardId);
   if (!project || !card) return;
   const body = formValue(formData(form), "body");
-  if (!cleanValue(body)) {
+  const idempotencyScope = `comment:${project.id}:${card.id}`;
+  if (!cleanValue(body) && !pendingIdempotencyKeys.has(idempotencyScope)) {
     commentFieldError = "Enter a Comment before adding it.";
     pendingFocusId = "comment-input";
     render();
@@ -2975,13 +3016,14 @@ async function addComment(form: HTMLFormElement): Promise<void> {
   setWorkspaceMutationsDisabled(true, "comment");
   cardStatus = { tone: "neutral", title: "Adding Comment", message: "Conflicting actions are unavailable until the Comment is stored." };
   render();
-  const idempotencyScope = `comment:${project.id}:${card.id}`;
   const requestBody = { body: cleanValue(body) };
+  const requestKey = idempotencyKeyFor(idempotencyScope, requestBody);
+  const submitted = JSON.parse(pendingIdempotencyKeys.get(idempotencyScope)!.fingerprint) as { body: string };
   try {
     const response = await api(`/projects/${safeId(project.id)}/cards/${safeId(card.id)}/comments`, {
       method: "POST",
-      idempotencyKey: idempotencyKeyFor(idempotencyScope, requestBody),
-      body: requestBody
+      idempotencyKey: requestKey,
+      body: submitted
     });
     const record = objectValue(response);
     const storedComment = normalizeComment(record.comment);
@@ -2993,9 +3035,9 @@ async function addComment(form: HTMLFormElement): Promise<void> {
     project.updatedAt = card.updatedAt;
     recordBrowserActivity(project, `${session?.label || "Owner"} commented on ${card.title}.`, card.id);
     syncProjectSummary(project);
+    if (cleanValue(body) === submitted.body) commentDrafts.delete(draftKey(project.id, card.id));
     clearIdempotencyKey(idempotencyScope);
     selectedCardId = card.id;
-    commentDrafts.delete(draftKey(project.id, card.id));
     const refreshError = await refreshCommittedProject(project.id);
     if (session) {
       if (refreshError) {
@@ -3020,10 +3062,10 @@ async function addComment(form: HTMLFormElement): Promise<void> {
 }
 
 async function archiveCard(cardId: string): Promise<void> {
-  await flushCardAutosaves();
+  await retainVisibleDrafts();
   const project = activeProject;
   const card = project?.cards.find((candidate) => candidate.id === cardId);
-  if (!project || !card || cardConflict) return;
+  if (!project || !card) return;
   setWorkspaceMutationsDisabled(true, "archive");
   cardStatus = { tone: "neutral", title: "Archiving Card", message: "Conflicting actions are unavailable until the Card leaves the active board." };
   render();
@@ -3034,7 +3076,8 @@ async function archiveCard(cardId: string): Promise<void> {
       body: { archivedAt: new Date().toISOString() }
     });
     const archivedCard = applyCardMutationResponse(project.id, response);
-    recordBrowserActivity(project, `Archived ${archivedCard.title}.`, archivedCard.id);
+    completePatch(`/projects/${safeId(project.id)}/cards/${safeId(card.id)}`);
+    if (!observedWrite) recordBrowserActivity(project, `Archived ${archivedCard.title}.`, archivedCard.id);
     const receipts = archiveReceipts.get(project.id) || [];
     receipts.push({ key: uniqueKey(), projectId: project.id, cardId: archivedCard.id, cardTitle: archivedCard.title });
     archiveReceipts.set(project.id, receipts);
@@ -3075,6 +3118,7 @@ async function undoArchive(): Promise<void> {
       body: { archivedAt: null }
     });
     const restoredCard = applyCardMutationResponse(project.id, response);
+    completePatch(`/projects/${safeId(project.id)}/cards/${safeId(card.id)}`);
     recordBrowserActivity(project, `Updated ${restoredCard.title}.`, restoredCard.id);
     receipts.pop();
     if (receipts.length) archiveReceipts.set(project.id, receipts);
@@ -3099,7 +3143,7 @@ async function undoArchive(): Promise<void> {
 }
 
 async function refreshProject(): Promise<void> {
-  await flushCardAutosaves();
+  await retainVisibleDrafts();
   const project = activeProject;
   if (!project) return;
   projectLoading = true;
@@ -3140,7 +3184,7 @@ async function refreshProject(): Promise<void> {
 
 async function switchProject(projectId: string): Promise<void> {
   if (!projects.some((project) => project.id === projectId)) return;
-  await flushCardAutosaves();
+  await retainVisibleDrafts();
   selectedCardId = null;
   creatingCard = false;
   creatingColumnId = "";
@@ -3181,6 +3225,31 @@ function handlePrivateError(error: unknown): boolean {
 
 async function handleAction(button: HTMLElement): Promise<void> {
   const action = button.dataset.action || "";
+  if (recoveryStore.failure && ["open-workspace", "choose-workspace", "new-workspace", "close-card", "cancel-project"].includes(action)) { syncRecoveryNotice(); return; }
+  if (action === "read-back-patch") return readBackPendingPatch(button.dataset.patchPath || "");
+  if (action === "retry-pending-post") {
+    const scope = button.dataset.idempotencyScope || "";
+    if (!pendingIdempotencyKeys.has(scope)) return;
+    if (scope === "project:create") { const form = root.querySelector<HTMLFormElement>("form[data-form='project']"); if (form) return saveProject(form); }
+    if (scope.startsWith("card:create:")) return saveCard(root.querySelector<HTMLFormElement>("form[data-form='card']"));
+    if (scope.startsWith("comment:")) { const form = root.querySelector<HTMLFormElement>("form[data-form='comment']"); if (form) return addComment(form); }
+    return;
+  }
+  if (action === "retry-local-storage") { recoveryStore.retry(); render(); return; }
+  if (action === "copy-recovery") { await navigator.clipboard.writeText(recoveryStore.export()); showConfirmation("Recovery data copied", "The copy contains your local drafts and submission records. Keep it private."); render(); return; }
+  if (action === "resolve-card-field") return resolveCardField(button.dataset.field || "", button.dataset.choice || "");
+  if (action === "move-retained-placement") {
+    if (cardConflict?.fields?.some(field => field !== "placement")) throw new Error("Resolve the text field conflicts before moving this Card.");
+    cardConflict = null; return moveCard(button.dataset.columnId || "");
+  }
+  if (action === "restore-selected-card") return restoreSelectedCard();
+  if (action === "recover-copy") { captureVisibleDrafts(); recoveryMaps.find(map => map.kind === button.dataset.recordKind)?.recover(button.dataset.recordId || "");
+    if (button.dataset.recordKind === "project" && projectEditorDraft) projectEditorDraft = projectDrafts.get(projectEditorDraft.projectId || "new") || projectEditorDraft;
+    render(); return; }
+  if (action === "discard-comment" && activeProject && selectedCardId) {
+    if (pendingIdempotencyKeys.has(`comment:${activeProject.id}:${selectedCardId}`)) throw new Error("Retry the original Comment before discarding its submission record.");
+    if (window.confirm("Discard this unsent Comment?")) commentDrafts.delete(draftKey(activeProject.id, selectedCardId)); render(); return;
+  }
   if (action === "clear-card-filters" && activeProject && !workspaceLocked()) {
     projectCardFilters.delete(activeProject.id);
     pendingFocusId = "board-filter-next-actor";
@@ -3292,6 +3361,7 @@ async function handleAction(button: HTMLElement): Promise<void> {
     return;
   }
   if (action === "show-card-tab" || action === "show-activity-tab") {
+    captureVisibleDrafts();
     if (action === "show-activity-tab" && (cardConflict || moveConflict)) return;
     inspectorTab = action === "show-activity-tab" ? "activity" : "card";
     pendingFocusId = inspectorTab === "activity" ? "activity-tab" : "card-tab";
@@ -3312,7 +3382,7 @@ async function handleAction(button: HTMLElement): Promise<void> {
   if (action === "cancel-add-column") return cancelAddColumn();
   if (action === "new-card") return openNewCard(button.dataset.columnId || activeProject?.columns[0]?.id || "", button);
   if (action === "open-card") {
-    await flushCardAutosaves();
+    await retainVisibleDrafts();
     return openCard(button.dataset.cardId || "", button);
   }
   if (action === "recover-draft") return openCard(button.dataset.cardId || "", button, true);
@@ -3370,14 +3440,15 @@ root.addEventListener("input", (event) => {
     else commentDrafts.delete(key);
     commentFieldError = "";
   }
+  syncRecoveryNotice();
 });
 
 root.addEventListener("focusout", (event) => {
   const target = event.target as HTMLElement;
   if (!["card-title-input", "card-body-input", "card-next-action", "card-blocked-reason"].includes(target.id)) return;
   if (target.id === "card-body-input") captureDescriptionSelection();
-  const form = target.closest<HTMLFormElement>("form[data-form='card'][data-autosave='true']");
-  if (form) queueCardAutosave(form);
+  const form = target.closest<HTMLFormElement>("form[data-form='card']");
+  if (form) captureCardDraft(form);
 });
 
 root.addEventListener("change", (event) => {
@@ -3407,7 +3478,7 @@ root.addEventListener("change", (event) => {
   const cardForm = target.closest<HTMLFormElement>("form[data-form='card']");
   if (cardForm) {
     captureCardDraft(cardForm);
-    if (cardForm.dataset.autosave === "true" && (target.id === "card-next-actor" || target.id === "card-priority")) queueCardAutosave(cardForm);
+
   }
 });
 
@@ -3415,10 +3486,6 @@ root.addEventListener("submit", (event) => {
   event.preventDefault();
   if (mutationInFlight) return;
   const form = event.target as HTMLFormElement;
-  if (form.dataset.form === "card" && form.dataset.autosave === "true") {
-    queueCardAutosave(form);
-    return;
-  }
   const operation = form.dataset.form === "passkey"
     ? performPasskeyCeremony(form)
     : form.dataset.form === "sign-in"
@@ -3621,3 +3688,15 @@ void UI_CONTRACT_STATES;
 void boot();
 
 export {};
+
+window.addEventListener("storage", event => { if (event.key?.startsWith("kanban.cards:recovery:v1:") && session) { recoveryStore.scan(); syncRecoveryNotice(); } });
+window.addEventListener("beforeunload", event => { captureVisibleDrafts(); if (session && recoveryStore.failure) { event.preventDefault(); event.returnValue = ""; } });
+
+window.addEventListener("focus", () => {
+  if (!session || mutationInFlight || initialLoading) return;
+  const ownerId = session.ownerId;
+  void api("/session").then(payload => {
+    const verified = normalizeSession(payload).session;
+    if (!verified || verified.ownerId !== ownerId) { captureVisibleDrafts(); clearPrivateState({ kind: "session-expired", title: "Your session ended", message: "Sign in again to recover your drafts." }); render(); }
+  }).catch(error => { handlePrivateError(error); });
+});

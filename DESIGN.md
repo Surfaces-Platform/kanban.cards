@@ -4,6 +4,8 @@
 
 This file is the governing design contract for kanban.cards.
 
+For cross-client parity work, [the shared interaction workflow](docs/shared-interactions/README.md) defines the target Save, local draft, Move, and reconciliation behavior. Those explicit rules supersede conflicting target interaction prescriptions here. The remaining design requirements still apply; this file and `UI_CONTRACT.md` continue to record current web behavior until each implementation slice updates them together with tests. The shared specification does not establish that current clients match the target.
+
 The documents have different jobs:
 
 1. [`docs/product-vision.md`](docs/product-vision.md) defines the product purpose, resource model, and trust boundary.
@@ -276,14 +278,14 @@ The alternative **Focus Workspace** remains comparison evidence, not a second pr
 ### Card detail, Comments, and Activity
 
 - Card detail is absent until a Card is selected. It opens from the right as a full-height, wide, nonmodal surface with an X close control; no empty inspector, context eyebrow, detail heading, or inspector Refresh is rendered.
-- Title and Description are surface-integrated controls. Description is the dominant object and stores its Markdown source unchanged apart from browser newline normalization in the existing Card `body` field. Existing Cards save title and Description on field blur, without a Save action or an inspector Column selector; new Card creation retains an explicit Create action.
-- Next actor and Priority save on selection. Next action and Blocker save on blur. The optional fields follow Description and share its draft retention, conflict review, retry, and discard behavior.
+- Title and Description are surface-integrated controls. Description is the dominant object and stores its Markdown source unchanged apart from browser newline normalization in the existing Card `body` field. Existing Cards retain edits locally and write text only through explicit Save, with Revert available. Column placement uses the separate Move command; new Card creation retains an explicit Create action.
+- Next actor, Priority, Next action, and Blocker participate in the same explicit Save. The optional fields follow Description and share its draft retention, conflict review, retry, and discard behavior.
 - Description has one local Write/Preview switch inside the Card tab. Write is the default and keeps the native textarea authoritative; Preview renders the current draft without becoming a save action. Switching views preserves the draft, lifecycle, and editing focus. Activity remains the only other top-level Card view.
 - The first Markdown slice supports paragraphs, scoped headings, emphasis, ordered and unordered lists, blockquotes, links, inline code, fenced code, and horizontal rules. Raw HTML is shown as text. Images, tables, embeds, interactive task controls, and syntax highlighting do not render. Preview links accept only absolute `http:`, `https:`, and `mailto:` destinations, open separately from the work surface, and identify that behavior accessibly.
 - Preview is semantic, passive, and derived at display time; rendered HTML is never stored. The same safe representation supplies plain-text board summaries so Markdown punctuation does not become summary chrome. An empty or failed preview never loses or rewrites the source.
 - Comments are primary Card context and follow the editor without a count, conversation eyebrow, empty-state sentence, or caller-attribution disclaimer.
 - Activity is Card-specific and appears as a top-level inspector tab. It shows the change and time without channel or caller-label explanation.
-- Drafts remain retained until a blur save is confirmed or the user explicitly discards them. A stale conflict exposes the complete draft and newer stored state with Retry and Discard; Archive cannot bypass that recovery.
+- Drafts persist by owner, exact origin, Workspace, Project, and resource until Save is confirmed or the user explicitly reverts them. Close retains drafts. Field reconciliation adopts nonoverlapping changes and asks for a choice when both versions change the same field; Archive cannot bypass that recovery. Storage failures expose Retry and Copy recovery controls.
 - Archive remains non-destructive. The Card leaves the active board, and the named receipt and Undo remain available across Project navigation until recovery.
 
 ### Narrow screens
@@ -295,7 +297,7 @@ The alternative **Focus Workspace** remains comparison evidence, not a second pr
 
 ### Decision evidence and implementation boundary
 
-The original direction was selected from matched, interactive desktop and `390 × 844` prototypes. A live interface review on 2026-08-09 then refined the accepted Context Dock: compact header menus, no routine explanatory chrome, an on-demand full-height Card surface, blur autosave, and Activity as a tab. Those direct review decisions supersede contradictory prototype details.
+The original direction was selected from matched, interactive desktop and `390 × 844` prototypes. A live interface review on 2026-08-09 then refined the accepted Context Dock: compact header menus, no routine explanatory chrome, an on-demand full-height Card surface, blur autosave, and Activity as a tab. The shared interaction workflow now supersedes that review’s blur-autosave rule with explicit Save and durable drafts. Its first slice is implemented in this branch; the validation receipt records runtime evidence. The remaining visual decisions continue to apply.
 
 The Card-placement slice was reviewed against actual desktop and `390 × 844` renders of the current Context Dock plus matched renders of three candidates. Desktop keeps the ordered Columns beside the selected Card; narrow screens remove the board while Card detail is open. The visible Card-local `Move…` command was the only candidate that kept one interaction model across both states. A board-Card overflow action hid a core job and crowded summaries, while drag-and-drop still required the same explicit narrow-screen and assistive-technology fallback.
 

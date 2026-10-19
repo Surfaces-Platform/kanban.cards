@@ -2293,3 +2293,12 @@ body[data-state="empty-workspace"] .workbench {
 @media (max-width: 24rem) {
   .header-workspace-switcher { flex-basis: 100%; }
 }
+
+/* Keep semantic fieldsets neutral inside the existing Card editor. */
+.card-edit-fields { display: grid; gap: var(--jk-space-3); border: 0; min-width: 0; padding: 0; margin: 0; }
+#local-recovery:empty { display: none; }
+#local-recovery details { padding: .5rem 1rem; }
+#local-recovery .jk-status, .stale-review fieldset { min-width: 0; overflow-wrap: anywhere; }
+.stale-review fieldset { margin: .75rem 0; }
+
+.conflict-source { white-space: pre-wrap; }
