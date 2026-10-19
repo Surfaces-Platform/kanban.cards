@@ -15,6 +15,7 @@ final class CardEditingSession {
     let workspace: Workspace
     let projectID: String
     let cardID: String
+    let browsingReadOnly: Bool
     private(set) var baseline: Card
     private(set) var latest: Card
     var pending: PendingCardDraft
@@ -29,8 +30,9 @@ final class CardEditingSession {
     private var loaded = false
     private var changing = false
 
-    init(model: AppModel, workspace: Workspace, projectID: String, card: Card) {
+    init(model: AppModel, workspace: Workspace, projectID: String, card: Card, readOnly: Bool = false) {
         self.model = model; self.ownerID = model.ownerID; self.workspace = workspace
+        browsingReadOnly = readOnly
         self.projectID = projectID; cardID = card.id; baseline = card; latest = card
         pending = PendingCardDraft(draft: CardDraft(card: card), key: UUID().uuidString,
             baseline: card)
@@ -38,7 +40,8 @@ final class CardEditingSession {
 
     private var resourceKey: String { "card:\(projectID):\(cardID)" }
     var authorized: Bool { model.signedIn && !model.signOutPending && model.ownerID == ownerID && model.workspaces.contains(where: { $0.id == workspace.id && $0.url == workspace.url }) }
-    var readOnly: Bool { loadFailed || legacyNeedsScope || unavailable || latest.archivedAt != nil || model.loadedProjects[projectID]?.archivedAt != nil || !authorized }
+    var projectReadOnly: Bool { browsingReadOnly || model.isProjectReadOnly(projectID: projectID, in: workspace) }
+    var readOnly: Bool { projectReadOnly || loadFailed || legacyNeedsScope || unavailable || latest.archivedAt != nil || !authorized }
     var unresolvedOperation: Bool { pending.submitted != nil || pending.move != nil }
     var dirty: Bool { !pending.draft.matchesEditableFields(of: CardDraft(card: latest)) || conflicts.contains(.placement) }
     var recoveryText: String { "Title: \(pending.draft.title)\n\nDescription:\n\(pending.draft.body)\n\nNext actor: \(pending.draft.nextActor?.rawValue ?? "unassigned")\nNext action: \(pending.draft.nextAction)\nPriority: \(pending.draft.priority?.rawValue ?? "unset")\nBlocker: \(pending.draft.blockedReason)\nColumn: \(pending.draft.columnId)\n" }
@@ -90,6 +93,18 @@ final class CardEditingSession {
     func recoverLegacy() {
         guard authorized, !loadFailed, legacyNeedsScope, pending.draft.id == cardID else { return }
         do {
+            // Another editor may have confirmed this record since the browse
+            // session opened. Never replace its newer scoped text or intent.
+            model.drafts.prepareToRetryReading(ownerID: ownerID, workspace: workspace,
+                projectID: projectID, resourceKey: resourceKey, legacyResourceKey: resourceKey)
+            let scopedKey = model.drafts.scopedKey(workspace: workspace, projectID: projectID, resourceKey: resourceKey)
+            if let existing = try model.drafts.load(ownerID: ownerID, resourceKey: scopedKey, as: PendingCardDraft.self) {
+                try existing.validateIdentity(cardID: cardID)
+                legacyNeedsScope = false; loaded = false; persistenceFailed = false
+                load()
+                message = "An existing draft for this Workspace was opened. The older record is unchanged."
+                return
+            }
             try model.drafts.recoverLegacy(pending, ownerID: ownerID, workspace: workspace,
                 projectID: projectID, resourceKey: resourceKey, legacyResourceKey: resourceKey)
             legacyNeedsScope = false; loaded = false; persistenceFailed = false
@@ -105,7 +120,10 @@ final class CardEditingSession {
     }
 
     func persist() {
-        guard loaded, !loadFailed, !legacyNeedsScope else { return }
+        // A separate immutable browse session must not replace a newer editable
+        // session's record after another client restores the Project. Explicit
+        // legacy confirmation writes its own binding and scoped copy directly.
+        guard !browsingReadOnly, loaded, !loadFailed, !legacyNeedsScope else { return }
         pending.baseline = baseline
         pending.unresolvedFields = Array(conflicts)
         pending.schemaVersion = 2
@@ -169,7 +187,7 @@ final class CardEditingSession {
     }
 
     func save() async {
-        guard authorized, !loadFailed, !busy, !legacyNeedsScope else { return }
+        guard authorized, !projectReadOnly, !loadFailed, !busy, !legacyNeedsScope else { return }
         busy = true; defer { busy = false }
         if pending.confirmed != nil { cleanup(); return }
         if unresolvedOperation { await reconcileUnknown(); return }
@@ -264,7 +282,7 @@ final class CardEditingSession {
     }
 
     func revert() async {
-        guard authorized, !loadFailed, !busy, !legacyNeedsScope else { return }
+        guard authorized, !projectReadOnly, !loadFailed, !busy, !legacyNeedsScope else { return }
         busy = true; defer { busy = false }
         if unresolvedOperation { await reconcileUnknown(); return }
         do {

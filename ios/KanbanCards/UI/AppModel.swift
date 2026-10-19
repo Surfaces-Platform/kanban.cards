@@ -56,6 +56,25 @@ final class AppModel {
             loadedProjects[project.id] = project
             updateSummary(project, workspaceID: "demo-workspace")
             #if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("--demo-archived-projects") {
+                var archivedCard = card
+                archivedCard.id = "demo-archived-card"
+                archivedCard.title = "Archived sample Card"
+                archivedCard.archivedAt = timestamp
+                archivedCard.comments = [Comment(id: "demo-archived-comment", body: "Archived sample Comment", author: "Demo owner", createdAt: timestamp)]
+                var readOnlyCard = card
+                readOnlyCard.id = "demo-readonly-card"
+                readOnlyCard.title = "Read-only sample Card"
+                readOnlyCard.comments = [Comment(id: "demo-readonly-comment", body: "Read-only sample Comment", author: "Demo owner", createdAt: timestamp)]
+                var archivedProject = project
+                archivedProject.id = "demo-archived-project"
+                archivedProject.name = "Archived sample"
+                archivedProject.archivedAt = timestamp
+                archivedProject.cards = [archivedCard, readOnlyCard]
+                archivedProject.activity = [Activity(id: "demo-archived-activity", action: "project.archived", actor: ActivityActor(channel: "native", label: "Demo owner"), summary: "Archived sample activity.", projectId: archivedProject.id, createdAt: timestamp)]
+                loadedProjects[archivedProject.id] = archivedProject
+                updateSummary(archivedProject, workspaceID: "demo-workspace")
+            }
             if ProcessInfo.processInfo.arguments.contains("--demo-unreadable-creation-drafts"),
                let workspace = workspaces.first {
                 let records = [(project.id, "card:\(project.id):new"), ("new", "project:\(workspace.id):new")]
@@ -72,10 +91,11 @@ final class AppModel {
 
     var ownerID: String { isDemo ? "demo-owner" : api.credential?.owner.id ?? "signed-out" }
 
-    func cardEditingSession(workspace: Workspace, projectID: String, card: Card) -> CardEditingSession {
-        let key = ownerID + ":" + drafts.scopedKey(workspace: workspace, projectID: projectID, resourceKey: "card:" + card.id)
+    func cardEditingSession(workspace: Workspace, projectID: String, card: Card, readOnly: Bool = false) -> CardEditingSession {
+        let key = ownerID + ":" + (readOnly ? "browse:" : "edit:")
+            + drafts.scopedKey(workspace: workspace, projectID: projectID, resourceKey: "card:" + card.id)
         if let session = cardEditingSessions[key] { session.receive(card); return session }
-        let session = CardEditingSession(model: self, workspace: workspace, projectID: projectID, card: card)
+        let session = CardEditingSession(model: self, workspace: workspace, projectID: projectID, card: card, readOnly: readOnly)
         cardEditingSessions[key] = session
         return session
     }
@@ -270,7 +290,7 @@ final class AppModel {
         let mutation = workspaceMutationGenerations[workspace.id]
         let refresh = UUID()
         workspaceRefreshes[workspace.id] = refresh
-        let incoming = try await api.projects(in: workspace)
+        let incoming = try await api.projects(in: workspace, includeArchived: true)
         guard session == api.sessionGeneration, !signOutPending,
               mutation == workspaceMutationGenerations[workspace.id],
               refresh == workspaceRefreshes[workspace.id] else { throw CancellationError() }
@@ -297,6 +317,7 @@ final class AppModel {
     }
 
     func saveProject(_ draft: ProjectDraft, in workspace: Workspace, key: String) async throws -> Project {
+        if let id = draft.id { try requireWritableProject(id, in: workspace) }
         let project: Project
         if isDemo {
             let timestamp = ServerTimestamp.string()
@@ -329,6 +350,7 @@ final class AppModel {
 
     func saveCard(_ proposed: CardDraft, projectID: String, in workspace: Workspace, key: String,
                   onConfirmed: ((Card) -> Void)? = nil) async throws -> Card {
+        try requireWritableProject(projectID, in: workspace)
         let draft = proposed
         let card: Card
         if isDemo {
@@ -357,6 +379,7 @@ final class AppModel {
 
     func addComment(_ body: String, cardID: String, projectID: String, in workspace: Workspace, key: String,
                     onConfirmed: (() -> Void)? = nil) async throws {
+        try requireWritableProject(projectID, in: workspace)
         if isDemo {
             guard var project = loadedProjects[projectID], let index = project.cards.firstIndex(where: { $0.id == cardID }) else { throw AppFailure.missingProject }
             project.cards[index].comments.append(Comment(id: UUID().uuidString, body: body, author: "Demo owner", createdAt: ServerTimestamp.string()))
@@ -385,6 +408,7 @@ final class AppModel {
     }
 
     func moveCard(_ card: Card, to columnID: String, projectID: String, in workspace: Workspace) async throws -> Card {
+        try requireWritableProject(projectID, in: workspace)
         if isDemo {
             guard var project = loadedProjects[projectID], let index = project.cards.firstIndex(where: { $0.id == card.id }),
                   project.cards[index].version == card.version, project.columns.contains(where: { $0.id == columnID }) else { throw AppFailure.conflict }
@@ -404,6 +428,7 @@ final class AppModel {
     }
 
     func archive(_ card: Card, projectID: String, in workspace: Workspace, archived: Bool) async throws {
+        try requireWritableProject(projectID, in: workspace)
         if isDemo {
             guard var project = loadedProjects[projectID], let index = project.cards.firstIndex(where: { $0.id == card.id }), project.cards[index].version == card.version else { throw AppFailure.conflict }
             project.cards[index].archivedAt = archived ? ServerTimestamp.string() : nil
@@ -433,6 +458,15 @@ final class AppModel {
             loadedProjects = [:]
         }
         errorMessage = error.localizedDescription
+    }
+
+    func isProjectReadOnly(projectID: String, in workspace: Workspace) -> Bool {
+        loadedProjects[projectID]?.archivedAt != nil
+            || projectLists[workspace.id]?.contains(where: { $0.id == projectID && $0.archivedAt != nil }) == true
+    }
+
+    private func requireWritableProject(_ projectID: String, in workspace: Workspace) throws {
+        guard !isProjectReadOnly(projectID: projectID, in: workspace) else { throw AppFailure.readOnlyProject }
     }
 
     func isConflict(_ error: Error) -> Bool { (error as? APIError)?.isConflict == true || (error as? AppFailure) == .conflict }
@@ -492,10 +526,11 @@ final class AppModel {
 }
 
 enum AppFailure: LocalizedError, Equatable {
-    case missingProject, conflict
+    case missingProject, conflict, readOnlyProject
     var errorDescription: String? {
         switch self {
         case .missingProject: "The Project is unavailable. Refresh and try again."
+        case .readOnlyProject: "This Project is archived and read-only. Your local drafts are retained."
         case .conflict: "This Card changed while you were editing. Review the latest saved values before saving."
         }
     }

@@ -98,18 +98,23 @@ struct ProjectsView: View {
     let createWorkspace: () -> Void
     @State private var loading = false
     @State private var creating = false
+    private var activeProjects: [ProjectSummary] { (model.projectLists[workspace.id] ?? []).filter { $0.archivedAt == nil } }
 
     var body: some View {
         List {
             if loading { ProgressView("Loading Projects") }
-            ForEach(model.projectLists[workspace.id] ?? []) { project in
+            ForEach(activeProjects) { project in
                 NavigationLink { ProjectView(workspace: workspace, projectID: project.id) } label: {
                     LabeledContent(project.name, value: "\(project.cardCount) Cards")
                 }
             }
-            if !loading && (model.projectLists[workspace.id] ?? []).isEmpty {
+            if !loading && activeProjects.isEmpty {
                 ContentUnavailableView("No Projects", systemImage: "folder", description: Text("Create a Project to start organizing work."))
                 Button("Create Project") { creating = true }
+            }
+            Section {
+                NavigationLink("Archived Projects") { ArchivedProjectsView(workspace: workspace) }
+                    .accessibilityIdentifier("project.archived")
             }
         }
         .navigationTitle(workspace.name)
@@ -139,6 +144,50 @@ struct ProjectsView: View {
     }
 }
 
+struct ArchivedProjectsView: View {
+    @Environment(AppModel.self) private var model
+    let workspace: Workspace
+    @State private var loading = true
+    @State private var loadFailed = false
+    private var projects: [ProjectSummary] { (model.projectLists[workspace.id] ?? []).filter { $0.archivedAt != nil } }
+
+    var body: some View {
+        List {
+            if loading { ProgressView("Loading Archived Projects") }
+            ForEach(projects) { project in
+                NavigationLink { ProjectView(workspace: workspace, projectID: project.id, readOnly: true) } label: {
+                    LabeledContent(project.name, value: "\(project.cardCount) Cards")
+                }
+                .accessibilityIdentifier("archive.project.\(project.id)")
+            }
+            if loadFailed {
+                ContentUnavailableView {
+                    Label("Archived Projects unavailable", systemImage: "archivebox")
+                } actions: {
+                    Button("Retry") { Task { await refresh() } }
+                }
+            } else if !loading && projects.isEmpty {
+                ContentUnavailableView("No archived Projects", systemImage: "archivebox")
+            }
+        }
+        .navigationTitle("Archived Projects")
+        .task { await refresh() }
+        .refreshable { await refresh() }
+    }
+
+    private func refresh() async {
+        loading = true
+        defer { loading = false }
+        do {
+            try await model.loadProjects(in: workspace)
+            loadFailed = false
+        } catch {
+            loadFailed = true
+            model.handle(error)
+        }
+    }
+}
+
 struct CardFilter: Equatable {
     var actor = "all"
     var priority = "all"
@@ -156,18 +205,32 @@ struct ProjectView: View {
     @Environment(\.scenePhase) private var scenePhase
     let workspace: Workspace
     let projectID: String
+    let readOnly: Bool
     @State private var creating = false
     @State private var editing = false
     @State private var filtering = false
     @State private var filter = CardFilter()
     @State private var loading = false
     private var project: Project? { model.loadedProjects[projectID] }
+    private var projectReadOnly: Bool { readOnly || project?.archivedAt != nil }
+
+    init(workspace: Workspace, projectID: String, readOnly: Bool = false) {
+        self.workspace = workspace
+        self.projectID = projectID
+        self.readOnly = readOnly
+    }
 
     var body: some View {
         Group {
             if let project {
                 List {
                     if model.isDemo { Section { Text("Demo data") } }
+                    if projectReadOnly {
+                        Section {
+                            Text("Archived Project. Cards, Comments, and Activity are read-only. Retained drafts can be recovered locally.")
+                                .accessibilityIdentifier("archive.notice")
+                        }
+                    }
                     if filter.active {
                         Section {
                             Text("\(project.cards.filter { $0.archivedAt == nil && filter.includes($0) }.count) of \(project.cards.filter { $0.archivedAt == nil }.count) Cards")
@@ -178,7 +241,7 @@ struct ProjectView: View {
                         Section(column.name) {
                             let cards = project.cards.filter { $0.archivedAt == nil && $0.columnId == column.id && filter.includes($0) }.sorted { $0.position < $1.position }
                             ForEach(cards) { card in
-                                NavigationLink { CardView(workspace: workspace, projectID: projectID, cardID: card.id) } label: {
+                                NavigationLink { CardView(workspace: workspace, projectID: projectID, cardID: card.id, readOnly: projectReadOnly) } label: {
                                     LabeledContent(card.title, value: cardContext(card))
                                 }
                             }
@@ -187,8 +250,8 @@ struct ProjectView: View {
                     }
                     Section {
                         NavigationLink("Activity") { ActivityView(projectID: projectID) }
-                        NavigationLink("Archived Cards") { ArchivedCardsView(workspace: workspace, projectID: projectID) }
-                        Button("Edit Project") { editing = true }
+                        NavigationLink("Archived Cards") { ArchivedCardsView(workspace: workspace, projectID: projectID, readOnly: projectReadOnly) }
+                        if !projectReadOnly { Button("Edit Project") { editing = true } }
                     }
                 }
                 .refreshable { await refresh() }
@@ -206,7 +269,9 @@ struct ProjectView: View {
         .navigationTitle(project?.name ?? "Project")
         .toolbar {
             ToolbarItem { Button("Filter", systemImage: "line.3.horizontal.decrease") { filtering = true }.disabled(project == nil) }
-            ToolbarItem(placement: .primaryAction) { Button("New Card", systemImage: "plus") { creating = true }.disabled(project == nil) }
+            if !projectReadOnly {
+                ToolbarItem(placement: .primaryAction) { Button("New Card", systemImage: "plus") { creating = true }.disabled(project == nil) }
+            }
         }
         .task { await refresh() }
         .onChange(of: scenePhase) { _, phase in if phase == .active { Task { await refresh() } } }
@@ -258,8 +323,17 @@ struct CardView: View {
     let workspace: Workspace
     let projectID: String
     let cardID: String
+    let readOnly: Bool
     @State private var editingSession: CardEditingSession?
     private var card: Card? { model.loadedProjects[projectID]?.cards.first { $0.id == cardID } }
+
+    init(workspace: Workspace, projectID: String, cardID: String, readOnly: Bool = false) {
+        self.workspace = workspace
+        self.projectID = projectID
+        self.cardID = cardID
+        self.readOnly = readOnly
+    }
+
     var body: some View {
         Group {
             if let editingSession { DirectCardForm(session: editingSession) }
@@ -267,7 +341,7 @@ struct CardView: View {
         }
         .task {
             if let card {
-                let session = model.cardEditingSession(workspace: workspace, projectID: projectID, card: card)
+                let session = model.cardEditingSession(workspace: workspace, projectID: projectID, card: card, readOnly: readOnly)
                 editingSession = session
                 session.load()
             }
@@ -301,10 +375,18 @@ struct ArchivedCardsView: View {
     @Environment(AppModel.self) private var model
     let workspace: Workspace
     let projectID: String
+    let readOnly: Bool
+
+    init(workspace: Workspace, projectID: String, readOnly: Bool = false) {
+        self.workspace = workspace
+        self.projectID = projectID
+        self.readOnly = readOnly
+    }
+
     var body: some View {
         List {
             let cards = model.loadedProjects[projectID]?.cards.filter { $0.archivedAt != nil } ?? []
-            ForEach(cards) { card in NavigationLink(card.title) { CardView(workspace: workspace, projectID: projectID, cardID: card.id) } }
+            ForEach(cards) { card in NavigationLink(card.title) { CardView(workspace: workspace, projectID: projectID, cardID: card.id, readOnly: readOnly) } }
             if cards.isEmpty { ContentUnavailableView("No archived Cards", systemImage: "archivebox") }
         }
         .navigationTitle("Archived Cards")
