@@ -12,6 +12,12 @@ struct DirectCardForm: View {
 
     var body: some View {
         Form {
+            if session.projectReadOnly {
+                Section {
+                    Text("Archived Project. This Card is read-only. Confirming a retained draft protects it on this iPhone without changing server data.")
+                        .accessibilityIdentifier("archive.notice")
+                }
+            }
             if session.loadFailed {
                 Section("Retained draft could not be opened") {
                     Text("The original record is unchanged. Retry reading before editing or saving.")
@@ -26,6 +32,10 @@ struct DirectCardForm: View {
                 Section("Confirm retained draft Workspace") {
                     Text("This older draft did not record its Workspace. Confirm this is its original Workspace before editing or retrying any request.")
                     Text(session.workspace.url.absoluteString).textSelection(.enabled)
+                    if session.projectReadOnly {
+                        LabeledContent("Project", value: model.loadedProjects[session.projectID]?.name ?? session.projectID)
+                        LabeledContent("Saved Card", value: session.latest.title)
+                    }
                     Button("This is the original Workspace") { session.recoverLegacy() }
                         .disabled(session.pending.draft.id != session.cardID)
                     Button("Copy retained draft") { UIPasteboard.general.string = String(decoding: (try? JSONEncoder().encode(session.pending)) ?? Data(), as: UTF8.self) }
@@ -36,16 +46,16 @@ struct DirectCardForm: View {
                 Text(session.loadFailed ? "Retained draft unavailable" : session.pending.confirmed != nil ? "Saved; local cleanup pending" : session.unresolvedOperation ? "Outcome unconfirmed" : session.dirty ? "Local draft" : "Saved")
                     .accessibilityIdentifier("card.editing-state")
                 if let message = session.message { Text(message).textSelection(.enabled) }
-                if session.latest.archivedAt != nil { Text("Archived. Restore before editing; local text is retained.") }
+                if session.latest.archivedAt != nil && !session.projectReadOnly { Text("Archived. Restore before editing; local text is retained.") }
                 if session.unavailable { Text("Unavailable. Local recovery does not recreate the resource.") }
                 if let requested = session.pending.move {
                     LabeledContent("Requested Column", value: columns.first { $0.id == requested.columnId }?.name ?? requested.columnId)
                     Text("The requested destination is not confirmed. Saved placement is shown below.")
                 }
-                if session.unresolvedOperation && !session.legacyNeedsScope {
+                if session.unresolvedOperation && !session.legacyNeedsScope && !session.projectReadOnly {
                     Button("Reconcile saved values") { Task { await session.save() } }.disabled(session.busy)
                 }
-                if session.pending.confirmed != nil && !session.legacyNeedsScope {
+                if session.pending.confirmed != nil && !session.legacyNeedsScope && !session.projectReadOnly {
                     Button("Retry cleanup") { Task { await session.save() } }.disabled(session.busy)
                 }
             }
@@ -96,24 +106,26 @@ struct DirectCardForm: View {
                     } else {
                         Button("Keep my \(field.label)") { session.resolve(field, useSaved: false) }
                     }
-                }.disabled(session.busy || session.unresolvedOperation)
+                }.disabled(session.busy || session.unresolvedOperation || session.projectReadOnly)
             }
             Section {
                 NavigationLink("Comments (\(session.latest.comments.count))") {
-                    CommentsView(workspace: session.workspace, projectID: session.projectID, cardID: session.cardID)
+                    CommentsView(workspace: session.workspace, projectID: session.projectID, cardID: session.cardID, readOnly: session.projectReadOnly)
                 }
                 NavigationLink("Activity") { ActivityView(projectID: session.projectID, cardID: session.cardID) }
                 Button("Refresh") { Task { await session.refresh() } }.disabled(session.busy || session.loadFailed)
-                Button(session.latest.archivedAt == nil ? "Archive Card" : "Restore Card", role: session.latest.archivedAt == nil ? .destructive : nil) {
-                    Task {
-                        archiving = true
-                        defer { archiving = false }
-                        do {
-                            try await model.archive(session.latest, projectID: session.projectID, in: session.workspace, archived: session.latest.archivedAt == nil)
-                            if let saved = model.loadedProjects[session.projectID]?.cards.first(where: { $0.id == session.cardID }) { session.receive(saved) }
-                        } catch { model.handle(error) }
-                    }
-                }.disabled(archiving || session.busy || session.unresolvedOperation || session.unavailable || session.legacyNeedsScope || session.loadFailed)
+                if !session.projectReadOnly {
+                    Button(session.latest.archivedAt == nil ? "Archive Card" : "Restore Card", role: session.latest.archivedAt == nil ? .destructive : nil) {
+                        Task {
+                            archiving = true
+                            defer { archiving = false }
+                            do {
+                                try await model.archive(session.latest, projectID: session.projectID, in: session.workspace, archived: session.latest.archivedAt == nil)
+                                if let saved = model.loadedProjects[session.projectID]?.cards.first(where: { $0.id == session.cardID }) { session.receive(saved) }
+                            } catch { model.handle(error) }
+                        }
+                    }.disabled(archiving || session.busy || session.unresolvedOperation || session.unavailable || session.legacyNeedsScope || session.loadFailed)
+                }
             }
         }
         .scrollDismissesKeyboard(.interactively)
@@ -128,7 +140,7 @@ struct DirectCardForm: View {
             }
             ToolbarItem(placement: .secondaryAction) {
                 Button("Revert", role: .destructive) { confirmingRevert = true }
-                    .disabled(session.busy || session.loadFailed || session.legacyNeedsScope || session.unresolvedOperation || session.pending.confirmed != nil || !session.dirty)
+                    .disabled(session.busy || session.loadFailed || session.legacyNeedsScope || session.unresolvedOperation || session.pending.confirmed != nil || session.projectReadOnly || !session.dirty)
             }
             ToolbarItem(placement: .cancellationAction) {
                 Button("Close") { session.persist(); if !session.persistenceFailed { dismiss() } }
@@ -144,12 +156,17 @@ struct DirectCardForm: View {
 }
 
 struct CoordinatedCommentForm: View {
+    @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @Bindable var session: CommentEditingSession
     @State private var confirmingDiscard = false
+    private var projectReadOnly: Bool { model.loadedProjects[session.projectID]?.archivedAt != nil }
     var body: some View {
         NavigationStack {
             Form {
+                if projectReadOnly {
+                    Section { Text("Archived Project. Comments are read-only; your local draft is retained.") }
+                }
                 if session.loadFailed {
                     Section("Retained Comment could not be opened") {
                         Text("The original record is unchanged. Retry reading before editing, posting, or discarding.")
@@ -183,9 +200,9 @@ struct CoordinatedCommentForm: View {
                 }
                 Section("Comment") {
                     TextEditor(text: $session.pending.body).accessibilityLabel("Comment").accessibilityIdentifier("comment-body")
-                }.disabled(session.busy || session.frozen || !session.authorized)
+                }.disabled(session.busy || session.frozen || !session.authorized || projectReadOnly)
                 Button("Discard Comment draft", role: .destructive) { confirmingDiscard = true }
-                    .disabled(session.busy || session.frozen)
+                    .disabled(session.busy || session.frozen || projectReadOnly)
             }
             .navigationTitle("Add Comment")
             .toolbar {
@@ -195,12 +212,15 @@ struct CoordinatedCommentForm: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(session.pending.confirmed != nil ? "Retry cleanup" : session.pending.submitted != nil ? "Retry Post" : "Post") { Task { await session.post() } }
-                        .disabled(session.busy || session.loadFailed || session.legacyNeedsScope || !session.authorized || (session.pending.confirmed == nil && session.pending.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
+                        .disabled(session.busy || session.loadFailed || session.legacyNeedsScope || !session.authorized || projectReadOnly || (session.pending.confirmed == nil && session.pending.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
                 }
             }
             .interactiveDismissDisabled(session.busy || session.persistenceFailed)
             .confirmationDialog("Discard this unsubmitted Comment draft?", isPresented: $confirmingDiscard, titleVisibility: .visible) {
-                Button("Discard Comment draft", role: .destructive) { session.discard() }
+                Button("Discard Comment draft", role: .destructive) {
+                    guard !projectReadOnly else { return }
+                    session.discard()
+                }
             }
         }
         .onChange(of: session.pending.body) { _, _ in session.persist() }

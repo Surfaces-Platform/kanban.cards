@@ -64,10 +64,12 @@ struct CardEditor: View {
     private var draftContextIsCurrent: Bool { model.signedIn && model.ownerID == draftOwnerID && model.workspaces.contains { $0.id == workspace.id && $0.url == workspace.url } }
     private var resourceKey: String { "card:\(projectID):\(card?.id ?? "new")" }
     private var columns: [Column] { (model.loadedProjects[projectID]?.columns ?? []).sorted { $0.position < $1.position } }
+    private var projectReadOnly: Bool { model.loadedProjects[projectID]?.archivedAt != nil }
 
     var body: some View {
         NavigationStack {
             Form {
+                if projectReadOnly { Section { Text("Archived Project. Your local draft is retained; server changes are unavailable.") } }
                 if draftLoadFailed {
                     Section("Retained draft could not be opened") {
                         Text(loadErrorMessage ?? "The original record is unchanged. Retry reading before editing or saving.")
@@ -119,28 +121,29 @@ struct CardEditor: View {
                     TextField("Next action", text: $pending.draft.nextAction, axis: .vertical)
                     TextField("Blocker", text: $pending.draft.blockedReason, axis: .vertical)
                 }
-                .disabled(saving || draftLoadFailed || legacyNeedsScope || pending.submitted != nil || pending.confirmed != nil)
+                .disabled(saving || draftLoadFailed || legacyNeedsScope || pending.submitted != nil || pending.confirmed != nil || projectReadOnly)
                 Section("Description") {
                     TextEditor(text: $pending.draft.body)
                         .accessibilityLabel("Description")
                         .accessibilityIdentifier("card-description")
-                }.disabled(saving || draftLoadFailed || legacyNeedsScope || pending.submitted != nil || pending.confirmed != nil)
+                }.disabled(saving || draftLoadFailed || legacyNeedsScope || pending.submitted != nil || pending.confirmed != nil || projectReadOnly)
                 if let latest {
                     Section("Latest saved Card") { Text(latest.title) }
                     CardFields(card: latest, columns: columns)
                     Section {
                         Button("Continue editing with latest version") {
+                            guard !projectReadOnly else { return }
                             pending.draft.version = latest.version
                             pending.submitted = nil
                             self.latest = nil
                             persist()
-                        }
+                        }.disabled(projectReadOnly)
                     } footer: {
                         Text("Your draft remains in the editor above. Review and reconcile the saved values before saving again.")
                     }
                 }
                 if pending.confirmed == nil {
-                    Section { Button("Discard draft", role: .destructive) { discarding = true }.disabled(saving || draftLoadFailed || legacyNeedsScope || pending.submitted != nil) }
+                    Section { Button("Discard draft", role: .destructive) { discarding = true }.disabled(saving || draftLoadFailed || legacyNeedsScope || pending.submitted != nil || projectReadOnly) }
                 }
             }
             .navigationTitle(card == nil ? "New Card" : "Edit Card")
@@ -153,7 +156,7 @@ struct CardEditor: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(pending.confirmed != nil ? "Retry cleanup" : pending.submitted == nil ? (card == nil ? "Create" : "Save") : "Retry Save") { Task { await save() } }
-                        .disabled(saving || draftLoadFailed || legacyNeedsScope || (pending.confirmed == nil && (latest != nil || pending.draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || pending.draft.columnId.isEmpty)))
+                        .disabled(saving || draftLoadFailed || legacyNeedsScope || projectReadOnly || (pending.confirmed == nil && (latest != nil || pending.draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || pending.draft.columnId.isEmpty)))
                 }
             }
             .interactiveDismissDisabled(saving || persistenceFailed || (pending.confirmed != nil && !receiptPersisted))
@@ -168,7 +171,7 @@ struct CardEditor: View {
             } message: { Text(errorMessage ?? "") }
             .confirmationDialog("Discard this local draft? A previous request may already have saved changes on the server.", isPresented: $discarding, titleVisibility: .visible) {
                 Button("Discard draft", role: .destructive) {
-                    guard !draftLoadFailed, draftContextIsCurrent else { return }
+                    guard !draftLoadFailed, draftContextIsCurrent, !projectReadOnly else { return }
                     do { try model.drafts.removeScoped(ownerID: draftOwnerID, workspace: workspace, projectID: projectID, resourceKey: resourceKey, legacyResourceKey: resourceKey); dismiss() }
                     catch { errorMessage = error.localizedDescription }
                 }
@@ -226,7 +229,7 @@ struct CardEditor: View {
     }
 
     private func save() async {
-        guard loadedDraft, !draftLoadFailed, !legacyNeedsScope, draftContextIsCurrent else { return }
+        guard loadedDraft, !draftLoadFailed, !legacyNeedsScope, draftContextIsCurrent, !projectReadOnly else { return }
         saving = true
         defer { saving = false }
         if pending.confirmed != nil { cleanupConfirmedDraft(); return }
@@ -245,7 +248,9 @@ struct CardEditor: View {
         do {
             _ = try await model.saveCard(pending.submitted!, projectID: projectID, in: workspace, key: pending.key)
         } catch {
-            if model.isConflict(error), let id = pending.draft.id {
+            if let failure = error as? AppFailure, case .readOnlyProject = failure {
+                if !alreadySubmitted { pending.submitted = nil }
+            } else if model.isConflict(error), let id = pending.draft.id {
                 pending.submitted = nil
                 do {
                     try await model.loadProject(id: projectID, in: workspace)
@@ -328,10 +333,12 @@ struct ProjectEditor: View {
 
     private var draftContextIsCurrent: Bool { model.signedIn && model.ownerID == draftOwnerID && model.workspaces.contains { $0.id == workspace.id && $0.url == workspace.url } }
     private var resourceKey: String { "project:\(workspace.id):\(project?.id ?? "new")" }
+    private var projectReadOnly: Bool { project.map { (model.loadedProjects[$0.id] ?? $0).archivedAt != nil } ?? false }
 
     var body: some View {
         NavigationStack {
             Form {
+                if projectReadOnly { Section { Text("Archived Project. Your local draft is retained; server changes are unavailable.") } }
                 if draftLoadFailed {
                     Section("Retained draft could not be opened") {
                         Text(loadErrorMessage ?? "The original record is unchanged. Retry reading before editing or saving.")
@@ -364,16 +371,19 @@ struct ProjectEditor: View {
                 Section {
                     TextField("Name", text: $pending.draft.name).accessibilityIdentifier("project-name")
                     TextField("Description", text: $pending.draft.description, axis: .vertical)
-                }.disabled(saving || draftLoadFailed || legacyNeedsScope || pending.submitted != nil || pending.confirmed != nil)
+                }.disabled(saving || draftLoadFailed || legacyNeedsScope || pending.submitted != nil || pending.confirmed != nil || projectReadOnly)
                 if let latest {
                     Section("Latest saved Project") {
                         LabeledContent("Name", value: latest.name)
                         Text(latest.description)
-                        Button("Continue editing with latest revision") { pending.draft.revision = latest.revision; pending.submitted = nil; self.latest = nil }
+                        Button("Continue editing with latest revision") {
+                            guard !projectReadOnly else { return }
+                            pending.draft.revision = latest.revision; pending.submitted = nil; self.latest = nil
+                        }.disabled(projectReadOnly)
                     }
                 }
                 if pending.confirmed == nil {
-                    Section { Button("Discard draft", role: .destructive) { discarding = true }.disabled(saving || draftLoadFailed || legacyNeedsScope || pending.submitted != nil) }
+                    Section { Button("Discard draft", role: .destructive) { discarding = true }.disabled(saving || draftLoadFailed || legacyNeedsScope || pending.submitted != nil || projectReadOnly) }
                 }
             }
             .navigationTitle(project == nil ? "New Project" : "Edit Project")
@@ -381,7 +391,7 @@ struct ProjectEditor: View {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { persist(); if !persistenceFailed { dismiss() } }.disabled(saving) }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(pending.confirmed != nil ? "Retry cleanup" : pending.submitted == nil ? (project == nil ? "Create" : "Save") : "Retry Save") { Task { await save() } }
-                        .disabled(saving || draftLoadFailed || legacyNeedsScope || (pending.confirmed == nil && (latest != nil || pending.draft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)))
+                        .disabled(saving || draftLoadFailed || legacyNeedsScope || projectReadOnly || (pending.confirmed == nil && (latest != nil || pending.draft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)))
                 }
             }
             .interactiveDismissDisabled(saving || persistenceFailed || (pending.confirmed != nil && !receiptPersisted))
@@ -396,7 +406,7 @@ struct ProjectEditor: View {
             } message: { Text(errorMessage ?? "") }
             .confirmationDialog("Discard this local draft? A previous request may already have saved changes on the server.", isPresented: $discarding, titleVisibility: .visible) {
                 Button("Discard draft", role: .destructive) {
-                    guard !draftLoadFailed, draftContextIsCurrent else { return }
+                    guard !draftLoadFailed, draftContextIsCurrent, !projectReadOnly else { return }
                     do { try model.drafts.removeScoped(ownerID: draftOwnerID, workspace: workspace, projectID: project?.id ?? "new", resourceKey: resourceKey, legacyResourceKey: resourceKey); dismiss() }
                     catch { errorMessage = error.localizedDescription }
                 }
@@ -453,7 +463,7 @@ struct ProjectEditor: View {
     }
 
     private func save() async {
-        guard loadedDraft, !draftLoadFailed, !legacyNeedsScope, draftContextIsCurrent else { return }
+        guard loadedDraft, !draftLoadFailed, !legacyNeedsScope, draftContextIsCurrent, !projectReadOnly else { return }
         saving = true
         defer { saving = false }
         if pending.confirmed != nil { cleanupConfirmedDraft(); return }
@@ -464,7 +474,9 @@ struct ProjectEditor: View {
         do {
             _ = try await model.saveProject(pending.submitted!, in: workspace, key: pending.key)
         } catch {
-            if model.isConflict(error), let id = pending.draft.id {
+            if let failure = error as? AppFailure, case .readOnlyProject = failure {
+                if !alreadySubmitted { pending.submitted = nil }
+            } else if model.isConflict(error), let id = pending.draft.id {
                 pending.submitted = nil
                 do { try await model.loadProject(id: id, in: workspace); latest = model.loadedProjects[id] }
                 catch { errorMessage = error.localizedDescription }
@@ -497,7 +509,20 @@ struct CommentsView: View {
     let workspace: Workspace
     let projectID: String
     let cardID: String
+    let readOnly: Bool
     @State private var composing = false
+    private var commentsReadOnly: Bool {
+        readOnly || model.loadedProjects[projectID]?.archivedAt != nil
+            || model.loadedProjects[projectID]?.cards.first(where: { $0.id == cardID })?.archivedAt != nil
+    }
+
+    init(workspace: Workspace, projectID: String, cardID: String, readOnly: Bool = false) {
+        self.workspace = workspace
+        self.projectID = projectID
+        self.cardID = cardID
+        self.readOnly = readOnly
+    }
+
     var body: some View {
         List {
             let comments = model.loadedProjects[projectID]?.cards.first { $0.id == cardID }?.comments ?? []
@@ -511,7 +536,11 @@ struct CommentsView: View {
             if comments.isEmpty { ContentUnavailableView("No Comments", systemImage: "text.bubble") }
         }
         .navigationTitle("Comments")
-        .toolbar { ToolbarItem(placement: .primaryAction) { Button("Add Comment", systemImage: "square.and.pencil") { composing = true } } }
+        .toolbar {
+            if !commentsReadOnly {
+                ToolbarItem(placement: .primaryAction) { Button("Add Comment", systemImage: "square.and.pencil") { composing = true } }
+            }
+        }
         .sheet(isPresented: $composing) { CommentEditor(workspace: workspace, projectID: projectID, cardID: cardID) }
     }
 }

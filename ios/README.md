@@ -16,6 +16,12 @@ Open the Workspace title menu above the Project list to switch Workspaces or cho
 
 Native creation uses the owner-session `POST /api/workspaces` contract. The backend change must be released before an installed client can create real Workspaces. Demo mode keeps creation in memory for isolated simulator testing.
 
+## Browse archived Projects
+
+Open **Archived Projects** at the bottom of a Workspace's Project list, then choose a Project. Its Cards, Archived Cards, Comments, Activity, and filters remain available. Archived Projects have no server editing, Move, archive, restore, or Comment actions.
+
+A retained Card draft can still be confirmed for its original Workspace, copied, or exported. Confirmation protects a local copy on this iPhone and preserves the older record. It does not restore the Project or Card or save draft text to the server. Local draft fields and Revert remain disabled while browsing an archived Project.
+
 ## Build and test locally
 
 Run these commands from the repository root. Build outputs stay in the ignored local project directory.
