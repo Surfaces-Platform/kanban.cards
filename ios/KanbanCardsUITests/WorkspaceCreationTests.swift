@@ -142,20 +142,30 @@ final class WorkspaceCreationTests: XCTestCase {
         XCTAssertTrue(app.textFields["workspace.slug"].isHittable)
     }
 
-    private func replace(_ field: XCUIElement, with text: String) {
-        XCTAssertTrue(field.waitForExistence(timeout: 5))
+    private func replace(_ field: XCUIElement, with text: String,
+                         file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertTrue(field.waitForExistence(timeout: 5), file: file, line: line)
         field.tap()
-        let current = field.value as? String ?? ""
+        let displayed = field.value as? String ?? ""
+        let current = displayed == field.placeholderValue ? "" : displayed
         if !current.isEmpty { field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: current.count)) }
         if !text.isEmpty { field.typeText(text) }
-        assertValue(field, equals: text)
+        assertValue(field, equals: text, file: file, line: line)
     }
 
-    private func assertValue(_ element: XCUIElement, equals value: String) {
-        let updated = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
-            element.exists && element.value as? String == value
-        }, object: nil)
-        XCTAssertEqual(XCTWaiter.wait(for: [updated], timeout: 5), .completed)
+    private func assertValue(_ element: XCUIElement, equals value: String,
+                             file: StaticString = #filePath, line: UInt = #line) {
+        // Query the value directly instead of first resolving existence in a
+        // separate accessibility snapshot after typing.
+        let updated = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value == %@", value), object: element)
+        let result = XCTWaiter.wait(for: [updated], timeout: 5)
+        if result != .completed, let app = runningApp {
+            attach(app, named: "Workspace text value did not settle: \(element.identifier)")
+        }
+        XCTAssertEqual(result, .completed,
+                       "Expected \(element.identifier) value \(String(reflecting: value)); actual \(String(reflecting: element.value))",
+                       file: file, line: line)
     }
 
     private func attach(_ app: XCUIApplication, named name: String) {
