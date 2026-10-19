@@ -1,4 +1,4 @@
 interface:
   display_name: "kanban.cards"
-  short_description: "See and update project priorities and card progress"
-  default_prompt: "Use $kanban-cards to keep this project’s priorities, progress, and next steps visible and up to date."
+  short_description: "Track card progress and resume agent handoffs"
+  default_prompt: "Use $kanban-cards to keep this project’s priorities and progress current, or prepare and resume a Card handoff with verified results and a concrete next action."
