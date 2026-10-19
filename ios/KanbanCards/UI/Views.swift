@@ -258,38 +258,27 @@ struct CardView: View {
     let workspace: Workspace
     let projectID: String
     let cardID: String
-    @State private var editing = false
-    @State private var archiving = false
+    @State private var editingSession: CardEditingSession?
     private var card: Card? { model.loadedProjects[projectID]?.cards.first { $0.id == cardID } }
-
     var body: some View {
         Group {
-            if let card, let project = model.loadedProjects[projectID] {
-                List {
-                    if card.archivedAt != nil { Section { Text("Archived") } }
-                    CardFields(card: card, columns: project.columns)
-                    Section {
-                        NavigationLink("Comments (\(card.comments.count))") { CommentsView(workspace: workspace, projectID: projectID, cardID: cardID) }
-                        NavigationLink("Activity") { ActivityView(projectID: projectID, cardID: cardID) }
-                    }
-                    Section {
-                        Button(card.archivedAt == nil ? "Archive Card" : "Restore Card", role: card.archivedAt == nil ? .destructive : nil) {
-                            Task {
-                                archiving = true
-                                defer { archiving = false }
-                                do { try await model.archive(card, projectID: projectID, in: workspace, archived: card.archivedAt == nil) } catch { model.handle(error) }
-                            }
-                        }.disabled(archiving)
-                    }
-                }
-                .refreshable {
-                    do { try await model.loadProject(id: projectID, in: workspace) } catch { model.handle(error) }
-                }
-                .sheet(isPresented: $editing) { CardEditor(workspace: workspace, projectID: projectID, card: card) }
-            } else { ContentUnavailableView("Card unavailable", systemImage: "rectangle") }
+            if let editingSession { DirectCardForm(session: editingSession) }
+            else { ProgressView("Opening Card") }
         }
-        .navigationTitle(card?.title ?? "Card")
-        .toolbar { ToolbarItem(placement: .primaryAction) { Button("Edit") { editing = true }.disabled(card == nil) } }
+        .task {
+            if let card {
+                let session = model.cardEditingSession(workspace: workspace, projectID: projectID, card: card)
+                editingSession = session
+                session.load()
+            }
+        }
+        .onChange(of: card) { _, saved in
+            if let saved { editingSession?.receive(saved) }
+            else { editingSession?.missing() }
+        }
+        .onChange(of: model.ownerID) { _, owner in
+            if owner != editingSession?.ownerID { editingSession = nil }
+        }
     }
 }
 

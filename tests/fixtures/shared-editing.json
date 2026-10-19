@@ -1,0 +1,182 @@
+{
+  "schemaVersion": 1,
+  "scope": "Synthetic shared baseline/local/latest reconciliation inputs. Client session/UI tests remain required.",
+  "baseline": {
+    "id": "shared-card-a",
+    "externalKey": "synthetic:shared-card-a",
+    "title": "Prepare release notes",
+    "body": "Source line one.\n\nKeep spaces.  \n",
+    "nextActor": "human",
+    "nextAction": "Draft summary",
+    "priority": "Medium",
+    "blockedReason": "",
+    "columnId": "next",
+    "position": 0,
+    "version": 7,
+    "archivedAt": null,
+    "createdAt": "2026-10-01T12:00:00.000Z",
+    "updatedAt": "2026-10-01T12:00:00.000Z",
+    "comments": []
+  },
+  "cases": [
+    {
+      "id": "clean-adopts-latest",
+      "scenarioId": "SI-008",
+      "localChanges": {},
+      "latestChanges": {
+        "title": "Saved elsewhere",
+        "body": "New saved Description\n",
+        "nextActor": "agent",
+        "priority": "High",
+        "version": 8
+      },
+      "expectedDraft": {
+        "title": "Saved elsewhere",
+        "body": "New saved Description\n",
+        "nextActor": "agent",
+        "priority": "High",
+        "version": 8
+      },
+      "conflicts": []
+    },
+    {
+      "id": "comment-version-is-not-text-conflict",
+      "scenarioId": "SI-007",
+      "localChanges": {
+        "title": "Revised release notes"
+      },
+      "latestChanges": {
+        "version": 8,
+        "comments": [
+          {
+            "id": "shared-comment-a",
+            "body": "Saved independently",
+            "author": "Synthetic Owner",
+            "createdAt": "2026-10-01T12:01:00.000Z"
+          }
+        ]
+      },
+      "expectedDraft": {
+        "title": "Revised release notes",
+        "body": "Source line one.\n\nKeep spaces.  \n",
+        "columnId": "next",
+        "version": 8
+      },
+      "conflicts": []
+    },
+    {
+      "id": "nonoverlapping-edit-keeps-both",
+      "scenarioId": "SI-008",
+      "localChanges": {
+        "title": "Revised release notes"
+      },
+      "latestChanges": {
+        "nextAction": "Review the saved artifact",
+        "priority": "High",
+        "version": 8
+      },
+      "expectedDraft": {
+        "title": "Revised release notes",
+        "nextAction": "Review the saved artifact",
+        "priority": "High",
+        "version": 8
+      },
+      "conflicts": []
+    },
+    {
+      "id": "competing-title-needs-choice",
+      "scenarioId": "SI-009",
+      "localChanges": {
+        "title": "My local title"
+      },
+      "latestChanges": {
+        "title": "New saved title",
+        "body": "Independent saved Description",
+        "version": 8
+      },
+      "expectedDraft": {
+        "title": "My local title",
+        "body": "Independent saved Description",
+        "version": 8
+      },
+      "conflicts": [
+        "title"
+      ]
+    },
+    {
+      "id": "same-result-is-not-conflict",
+      "scenarioId": "SI-009",
+      "localChanges": {
+        "title": "The same new title"
+      },
+      "latestChanges": {
+        "title": "The same new title",
+        "version": 8
+      },
+      "expectedDraft": {
+        "title": "The same new title",
+        "version": 8
+      },
+      "conflicts": []
+    },
+    {
+      "id": "own-move-preserves-dirty-title",
+      "scenarioId": "SI-005",
+      "localChanges": {
+        "title": "Revised release notes"
+      },
+      "latestChanges": {
+        "columnId": "done",
+        "position": 3,
+        "version": 8
+      },
+      "expectedDraft": {
+        "title": "Revised release notes",
+        "columnId": "done",
+        "position": 3,
+        "version": 8
+      },
+      "conflicts": []
+    },
+    {
+      "id": "legacy-placement-needs-explicit-move",
+      "scenarioId": "SI-006",
+      "localChanges": {
+        "title": "Revised release notes",
+        "columnId": "doing",
+        "position": 1
+      },
+      "latestChanges": {
+        "columnId": "done",
+        "position": 3,
+        "version": 8
+      },
+      "expectedDraft": {
+        "title": "Revised release notes",
+        "columnId": "doing",
+        "position": 1,
+        "version": 8
+      },
+      "conflicts": [
+        "placement"
+      ]
+    },
+    {
+      "id": "latest-archive-does-not-get-restored",
+      "scenarioId": "SI-014",
+      "localChanges": {
+        "title": "Revised release notes"
+      },
+      "latestChanges": {
+        "archivedAt": "2026-10-01T12:02:00.000Z",
+        "version": 8
+      },
+      "expectedDraft": {
+        "title": "Revised release notes",
+        "archivedAt": "2026-10-01T12:02:00.000Z",
+        "version": 8
+      },
+      "conflicts": []
+    }
+  ]
+}

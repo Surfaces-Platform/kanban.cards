@@ -182,6 +182,7 @@ test("skill and browser complete one isolated product loop from empty through ar
   await page.getByRole("tab", { name: "Preview", exact: true }).click();
   await expect(page.getByRole("tabpanel", { name: "Preview", exact: true }).getByRole("heading", { name: "Browser update" })).toBeVisible();
   await expect(page.getByRole("tabpanel", { name: "Preview", exact: true }).getByRole("listitem")).toHaveCount(2);
+  await page.getByRole("button", { name: "Save", exact: true }).click();
   await expect.poll(async () => {
     const stored = await readSeededProject(harness!, projectId);
     return stored.cards.find((card) => card.id === cardId)?.body;

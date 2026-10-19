@@ -91,7 +91,11 @@ final class SharedCardEditingSessionTests: XCTestCase {
         let pane = relaunchedModel.cardEditingSession(workspace: nextWorkspace, projectID: nextProject.id, card: nextCard)
         let reopened = relaunchedModel.cardEditingSession(workspace: nextWorkspace, projectID: nextProject.id, card: nextCard)
         XCTAssertTrue(pane === reopened)
-        XCTAssertEqual(pane.pending, retained)
+        XCTAssertEqual(pane.pending.draft, retained.draft)
+        XCTAssertEqual(pane.pending.key, retained.key)
+        XCTAssertEqual(pane.pending.submitted, retained.submitted)
+        XCTAssertEqual(pane.pending.confirmed, retained.confirmed)
+        XCTAssertNotEqual(pane.pending.requiresConflictReview, true, "Missing and false review flags both mean no unresolved conflict.")
         XCTAssertTrue(pane.recoveredDraft)
         XCTAssertEqual(pane.currentCard, nextCard)
         XCTAssertEqual(pane.currentCard?.title, card.title)
@@ -128,7 +132,7 @@ final class SharedCardEditingSessionTests: XCTestCase {
         XCTAssertEqual(persisted.pending.draft, CardDraft(card: saved))
     }
 
-    func testCommentConflictRetainsSharedTextUntilAnExplicitResolution() async throws {
+    func testSI007CommentVersionReconcilesWithoutBlockingUnchangedCardFields() async throws {
         let model = makeModel()
         let (workspace, project, card) = try fixture(model)
         let session = model.cardEditingSession(workspace: workspace, projectID: project.id, card: card)
@@ -137,22 +141,12 @@ final class SharedCardEditingSessionTests: XCTestCase {
         try await model.addComment("A separately confirmed Comment", cardID: card.id,
             projectID: project.id, in: workspace, key: "new-comment")
         let commentVersion = try XCTUnwrap(session.currentCard?.version)
-
-        await session.save()
-
-        XCTAssertEqual(session.currentCard?.title, card.title)
-        XCTAssertEqual(session.currentCard?.version, commentVersion)
-        XCTAssertEqual(session.currentCard?.comments.last?.body, "A separately confirmed Comment")
-        XCTAssertEqual(session.pending.draft.title, "My exact unsaved title")
-        XCTAssertEqual(session.pending.draft.body, "  # Keep my text\n")
-        XCTAssertEqual(session.pending.requiresConflictReview, true)
-        XCTAssertNil(session.pending.submitted)
-        XCTAssertFalse(session.canSave)
-        XCTAssertEqual(session.latest?.version, commentVersion)
-        session.keepDraftForNextSave()
+        XCTAssertEqual(session.pending.draft.version, commentVersion)
+        XCTAssertTrue(session.conflicts.isEmpty)
         XCTAssertTrue(session.canSave)
         await session.save()
         XCTAssertEqual(session.currentCard?.title, "My exact unsaved title")
+        XCTAssertEqual(session.currentCard?.body, "  # Keep my text\n")
         XCTAssertEqual(session.currentCard?.comments.last?.body, "A separately confirmed Comment")
         XCTAssertEqual(session.currentCard?.version, commentVersion + 1)
     }
@@ -191,7 +185,10 @@ final class SharedCardEditingSessionTests: XCTestCase {
         XCTAssertFalse(session.canSave)
         await session.save()
         XCTAssertEqual(session.currentCard?.title, card.title)
-        XCTAssertEqual(session.pending.draft, retained)
+        XCTAssertEqual(session.pending.draft.title, retained.title)
+        XCTAssertEqual(session.pending.draft.body, retained.body)
+        XCTAssertNotNil(session.pending.draft.archivedAt)
+        XCTAssertEqual(session.pending.draft.version, card.version + 1)
     }
 
     func testDifferentLegacyPaneAndWindowDraftsRemainAvailableUntilExplicitChoice() throws {
@@ -207,22 +204,20 @@ final class SharedCardEditingSessionTests: XCTestCase {
         try model.drafts.save(panePending, ownerID: model.ownerID, resourceKey: base + ":editor:inline")
         try model.drafts.save(windowPending, ownerID: model.ownerID, resourceKey: base + ":editor:window")
         let session = model.cardEditingSession(workspace: workspace, projectID: project.id, card: card)
-        XCTAssertEqual(session.pending, panePending)
-        XCTAssertEqual(session.alternatives.map(\.pending), [windowPending])
-        XCTAssertFalse(session.canSave, "Migration must require a choice before overwriting a different retained draft.")
-        let alternative = try XCTUnwrap(session.alternatives.first)
+        XCTAssertEqual(session.pending.draft, CardDraft(card: card), "Origin-less drafts require explicit association.")
+        XCTAssertEqual(session.alternatives.map(\.pending), [panePending, windowPending])
+        XCTAssertFalse(session.canSave)
+        let alternative = try XCTUnwrap(session.alternatives.first { $0.pending == windowPending })
         session.useAlternative(id: alternative.id)
-        XCTAssertEqual(session.pending, windowPending)
-        XCTAssertEqual(session.alternatives.map(\.pending), [panePending])
-        let recovered = try XCTUnwrap(model.drafts.load(ownerID: model.ownerID,
-            resourceKey: session.resourceKey, as: SharedCardDraftRecord.self))
-        XCTAssertEqual(recovered.pending, windowPending)
-        XCTAssertEqual(recovered.alternatives.map(\.pending), [panePending])
+        XCTAssertEqual(session.pending.draft.title, windowPending.draft.title)
+        XCTAssertEqual(session.conflicts, [.title], "The old draft lacks a trustworthy baseline and requires a field choice.")
         session.keepCurrentDraftRemovingAlternatives()
-        XCTAssertTrue(session.alternatives.isEmpty)
+        XCTAssertFalse(session.canSave)
+        session.resolve(.title, useSaved: false)
         XCTAssertTrue(session.canSave)
-        XCTAssertNil(try model.drafts.load(ownerID: model.ownerID, resourceKey: base + ":editor:inline", as: PendingCardDraft.self))
-        XCTAssertNil(try model.drafts.load(ownerID: model.ownerID, resourceKey: base + ":editor:window", as: PendingCardDraft.self))
+        XCTAssertEqual(try model.drafts.load(ownerID: model.ownerID, resourceKey: base + ":editor:inline", as: PendingCardDraft.self), panePending)
+        XCTAssertEqual(try model.drafts.load(ownerID: model.ownerID, resourceKey: base + ":editor:window", as: PendingCardDraft.self), windowPending)
+
     }
 
     func testRecoveredConfirmedReceiptFinishesLocallyWithoutReplayingTheMutation() async throws {

@@ -42,7 +42,7 @@ final class SharedBoardStateTests: XCTestCase {
         XCTAssertEqual(current.cards.first { $0.id == first.id }, saved)
         XCTAssertEqual(saved.title, edit.title)
         XCTAssertEqual(saved.body, edit.body)
-        XCTAssertEqual(saved.columnId, edit.columnId)
+        XCTAssertEqual(saved.columnId, first.columnId, "Text Save must ignore an unrelated destination value; Move is a separate operation.")
         XCTAssertEqual(saved.version, first.version + 1)
         XCTAssertEqual(current.cards.first { $0.id == second.id }, second)
         XCTAssertEqual(try model.drafts.load(ownerID: model.ownerID, resourceKey: secondKey, as: CardDraft.self), secondDraft)

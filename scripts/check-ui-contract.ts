@@ -240,11 +240,14 @@ function checkApplicationSource(app: SourceFile, violations: Violation[]): void 
     const storageCall = line.match(/(?:window\.)?(localStorage|sessionStorage)\.(?:getItem|setItem|removeItem)\(([^)]*)/);
     if (storageCall) {
       const literalKey = storageCall[2].match(/^\s*["']([^"']+)["']/)?.[1];
-      if (!(storageCall[1] === "localStorage" && literalKey === "kanban.cards:project-id") && !(storageCall[1] === "sessionStorage" && ["kanban.cards:open-agents", "kanban.cards:open-access", "kanban.cards:add-passkey-after-verify", "kanban.cards:workspace-route"].includes(literalKey || ""))) {
+      const adapter = app.source.match(/const recoveryStorage: Storage = \{[\s\S]*?\n\};/)?.[0] || "";
+      const recoveryAdapter = storageCall[1] === "localStorage" && adapter.includes(line) && /new RecoveryStore\(recoveryStorage,/.test(app.source);
+      const privatePreferenceRemoval = storageCall[1] === "sessionStorage" && functionSection(app.source, "safeSessionRemove")?.includes(line);
+      if (!recoveryAdapter && !privatePreferenceRemoval && !(storageCall[1] === "localStorage" && literalKey === "kanban.cards:project-id") && !(storageCall[1] === "sessionStorage" && ["kanban.cards:open-agents", "kanban.cards:open-access", "kanban.cards:add-passkey-after-verify", "kanban.cards:workspace-route"].includes(literalKey || ""))) {
         violations.push({
           file: app.file,
           line: index + 1,
-          reason: "browser storage is limited to the active Project id and reviewed non-secret authentication return preferences",
+          reason: "browser storage is limited to scoped RecoveryStore drafts, the active Project id, and reviewed authentication return preferences",
           code: line.trim()
         });
       }
@@ -327,7 +330,7 @@ function checkApplicationSource(app: SourceFile, violations: Violation[]): void 
       reason: "the browser must use the secure same-origin session cookie"
     },
     {
-      fragment: 'api("/session", { method: "DELETE" })',
+      fragment: 'api("/session", { method: "DELETE", expectedOwnerId: signingOutOwner })',
       reason: "Sign out must delete the browser session"
     }
   ];
@@ -411,8 +414,8 @@ function checkApplicationSource(app: SourceFile, violations: Violation[]): void 
   if (inspector && !/if\s*\(\s*!card\s*&&\s*!creatingCard\s*\)\s*return\s*["']{2}/.test(inspector)) {
     addViolation(violations, app.file, app.source, app.source.indexOf(inspector), "Card inspector must render only when a Card is selected or being created");
   }
-  if (inspector && /Save Card/.test(inspector)) {
-    addViolation(violations, app.file, app.source, app.source.indexOf(inspector), "selected Card detail must use blur autosave without a Save control");
+  if (inspector && (!/>Save<\/button>/.test(inspector) || !/renderButton\("Revert", "discard-draft"\)/.test(inspector))) {
+    addViolation(violations, app.file, app.source, app.source.indexOf(inspector), "selected Card detail must expose explicit Save and Revert actions");
   }
   if (inspector && /renderSelect\s*\(/.test(inspector)) {
     addViolation(violations, app.file, app.source, app.source.indexOf(inspector), "selected Card detail must not render a persistent Column selector");
@@ -511,7 +514,8 @@ function checkApplicationSource(app: SourceFile, violations: Violation[]): void 
   );
   const moveCard = functionSection(app.source, "moveCard");
   if (moveCard && (
-    !/await\s+flushCardAutosaves\s*\(\s*\)/.test(moveCard)
+    !/await\s+retainVisibleDrafts\s*\(\s*\)/.test(moveCard)
+    || /(?:saveCard|performCardAutosave|flushCardAutosaves)\s*\(/.test(moveCard)
     || !/setWorkspaceMutationsDisabled\s*\(\s*true\s*,\s*["']move["']\s*\)/.test(moveCard)
     || !/revision:\s*card\.version/.test(moveCard)
     || !/body:\s*\{\s*columnId:\s*destination\.id\s*\}/.test(moveCard)
@@ -521,7 +525,7 @@ function checkApplicationSource(app: SourceFile, violations: Violation[]): void 
       app.file,
       app.source,
       app.source.indexOf(moveCard),
-      "Card movement must reserve the global lock, flush blur autosaves, use the latest version, and PATCH only columnId"
+      "Card movement must retain the local text draft, reserve the global lock, use a current version, and PATCH only columnId without saving text"
     );
   }
   const activity = functionSection(app.source, "renderActivity");
@@ -533,8 +537,12 @@ function checkApplicationSource(app: SourceFile, violations: Violation[]): void 
     addViolation(violations, app.file, app.source, app.source.indexOf(comments), "Comments must remain separate from Activity and omit review-only explanatory chrome");
   }
 
-  if (!functionSection(app.source, "performCardAutosave") || !/addEventListener\(["']focusout["']/.test(app.source)) {
-    violations.push({ file: app.file, line: 1, reason: "surface-integrated Card fields must serialize autosave on blur", code: "expected performCardAutosave and delegated focusout handling" });
+  const saveCard = functionSection(app.source, "saveCard");
+  if (!saveCard || !/saveCard\(form\)/.test(app.source) || !/addEventListener\(["']input["']/.test(app.source)) {
+    violations.push({ file: app.file, line: 1, reason: "Card editing must retain input locally and save through explicit form submission", code: "expected input capture and saveCard(form)" });
+  }
+  if (functionSection(app.source, "performCardAutosave") || functionSection(app.source, "flushCardAutosaves")) {
+    violations.push({ file: app.file, line: 1, reason: "Card text must not be implicitly saved on blur or before Move", code: "unexpected autosave path" });
   }
   const summary = functionSection(app.source, "bodySummary");
   if (summary && !/renderCardMarkdown\(value\)\.text/.test(summary)) {
@@ -544,8 +552,8 @@ function checkApplicationSource(app: SourceFile, violations: Violation[]): void 
     violations.push({ file: app.file, line: 1, reason: "Card Markdown source must use body-specific newline normalization without title-style trimming", code: "function cardBodyValue(...)" });
   }
 
-  if (!/(?:retainedDrafts|cardDrafts)\s*=\s*new Map/.test(app.source)) {
-    violations.push({ file: app.file, line: 1, reason: "per-Card retained-draft storage is missing", code: "const retainedDrafts = new Map(...)" });
+  if (!/retainedDrafts\s*=\s*recoveryMap<CardDraft>\("card"\)/.test(app.source) || !functionSection(app.source, "bindRecovery")) {
+    violations.push({ file: app.file, line: 1, reason: "Card drafts must use durable owner-scoped recovery storage", code: "expected Card RecoveryMap and session binding" });
   }
   for (const semanticMarker of ["clearPrivateState", "setWorkspaceMutationsDisabled"]) {
     if (!functionSection(app.source, semanticMarker)) {

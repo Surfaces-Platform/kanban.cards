@@ -99,7 +99,7 @@ struct SharedCardEditorView: View {
                 .accessibilityIdentifier("editor.keep-current-confirm")
             Button("Keep All Drafts", role: .cancel) {}
         } message: {
-            Text("The draft shown in this editor will remain. The other retained local drafts will be removed without changing the saved Card.")
+            Text("The current draft stays in this Workspace. Other candidates stop appearing here. Earlier source copies are preserved because they do not identify a server origin.")
         }
     }
 
@@ -158,6 +158,14 @@ struct SharedCardEditorView: View {
             } else if session.pending.submitted != nil {
                 Section { Text("The save result is uncertain. Retry the same save to confirm whether it reached the server.") }
             }
+            if let intent = session.pendingMove {
+                Section("Retained Move") {
+                    LabeledContent("Requested Column", value: session.columns.first { $0.id == intent.columnID }?.name ?? intent.columnID)
+                    Text(intent.confirmedCard == nil ? "The Move result is unconfirmed. Read saved placement before another Save or Move." : "Move confirmed. Retry local cleanup without moving again.")
+                    Button(session.confirmationLabel) { Task { await session.save() } }.disabled(session.saving)
+                        .accessibilityIdentifier("editor.reconcile-move")
+                }
+            }
             if session.recoveredDraft {
                 Section {
                     Text("Recovered draft. Edits are shared across this Card's open views and stay on this Mac until you save or revert.")
@@ -197,7 +205,7 @@ struct SharedCardEditorView: View {
                             Text(alternative.label).font(.headline)
                             Text(alternative.pending.draft.title)
                             Text(alternative.pending.draft.body).lineLimit(4).textSelection(.enabled)
-                            Button("Use This Draft") { session.useAlternative(id: alternative.id) }
+                            Button("Use Recovered Draft in This Workspace") { session.useAlternative(id: alternative.id) }
                                 .accessibilityIdentifier("editor.use-alternative.\(alternative.id)")
                         }
                     }
@@ -213,12 +221,7 @@ struct SharedCardEditorView: View {
                     Text("Title (required)").foregroundStyle(Color.primary)
                 }
                 .accessibilityIdentifier("editor.title")
-                LabeledContent {
-                    NativePopUpPicker(label: "Column", selection: $session.pending.draft.columnId,
-                        options: columnOptions, identifier: "editor.column")
-                } label: {
-                    Text("Column").foregroundStyle(Color.primary)
-                }
+                LabeledContent("Column", value: session.columns.first { $0.id == session.currentCard?.columnId }?.name ?? "Unavailable")
                 LabeledContent {
                     NativePopUpPicker(label: "Next actor", selection: $session.pending.draft.nextActor,
                         options: [.init(title: "Unassigned", value: CardNextActor?.none)]
@@ -260,14 +263,25 @@ struct SharedCardEditorView: View {
             }.disabled(session.editingDisabled || cardEditingDisabled)
             if session.pending.requiresConflictReview == true {
                 Section("Review saved changes") {
-                    Text("This Card changed after your draft began. Your draft is above; the saved values are below. Keeping your draft means the next save replaces every editable field, including fields you did not change locally.")
+                    Text("Saved changes to untouched fields have been included. Choose which value to keep for each remaining field before saving.")
                     if let latest = session.latest {
-                        Text("Different fields: \(CardDraftComparison.differingFields(session.pending.draft, from: latest).joined(separator: ", ")).")
-                        SavedCardValues(card: latest, columns: session.columns)
-                        Button("Keep My Draft for Next Save") { session.keepDraftForNextSave() }
-                            .accessibilityIdentifier("editor.keep-draft").disabled(session.isReadOnly)
-                        Button("Use Saved Card…") { confirmingRevert = true }
-                            .accessibilityIdentifier("editor.use-saved")
+                        ForEach(CardDraftField.allCases.filter { session.conflicts.contains($0) }, id: \.self) { field in
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text(field.label).font(.headline)
+                                LabeledContent("Your draft", value: session.pending.draft.value(for: field))
+                                LabeledContent("Saved", value: CardDraft(card: latest).value(for: field))
+                                if field == .placement {
+                                    Text("Moving a Card is a separate action. Text Save will keep the saved destination.")
+                                    Button("Move to Proposed Column") { Task { await session.moveToProposedColumn() } }
+                                        .disabled(session.isReadOnly)
+                                } else {
+                                    Button("Use My \(field.label)") { session.resolve(field, useSaved: false) }
+                                        .accessibilityIdentifier("editor.keep-field.\(field.rawValue)")
+                                }
+                                Button("Use Saved \(field.label)") { session.resolve(field, useSaved: true) }
+                                    .accessibilityIdentifier("editor.saved-field.\(field.rawValue)")
+                            }
+                        }
                     } else {
                         Button("Load Latest Saved Card") { Task { await session.reviewConflict() } }
                             .accessibilityIdentifier("editor.load-conflict")

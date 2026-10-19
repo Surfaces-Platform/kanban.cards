@@ -420,142 +420,33 @@ test("Add Column fails closed when the latest Project cannot be loaded", async (
   }
 });
 
-test("Add Column waits for Card autosave and a full latest-Project read before appending", async ({ page }) => {
+test("Add Column reads full latest Project while retaining an unrelated local Card draft", async ({ page }) => {
   const harness = await startBrowserHarness();
-  const errors = monitorBrowserErrors(page);
-  let projectPatchHeaders: Record<string, string> = {};
-  let projectPatchBody: Record<string, unknown> = {};
-  page.on("request", (request) => {
-    const url = new URL(request.url());
-    if (request.method() === "PATCH" && /^\/api\/projects\/[^/]+$/.test(url.pathname)) {
-      projectPatchHeaders = request.headers();
-      projectPatchBody = request.postDataJSON() as Record<string, unknown>;
-    }
-  });
-
   try {
-    const seed = await seedBrowserWorkspace(harness);
-    await page.setViewportSize({ width: 1440, height: 1000 });
-    await authenticate(page, harness);
-    await openCard(page, seed.cards.privacy.title);
-    const beforeInterleaving = await readSeededProject(harness, seed.projectId);
-    const savedBody = "Card autosave must land before Add Column snapshots the Project";
-    const autosaveGate = await holdNextRequest(page, (request) => {
-      const url = new URL(request.url());
-      return request.method() === "PATCH" && url.pathname === `/api/projects/${seed.projectId}/cards/${seed.cards.privacy.id}`;
-    });
-    try {
-      await page.getByLabel("Description", { exact: true }).fill(savedBody);
-      await page.getByRole("tab", { name: "Activity", exact: true }).click();
-      await expect(page.locator("#activity-panel")).toBeVisible();
-      await autosaveGate.reached;
-      await addColumnTrigger(page).click();
-
-      const preparingStatus = page.locator("#add-column-status");
-      await expect(preparingStatus.getByText("Preparing Add Column", { exact: true })).toBeVisible();
-      await expect(page.getByText("Preparing Add Column", { exact: true })).toHaveCount(1);
-      await expect(preparingStatus).toBeFocused();
-      await expect(page.locator("body")).toHaveAttribute("data-state", "saving");
-      await expect(page.getByRole("tab", { name: "Activity", exact: true })).toBeDisabled();
-      await expect(page.locator("#activity-panel")).toBeVisible();
-      await expect(page.getByRole("button", { name: "Actions", exact: true })).toBeDisabled();
-      await expect(page.getByRole("button", { name: /Close Card/ })).toBeDisabled();
-      await page.keyboard.press("Escape");
-      await expect(preparingStatus.getByText("Preparing Add Column", { exact: true })).toBeVisible();
-      await expect(page.locator("#activity-panel")).toBeVisible();
-
-      await page.setViewportSize({ width: 800, height: 900 });
-      const cardOnlyStatus = page.locator("#add-column-preparing-status");
-      await expect(cardOnlyStatus.getByText("Preparing Add Column", { exact: true })).toBeVisible();
-      await expect(cardOnlyStatus).toBeFocused();
-      expect(await page.getByText("Preparing Add Column", { exact: true }).evaluateAll((messages) => messages.filter((message) => (message as HTMLElement).getClientRects().length > 0).length)).toBe(1);
-      await page.setViewportSize({ width: 1000, height: 900 });
-      await expect(page.locator("#add-column-status").getByText("Preparing Add Column", { exact: true })).toBeVisible();
-      await expect(page.locator("#add-column-status")).toBeFocused();
-      expect(await page.getByText("Preparing Add Column", { exact: true }).evaluateAll((messages) => messages.filter((message) => (message as HTMLElement).getClientRects().length > 0).length)).toBe(1);
-
-      const externalProject = await updateSeededProject(harness, seed.projectId, beforeInterleaving.revision, {
-        columns: [
-          ...beforeInterleaving.columns,
-          { id: "parallel-review", name: "Parallel review", position: 9 }
-        ]
-      });
-      expect(externalProject.columns.slice(0, -1)).toEqual(beforeInterleaving.columns);
-      autosaveGate.continue();
-      await expect(page.getByRole("heading", { name: "Add Column", exact: true })).toBeVisible();
-      await expect(page.getByText("The new Column will appear after Parallel review.", { exact: true })).toBeVisible();
-    } finally {
-      await autosaveGate.dispose();
-    }
-
-    const beforeAppend = await readSeededProject(harness, seed.projectId);
-    expect(beforeAppend.columns.at(-1)).toEqual({ id: "parallel-review", name: "Parallel review", position: 9 });
-    expect(beforeAppend.cards.find((card) => card.id === seed.cards.privacy.id)?.body).toBe(savedBody);
-    await page.setViewportSize({ width: 390, height: 844 });
-    await page.getByRole("button", { name: "Cancel", exact: true }).click();
-    await expect(page.locator("#activity-panel")).toBeVisible();
-    await expect(page.locator("#activity-panel")).toBeFocused();
-    await page.setViewportSize({ width: 1440, height: 1000 });
-    await addColumnTrigger(page).click();
-    await page.getByLabel("Column name", { exact: true }).fill("After synchronized work");
-    await addColumnSubmit(page).click();
-    await expect(page.locator("#toast-region").getByText("Column added", { exact: true })).toBeVisible();
-
+    const seed = await seedBrowserWorkspace(harness); await authenticate(page, harness); await openCard(page, seed.cards.privacy.title);
+    await page.getByLabel("Description", { exact: true }).fill("Local Card draft while adding a Column");
+    const before = await readSeededProject(harness, seed.projectId);
+    await updateSeededProject(harness, seed.projectId, before.revision, { columns: [...before.columns, { id: "parallel-review", name: "Parallel review", position: 9 }] });
+    await addColumnTrigger(page).click(); await expect(page.getByText("The new Column will appear after Parallel review.", { exact: true })).toBeVisible();
+    await page.getByLabel("Column name", { exact: true }).fill("After synchronized work"); await addColumnSubmit(page).click();
+    await expect(page.getByText("Column added", { exact: true })).toBeVisible();
     const stored = await readSeededProject(harness, seed.projectId);
-    const requestedColumns = projectPatchBody.columns as Array<{ id: string; name: string; position: number }>;
-    expect(projectPatchHeaders["x-kanban-version"]).toBe(String(beforeAppend.revision));
-    expect(requestedColumns.slice(0, -1)).toEqual(beforeAppend.columns);
-    expect(stored.columns.slice(0, -1)).toEqual(beforeAppend.columns);
-    expect(stored.columns.at(-1)).toEqual({
-      id: requestedColumns.at(-1)?.id,
-      name: "After synchronized work",
-      position: 10
-    });
-    expect(stored.cards).toEqual(beforeAppend.cards);
-    expect(stored.revision).toBe(beforeAppend.revision + 1);
-    expectNoUnexpectedBrowserErrors(errors);
-  } finally {
-    await harness.stop();
-  }
+    expect(stored.columns.at(-1)?.name).toBe("After synchronized work"); expect(stored.cards.find(card => card.id === seed.cards.privacy.id)?.body).toBe(seed.cards.privacy.body);
+    await openCard(page, seed.cards.privacy.title); await expect(page.getByLabel("Description", { exact: true })).toHaveValue("Local Card draft while adding a Column");
+  } finally { await harness.stop(); }
 });
 
-test("Add Column returns Activity to visible Card recovery when its pending autosave fails", async ({ page }) => {
+test("Add Column cancellation returns to Activity without submitting the local Card draft", async ({ page }) => {
   const harness = await startBrowserHarness();
-  const errors = monitorBrowserErrors(page);
   try {
-    const seed = await seedBrowserWorkspace(harness);
-    await page.setViewportSize({ width: 1440, height: 1000 });
-    await authenticate(page, harness);
-    await openCard(page, seed.cards.privacy.title);
-    const retainedBody = "Add Column must keep this failed Activity-tab autosave visible";
-    const autosaveGate = await holdNextRequest(page, (request) => {
-      const url = new URL(request.url());
-      return request.method() === "PATCH" && url.pathname === `/api/projects/${seed.projectId}/cards/${seed.cards.privacy.id}`;
-    });
-    try {
-      await page.getByLabel("Description", { exact: true }).fill(retainedBody);
-      await page.getByRole("tab", { name: "Activity", exact: true }).click();
-      await autosaveGate.reached;
-      await addColumnTrigger(page).click();
-      await expect(page.locator("#add-column-status").getByText("Preparing Add Column", { exact: true })).toBeVisible();
-      autosaveGate.fulfill(503, { error: "Deterministic Add Column autosave failure" });
-      await expect(page.getByRole("tab", { name: "Card", exact: true })).toHaveAttribute("aria-selected", "true");
-      await expect(page.locator("#card-status").getByText("Changes not saved", { exact: true })).toBeVisible();
-      await expect(page.locator("#card-status")).toContainText("Deterministic Add Column autosave failure");
-      await expect(page.getByLabel("Description", { exact: true })).toHaveValue(retainedBody);
-      await expect(page.getByLabel("Title", { exact: true })).toBeFocused();
-      await expect(page.getByRole("heading", { name: "Add Column", exact: true })).toHaveCount(0);
-      await expect(page.getByRole("button", { name: "Actions", exact: true })).toBeEnabled();
-      await expect(addColumnTrigger(page)).toBeEnabled();
-    } finally {
-      await autosaveGate.dispose();
-    }
-    const stored = await readSeededProject(harness, seed.projectId);
-    expect(stored.cards.find((card) => card.id === seed.cards.privacy.id)?.body).toBe(seed.cards.privacy.body);
-    expectNoUnexpectedBrowserErrors(errors, [/503/]);
-  } finally {
-    await harness.stop();
-  }
+    const seed = await seedBrowserWorkspace(harness); await authenticate(page, harness); await openCard(page, seed.cards.privacy.title);
+    await page.getByLabel("Description", { exact: true }).fill("Retained Card source across Column cancellation");
+    await page.getByRole("tab", { name: "Activity", exact: true }).click();
+    await addColumnTrigger(page).click(); await page.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(page.locator("#activity-panel")).toBeVisible(); await page.getByRole("tab", { name: "Card", exact: true }).click();
+    await expect(page.getByLabel("Description", { exact: true })).toHaveValue("Retained Card source across Column cancellation");
+    expect((await readSeededProject(harness, seed.projectId)).cards.find(card => card.id === seed.cards.privacy.id)?.body).toBe(seed.cards.privacy.body);
+  } finally { await harness.stop(); }
 });
 
 test("Add Column freezes an unconfirmed attempt until the owner refreshes", async ({ page }) => {

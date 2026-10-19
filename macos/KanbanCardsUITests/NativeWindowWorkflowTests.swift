@@ -10,6 +10,39 @@ final class NativeWindowWorkflowTests: XCTestCase {
         continueAfterFailure = false
     }
 
+    func testSI005MoveWithDirtyTitleThenExplicitSavePreservesNewColumn() throws {
+        let app = launch()
+        let first = viewer(homepage, in: app)
+        XCTAssertTrue(first.waitForExistence(timeout: 10))
+        focus(homepage, in: app)
+        let title = first.textFields["editor.title"]
+        replace(title, with: "Draft title retained during Move")
+        XCTAssertTrue(first.buttons["editor.save"].isEnabled)
+        XCTAssertFalse(first.popUpButtons["editor.column"].exists)
+        app.menuBars.menuBarItems["Card"].click()
+        app.menuItems["Move Card…"].click()
+        let move = app.sheets.firstMatch
+        XCTAssertTrue(move.waitForExistence(timeout: 5))
+        move.popUpButtons.firstMatch.click()
+        app.menuItems["Done"].firstMatch.click()
+        move.buttons["Move"].click()
+        XCTAssertTrue(move.waitForNonExistence(timeout: 5))
+        XCTAssertEqual(title.value as? String, "Draft title retained during Move")
+        first.typeKey("s", modifierFlags: .command)
+        let saved = XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == false"), object: first.buttons["editor.save"])
+        XCTAssertEqual(XCTWaiter.wait(for: [saved], timeout: 5), .completed)
+        showBoard(app)
+        let done = board(in: app).descendants(matching: .any).matching(identifier: "board.column.done").firstMatch
+        XCTAssertTrue(done.buttons["board.card.\(homepage)"].exists)
+        assertLabel(done.buttons["board.card.\(homepage)"], contains: "Draft title retained during Move")
+        focus(homepage, in: app, windowTitle: "Draft title retained during Move")
+        first.buttons[XCUIIdentifierCloseWindow].click()
+        showBoard(app)
+        board(in: app).buttons["board.card.\(homepage)"].click()
+        XCTAssertEqual(viewer(homepage, in: app).textFields["editor.title"].value as? String, "Draft title retained during Move")
+        app.terminate()
+    }
+
     func testBoardOpensTwoUniqueViewersAndEachClosesIndependently() throws {
         let app = launch()
         let board = board(in: app)
@@ -551,14 +584,13 @@ final class NativeWindowWorkflowTests: XCTestCase {
             let app = flow.app
             focus(homepage, in: app)
             let first = viewer(homepage, in: app)
-            let column = first.popUpButtons["editor.column"]
+            XCTAssertFalse(first.popUpButtons["editor.column"].exists, "Existing Card placement uses the separate Move action.")
             let actor = first.popUpButtons["editor.next-actor"]
             let priority = first.popUpButtons["editor.priority"]
-            for popup in [column, actor, priority] {
+            for popup in [actor, priority] {
                 XCTAssertTrue(popup.waitForExistence(timeout: 5))
                 XCTAssertTrue(popup.isEnabled)
             }
-            XCTAssertEqual(column.value as? String, "Doing")
             XCTAssertEqual(actor.value as? String, "You")
             XCTAssertEqual(priority.value as? String, "High")
 
@@ -581,7 +613,6 @@ final class NativeWindowWorkflowTests: XCTestCase {
             }
 
             try flow.startCardReading()
-            try selectCardPopup("Column", popup: column, oldValue: "Doing", newValue: "Done")
             try selectCardPopup("Next actor", popup: actor, oldValue: "You", newValue: "Agent")
             try selectCardPopup("Priority", popup: priority, oldValue: "High", newValue: "Low")
             assertEnabled(first.buttons["editor.save"])
@@ -596,16 +627,16 @@ final class NativeWindowWorkflowTests: XCTestCase {
             first.typeKey("s", modifierFlags: .command)
             assertLabel(boardCard, contains: "Agent")
             assertLabel(boardCard, contains: "Low priority")
-            let doneColumn = board.descendants(matching: .any).matching(identifier: "board.column.done").firstMatch
-            XCTAssertTrue(doneColumn.buttons["board.card.\(homepage)"].exists,
-                          "Saving the Column selection must move the shared Card into Done.")
+            let doingColumn = board.descendants(matching: .any).matching(identifier: "board.column.doing").firstMatch
+            XCTAssertTrue(doingColumn.buttons["board.card.\(homepage)"].exists,
+                          "Saving Card fields must preserve the saved placement.")
             first.buttons[XCUIIdentifierCloseWindow].click()
             XCTAssertTrue(first.waitForNonExistence(timeout: 5))
             showBoard(app)
             board.buttons["board.card.\(homepage)"].click()
             let reopened = viewer(homepage, in: app)
             XCTAssertTrue(reopened.waitForExistence(timeout: 5))
-            XCTAssertEqual(reopened.popUpButtons["editor.column"].value as? String, "Done")
+            XCTAssertFalse(reopened.popUpButtons["editor.column"].exists)
             XCTAssertEqual(reopened.popUpButtons["editor.next-actor"].value as? String, "Agent")
             XCTAssertEqual(reopened.popUpButtons["editor.priority"].value as? String, "Low")
             XCTAssertEqual(viewer(signup, in: app).popUpButtons["editor.priority"].value as? String, "Medium",
@@ -1253,8 +1284,8 @@ final class NativeWindowWorkflowTests: XCTestCase {
         XCTAssertTrue(board(in: app).waitForExistence(timeout: 5))
     }
 
-    private func focus(_ cardID: String, in app: XCUIApplication) {
-        let title = cardID == homepage ? "Review homepage hierarchy" : "Simplify the signup introduction"
+    private func focus(_ cardID: String, in app: XCUIApplication, windowTitle: String? = nil) {
+        let title = windowTitle ?? (cardID == homepage ? "Review homepage hierarchy" : "Simplify the signup introduction")
         let menu = app.menuBars.menuBarItems["Window"]
         XCTAssertTrue(menu.waitForExistence(timeout: 5))
         menu.click()

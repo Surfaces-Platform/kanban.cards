@@ -5,7 +5,7 @@ struct APIError: LocalizedError, Sendable {
     var statusCode: Int? = nil
     var isAmbiguousMutation = false
     var sessionGeneration: UUID? = nil
-    var isConflict: Bool { statusCode == 409 }
+    var isConflict: Bool { statusCode == 409 || statusCode == 412 }
     var isUnauthorized: Bool { statusCode == 401 }
     var errorDescription: String? { message }
 }
@@ -224,6 +224,14 @@ final class KanbanAPIClient {
         return result.card
     }
 
+    func moveCard(_ card: Card, to columnID: String, position: Double? = nil, projectID: String, in workspace: Workspace) async throws -> Card {
+        struct MoveBody: Encodable { var columnId: String; var position: Double? }
+        let result: CardResult = try await request(origin: workspaceOrigin(workspace),
+            path: ["projects", projectID, "cards", card.id], method: "PATCH",
+            body: encode(MoveBody(columnId: columnID, position: position)), version: card.version)
+        return result.card
+    }
+
     func archiveCard(card: Card, archived: Bool, projectID: String, in workspace: Workspace) async throws -> Card {
         let result: CardResult = try await request(origin: workspaceOrigin(workspace),
             path: ["projects", projectID, "cards", card.id], method: "PATCH",
@@ -306,7 +314,7 @@ final class KanbanAPIClient {
             }
             let serverMessage = (try? JSONDecoder().decode(ServerFailure.self, from: data))?.error
             throw APIError(message: serverMessage ?? "The request could not be completed. Try again.",
-                statusCode: http.statusCode, isAmbiguousMutation: mutation && http.statusCode >= 500, sessionGeneration: sessionGeneration)
+                statusCode: http.statusCode, isAmbiguousMutation: mutation && (http.statusCode == 408 || http.statusCode >= 500), sessionGeneration: sessionGeneration)
         }
         do { return try JSONDecoder().decode(Result.self, from: data) }
         catch {
@@ -379,8 +387,8 @@ private struct CardWriteBody: Encodable {
         try container.encode(draft.nextAction, forKey: .nextAction)
         try container.encode(draft.priority, forKey: .priority)
         try container.encode(draft.blockedReason, forKey: .blockedReason)
-        try container.encode(draft.columnId, forKey: .columnId)
         if creation {
+            try container.encode(draft.columnId, forKey: .columnId)
             try container.encode(draft.position, forKey: .position)
             try container.encodeIfPresent(draft.externalKey, forKey: .externalKey)
         }

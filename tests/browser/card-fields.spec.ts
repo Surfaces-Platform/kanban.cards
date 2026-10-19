@@ -90,11 +90,13 @@ test("creates, edits, moves, archives, restores, and clears all optional Card fi
   await page.screenshot({ path: "output/playwright/card-fields/desktop-selected-fields.png", fullPage: true });
 
   await inspector.getByLabel("Next actor", { exact: true }).selectOption("human");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
   await expect.poll(async () => (await storedCard(created.id)).nextActor).toBe("human");
   await inspector.getByLabel("Next action", { exact: true }).fill("Review the change");
-  await inspector.getByLabel("Next action", { exact: true }).blur();
+  await page.getByRole("button", { name: "Save", exact: true }).click();
   await expect.poll(async () => (await storedCard(created.id)).nextAction).toBe("Review the change");
   await inspector.getByLabel("Priority", { exact: true }).selectOption("High");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
   await expect.poll(async () => (await storedCard(created.id)).priority).toBe("High");
   const edited = { ...initial, nextActor: "human", nextAction: "Review the change", priority: "High" };
 
@@ -109,12 +111,14 @@ test("creates, edits, moves, archives, restores, and clears all optional Card fi
   await openCard(page, created.title);
 
   await inspector.getByLabel("Next actor", { exact: true }).selectOption("");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
   await expect.poll(async () => (await storedCard(created.id)).nextActor).toBeNull();
   await inspector.getByLabel("Priority", { exact: true }).selectOption("");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
   await expect.poll(async () => (await storedCard(created.id)).priority).toBeNull();
   await inspector.getByLabel("Next action", { exact: true }).fill("");
   await inspector.getByLabel("Blocker", { exact: true }).fill("");
-  await inspector.getByLabel("Blocker", { exact: true }).blur();
+  await page.getByRole("button", { name: "Save", exact: true }).click();
   await expect.poll(async () => (await storedCard(created.id)).blockedReason).toBe("");
   expect(await storedCard(created.id)).toMatchObject({ nextActor: null, nextAction: "", priority: null, blockedReason: "" });
   await page.reload();
@@ -160,6 +164,7 @@ test("a selected Card and failed-save draft survive leaving the active filters",
   await openCard(page, cards[0].title);
   const inspector = page.getByRole("complementary");
   await inspector.getByLabel("Next actor", { exact: true }).selectOption("agent");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
   await expect.poll(async () => (await storedCard(cards[0].id)).nextActor).toBe("agent");
   await expect(cardButton(page, cards[0].title)).toHaveCount(0);
   await expect(inspector).toBeVisible();
@@ -169,8 +174,8 @@ test("a selected Card and failed-save draft survive leaving the active filters",
     else await route.continue();
   });
   await inspector.getByLabel("Next action", { exact: true }).fill("Retained hidden draft");
-  await inspector.getByLabel("Next action", { exact: true }).blur();
-  await expect(page.getByText("Changes not saved", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.getByText("Card was not saved", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Close Card and return to Next" }).click();
   await expect(page.locator("#column-next")).toBeFocused();
   await page.getByRole("button", { name: "Clear filters", exact: true }).click();
@@ -180,73 +185,36 @@ test("a selected Card and failed-save draft survive leaving the active filters",
   await expect(inspector.getByLabel("Next actor", { exact: true })).toHaveValue("agent");
   await page.unroute(`**/api/projects/${project.id}/cards/${cards[0].id}`);
   await inspector.getByLabel("Next action", { exact: true }).focus();
-  await inspector.getByLabel("Next action", { exact: true }).blur();
+  await page.getByRole("button", { name: "Save", exact: true }).click();
   await expect.poll(async () => (await storedCard(cards[0].id)).nextAction).toBe("Retained hidden draft");
 });
 
-test("filter changes during a pending autosave preserve the selected draft and later edits", async ({ page }) => {
-  await page.setViewportSize({ width: 1440, height: 1000 });
-  await login(page);
-  await openCard(page, cards[0].title);
-  let releaseFirst!: () => void;
-  let markFirstStarted!: () => void;
-  const firstStarted = new Promise<void>((resolve) => { markFirstStarted = resolve; });
-  const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
-  const actions: string[] = [];
-  let firstHeld = false;
-  await page.route(`**/api/projects/${project.id}/cards/${cards[0].id}`, async (route) => {
-    if (route.request().method() === "PATCH") {
-      actions.push(route.request().postDataJSON().nextAction);
-      if (!firstHeld) {
-        firstHeld = true;
-        markFirstStarted();
-        await firstGate;
-      }
-    }
-    await route.continue();
+test("explicit Save locks conflicting actions while preserving the selected draft", async ({ page }) => {
+  await login(page); await openCard(page, cards[0].title);
+  let release!: () => void; let started!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; }); const reached = new Promise<void>(resolve => { started = resolve; });
+  let count = 0;
+  await page.route(`**/api/projects/${project.id}/cards/${cards[0].id}`, async route => {
+    if (route.request().method() === "PATCH") { count++; started(); await gate; } await route.continue();
   });
-  const inspector = page.getByRole("complementary");
-  try {
-    await inspector.getByLabel("Next action", { exact: true }).fill("First pending action");
-    await inspector.getByLabel("Next action", { exact: true }).blur();
-    await firstStarted;
-    await page.getByLabel("Filter by priority", { exact: true }).selectOption("Low");
-    await expect(cardButton(page, cards[0].title)).toHaveCount(0);
-    await expect(inspector.getByLabel("Next action", { exact: true })).toHaveValue("First pending action");
-    await expect(page.getByLabel("Filter by priority", { exact: true })).toBeFocused();
-    await inspector.getByLabel("Next action", { exact: true }).fill("Second action while pending");
-    await inspector.getByLabel("Next action", { exact: true }).blur();
-    await page.getByLabel("Filter by priority", { exact: true }).focus();
-  } finally {
-    releaseFirst();
-  }
-  await expect.poll(async () => (await storedCard(cards[0].id)).nextAction).toBe("Second action while pending");
-  await expect(inspector.getByLabel("Next action", { exact: true })).toHaveValue("Second action while pending");
-  await expect(page.getByLabel("Filter by priority", { exact: true })).toBeFocused();
-  await expect(page.locator(".card-filter-count")).toHaveText("Showing 1 of 4 Cards");
-  expect(actions).toEqual(["First pending action", "Second action while pending"]);
-  expect(await storedCard(cards[0].id)).toMatchObject({ nextActor: "human", priority: "High", blockedReason: "Waiting for feedback" });
+  await page.getByLabel("Next action", { exact: true }).fill("Explicit saved action");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  try { await reached; await expect(page.getByLabel("Filter by priority", { exact: true })).toBeDisabled(); await expect(page.getByLabel("Next action", { exact: true })).toHaveValue("Explicit saved action"); }
+  finally { release(); }
+  await expect(page.getByText("Card updated", { exact: true })).toBeVisible(); expect(count).toBe(1); expect((await storedCard(cards[0].id)).nextAction).toBe("Explicit saved action");
 });
 
-test("stale recovery compares and retries every handoff field explicitly", async ({ page }) => {
-  await login(page);
-  await openCard(page, cards[0].title);
+test("stale recovery adopts untouched handoff fields and explicitly chooses a conflicting next action", async ({ page }) => {
+  await login(page); await openCard(page, cards[0].title);
+  await page.getByLabel("Next action", { exact: true }).fill("Draft action");
   await updateSeededCard(harness, project.id, cards[0].id, cards[0].version, { nextActor: "agent", nextAction: "Stored action", priority: "Medium", blockedReason: "Stored blocker" });
-  const inspector = page.getByRole("complementary");
-  await inspector.getByLabel("Next action", { exact: true }).fill("Draft action");
-  await inspector.getByLabel("Next action", { exact: true }).blur();
-  await expect(page.getByRole("heading", { name: "The stored Card changed", exact: true })).toBeVisible();
-  await expect(page.locator(".stored-change")).toContainText("Stored action");
-  await expect(page.locator(".stored-change")).toContainText("Stored blocker");
-  await inspector.getByLabel("Next actor", { exact: true }).selectOption("human");
-  await inspector.getByLabel("Priority", { exact: true }).selectOption("Low");
-  await inspector.getByLabel("Blocker", { exact: true }).fill("Draft blocker");
-  await page.getByRole("button", { name: "Retry with draft", exact: true }).click();
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.locator(".stale-review")).toContainText("Stored action");
+  await expectFields(page, { nextActor: "agent", nextAction: "Draft action", priority: "Medium", blockedReason: "Stored blocker" });
+  await page.getByRole("button", { name: "Keep draft", exact: true }).click();
+  await page.getByRole("button", { name: "Save", exact: true }).click();
   await expect(page.getByText("Card updated", { exact: true })).toBeVisible();
-  expect(await storedCard(cards[0].id)).toMatchObject({ nextActor: "human", nextAction: "Draft action", priority: "Low", blockedReason: "Draft blocker" });
-  await page.reload();
-  await openCard(page, cards[0].title);
-  await expectFields(page, { nextActor: "human", nextAction: "Draft action", priority: "Low", blockedReason: "Draft blocker" });
+  expect(await storedCard(cards[0].id)).toMatchObject({ nextActor: "agent", nextAction: "Draft action", priority: "Medium", blockedReason: "Stored blocker" });
 });
 
 test("stale Discard replaces every handoff field with the newer stored values without writing", async ({ page }) => {
@@ -259,16 +227,17 @@ test("stale Discard replaces every handoff field with the newer stored values wi
     if (request.method() === "PATCH" && request.url().endsWith(`/cards/${cards[0].id}`)) patchCount++;
   });
   await inspector.getByLabel("Next action", { exact: true }).fill("Discard this action");
-  await inspector.getByLabel("Next action", { exact: true }).blur();
+  await page.getByRole("button", { name: "Save", exact: true }).click();
   await expect(page.getByRole("heading", { name: "The stored Card changed", exact: true })).toBeVisible();
   await inspector.getByLabel("Next actor", { exact: true }).selectOption("");
   await inspector.getByLabel("Priority", { exact: true }).selectOption("Low");
   await inspector.getByLabel("Blocker", { exact: true }).fill("Discard this blocker");
-  await page.getByRole("button", { name: "Discard draft", exact: true }).click();
+  page.once("dialog", dialog => dialog.accept());
+  await page.getByRole("button", { name: "Revert draft", exact: true }).click();
   await expectFields(page, { nextActor: "agent", nextAction: "Stored replacement action", priority: "Medium", blockedReason: "Stored replacement blocker" });
   await expect(inspector.getByLabel("Title", { exact: true })).toBeFocused();
   expect(await storedCard(cards[0].id)).toEqual(stored);
-  expect(patchCount).toBe(1);
+  expect(patchCount).toBe(0);
   await page.getByRole("button", { name: "Close Card and return to Next" }).click();
   await expect(cardButton(page, cards[0].title)).not.toContainText("Draft retained");
   await openCard(page, cards[0].title);
@@ -292,6 +261,7 @@ test("320px filters and long field content wrap, with a visible focus return whe
   await page.getByRole("complementary").getByLabel("Next actor", { exact: true }).scrollIntoViewIfNeeded();
   await page.screenshot({ path: "output/playwright/card-fields/mobile-selected-fields.png", fullPage: true });
   await page.getByRole("complementary").getByLabel("Priority", { exact: true }).selectOption("Low");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
   await expect.poll(async () => (await storedCard(cards[0].id)).priority).toBe("Low");
   await page.getByRole("button", { name: "Close Card and return to Next" }).click();
   await expect(page.locator("#column-next")).toBeFocused();

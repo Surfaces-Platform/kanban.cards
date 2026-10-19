@@ -22,11 +22,20 @@ struct RetainedCardEditingDraft: Codable, Equatable, Identifiable {
     var pending: PendingCardDraft
 }
 
+struct MacPendingCardMove: Codable, Equatable {
+    var card: Card
+    var columnID: String
+    var position: Double
+    var confirmedCard: Card? = nil
+}
+
 struct SharedCardDraftRecord: Codable, Equatable {
     var pending: PendingCardDraft
     var savedCard: Card
     var alternatives: [RetainedCardEditingDraft]
     var legacyImported: Bool
+    var conflicts: Set<CardDraftField>? = nil
+    var pendingMove: MacPendingCardMove? = nil
 }
 
 /// One editor state machine is shared by every surface showing the same Card.
@@ -54,6 +63,9 @@ final class SharedCardEditingSession {
     private(set) var persistenceFailed = false
     private(set) var recoveredDraft = false
     private(set) var receiptPersisted = false
+    private(set) var pendingMove: MacPendingCardMove?
+    private(set) var moveReceiptPersisted = false
+    private(set) var conflicts: Set<CardDraftField> = []
     private(set) var latest: Card?
     var errorMessage: String?
     private(set) var persistenceError: String?
@@ -102,33 +114,35 @@ final class SharedCardEditingSession {
     }
     var isDirty: Bool {
         guard let savedCard else { return false }
-        return CardDraftComparison.differingFields(pending.draft, from: savedCard) != ["None"]
+        return CardDraftField.allCases.contains { !pending.draft.matches(CardDraft(card: savedCard), field: $0) }
     }
     var interactionLocked: Bool {
         saving || reviewingConflict || persistenceFailed || (pending.confirmed != nil && !receiptPersisted)
     }
     var editingDisabled: Bool {
         !sessionIsCurrent || saving || reviewingConflict || draftLoadFailed || isReadOnly
-            || pending.submitted != nil || pending.confirmed != nil
+            || pending.submitted != nil || pending.confirmed != nil || pendingMove != nil
     }
     var canSave: Bool {
         sessionIsCurrent && !saving && !reviewingConflict && !draftLoadFailed
-            && (pending.confirmed != nil || (!isReadOnly && alternatives.isEmpty
-                && pending.requiresConflictReview != true && (isDirty || pending.submitted != nil)
+            && (pendingMove != nil || pending.confirmed != nil || pending.submitted != nil || (!isReadOnly && alternatives.isEmpty
+                && conflicts.isEmpty && pending.requiresConflictReview != true && (isDirty || pending.submitted != nil)
                 && !pending.draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 && columns.contains { $0.id == pending.draft.columnId }))
     }
     var canRevert: Bool {
-        sessionIsCurrent && !saving && !reviewingConflict
+        sessionIsCurrent && !saving && !reviewingConflict && pending.submitted == nil && pendingMove == nil
             && (isDirty || pending.submitted != nil || pending.confirmed != nil || !alternatives.isEmpty || draftLoadFailed)
     }
     var confirmationLabel: String {
-        if saving { return pending.confirmed == nil ? "Saving…" : "Finishing…" }
+        if saving { return "Saving…" }
+        if let pendingMove { return pendingMove.confirmedCard == nil ? "Check Saved Destination" : "Retry Move Cleanup" }
         if pending.confirmed != nil { return "Retry Cleanup" }
-        return pending.submitted == nil ? "Save" : "Retry Save"
+        return pending.submitted == nil ? "Save" : "Check Saved Card"
     }
     var recoveryText: String {
-        "Title: \(pending.draft.title)\nColumn: \(pending.draft.columnId)\nNext actor: \(pending.draft.nextActor?.label ?? "Unassigned")\nPriority: \(pending.draft.priority?.rawValue ?? "Unset")\nNext action: \(pending.draft.nextAction)\nBlocker: \(pending.draft.blockedReason)\n\n\(pending.draft.body)"
+        let move = pendingMove.map { "Retained Move: Column \($0.columnID), position \($0.position), source version \($0.card.version), \($0.confirmedCard == nil ? "outcome unconfirmed" : "confirmed; cleanup pending")\n\n" } ?? ""
+        return move + "Title: \(pending.draft.title)\nColumn: \(pending.draft.columnId)\nNext actor: \(pending.draft.nextActor?.label ?? "Unassigned")\nPriority: \(pending.draft.priority?.rawValue ?? "Unset")\nNext action: \(pending.draft.nextAction)\nBlocker: \(pending.draft.blockedReason)\n\n\(pending.draft.body)"
     }
 
     func load() {
@@ -140,24 +154,27 @@ final class SharedCardEditingSession {
                 pending = record.pending
                 savedCard = record.savedCard
                 alternatives = record.alternatives
-                recoveredDraft = isDirty || pending.submitted != nil || pending.confirmed != nil || !alternatives.isEmpty
+                conflicts = record.conflicts ?? []
+                pendingMove = record.pendingMove
+                recoveredDraft = isDirty || pending.submitted != nil || pending.confirmed != nil || pendingMove != nil || !alternatives.isEmpty
             } else {
                 var retained: [RetainedCardEditingDraft] = []
                 for item in legacyResourceKeys {
-                    if let draft = try model.drafts.load(ownerID: ownerID, resourceKey: item.key, as: PendingCardDraft.self),
+                    if try model.drafts.legacyMayBeAssociated(ownerID: ownerID, legacyKey: item.key, destination: resourceKey),
+                       let draft = try model.drafts.load(ownerID: ownerID, resourceKey: item.key, as: PendingCardDraft.self),
                        !retained.contains(where: { $0.pending == draft }) {
                         retained.append(RetainedCardEditingDraft(id: item.key, label: item.label, pending: draft))
                     }
                 }
-                if let first = retained.first {
-                    pending = first.pending
-                    alternatives = Array(retained.dropFirst())
-                    recoveredDraft = true
-                }
+                // Old keys lack the Workspace origin. Show candidates, but never
+                // silently associate private bytes with the currently open server.
+                alternatives = retained
+                recoveredDraft = !retained.isEmpty
             }
             loaded = true
             draftLoadFailed = false
             receiptPersisted = pending.confirmed != nil && !model.drafts.hasRecovery(ownerID: ownerID, resourceKey: resourceKey)
+            moveReceiptPersisted = pendingMove?.confirmedCard != nil && !model.drafts.hasRecovery(ownerID: ownerID, resourceKey: resourceKey)
             synchronizeIfClean()
         } catch {
             loaded = true
@@ -174,49 +191,204 @@ final class SharedCardEditingSession {
     }
 
     func synchronizeIfClean() {
-        guard loaded, sessionIsCurrent, !isDirty, pending.submitted == nil,
-              pending.confirmed == nil, alternatives.isEmpty, !draftLoadFailed,
-              let current = currentCard, current != savedCard else { return }
+        guard loaded, sessionIsCurrent, pending.submitted == nil, pending.confirmed == nil,
+              !draftLoadFailed, let base = savedCard, let current = currentCard,
+              current != base else { return }
+        reconcile(with: current)
+    }
+
+    /// Refresh, Comment and Move all enter the same three-way reconciliation.
+    /// The original baseline advances only after every field has been compared.
+    func reconcile(with current: Card) {
+        guard sessionIsCurrent, let base = savedCard, pending.submitted == nil,
+              pending.confirmed == nil else { return }
+        let result = pending.draft.reconcile(base: base, latest: current)
+        let currentDraft = CardDraft(card: current)
+        let unresolved = conflicts.filter { !result.draft.matches(currentDraft, field: $0) }
         suppressPersistence = true
+        pending.draft = result.draft
+        conflicts = result.conflicts.union(unresolved)
+        pending.requiresConflictReview = !conflicts.isEmpty
         savedCard = current
-        pending = PendingCardDraft(draft: CardDraft(card: current), key: UUID().uuidString)
+        latest = conflicts.isEmpty ? nil : current
         suppressPersistence = false
+        persist()
+    }
+
+    func resolve(_ field: CardDraftField, useSaved: Bool) {
+        guard sessionIsCurrent, !saving, let savedCard, conflicts.contains(field) else { return }
+        // A legacy destination is a proposal for Move. Text Save cannot enact it.
+        guard useSaved || field != .placement else { return }
+        suppressPersistence = true
+        if useSaved { pending.draft.adopt(CardDraft(card: savedCard), field: field) }
+        conflicts.remove(field)
+        pending.requiresConflictReview = !conflicts.isEmpty
+        pending.key = UUID().uuidString
+        latest = conflicts.isEmpty ? nil : savedCard
+        suppressPersistence = false
+        persist()
+    }
+
+    func moveToProposedColumn() async {
+        guard conflicts.contains(.placement) else { return }
+        do { _ = try await move(to: pending.draft.columnId) }
+        catch { if sessionIsCurrent { errorMessage = error.localizedDescription } }
+    }
+
+    /// Text Save and Move have separate durable snapshots. Neither can consume
+    /// the other's unknown request or turn a readback into a mutation receipt.
+    func move(to columnID: String, refreshBeforeMove: Bool = true, onRefreshFailure: ((String) -> Void)? = nil) async throws -> Card {
+        guard sessionIsCurrent, !saving, let model else { throw CancellationError() }
+        saving = true
+        defer { saving = false }
+        if pending.confirmed != nil {
+            finishConfirmedDraft()
+            throw APIError(message: "Finish the earlier Card save before starting a separate Move.")
+        }
+        if pending.submitted != nil {
+            await reconcileUnknownUpdate()
+            throw APIError(message: "The earlier Card save was read back. Review it before starting a separate Move.")
+        }
+        if let move = pendingMove {
+            if let confirmed = move.confirmedCard { finishConfirmedMove(); return confirmed }
+            return try await reconcileUnknownMove()
+        }
+        // The wrapper may have just read an initially unopened Project. Reuse
+        // that fresh read; all other Move entry points perform their own refresh.
+        if refreshBeforeMove { try await model.loadProject(id: projectID, in: workspace) }
+        guard sessionIsCurrent else { throw CancellationError() }
+        guard let project = model.project(id: projectID, in: workspace) else { throw AppFailure.missingProject }
+        guard project.archivedAt == nil else { throw AppFailure.readOnlyProject }
+        guard let card = currentCard else { throw AppFailure.missingCard }
+        guard card.archivedAt == nil else { throw AppFailure.readOnlyCard }
+        guard project.columns.contains(where: { $0.id == columnID }) else { throw AppFailure.missingColumn }
+        guard !isReadOnly else { throw AppFailure.readOnlyCard }
+        if card.columnId == columnID { savedMessage = "The Card is already in the selected Column."; return card }
+        let position = (project.cards.filter { $0.columnId == columnID && $0.id != cardID }.map(\.position).max() ?? -1) + 1
+        pendingMove = MacPendingCardMove(card: card, columnID: columnID, position: position)
+        persist()
+        guard !persistenceFailed else {
+            pendingMove = nil; persist()
+            throw APIError(message: "This Mac could not protect the Move request. No Move was sent.")
+        }
+        do {
+            let moved = try await model.performCardMove(card, to: columnID, position: position, projectID: projectID, in: workspace,
+                onConfirmed: { [weak self] moved in
+                    guard let self, self.sessionIsCurrent else { return }
+                    self.pendingMove?.confirmedCard = moved
+                    if self.conflicts.contains(.placement), self.pending.draft.columnId == columnID {
+                        self.suppressPersistence = true
+                        self.pending.draft.adopt(CardDraft(card: moved), field: .placement)
+                        self.conflicts.remove(.placement)
+                        self.suppressPersistence = false
+                    }
+                    self.reconcile(with: moved)
+                    self.persist()
+                }, onRefreshFailure: { [weak self] message in
+                    guard let self, self.sessionIsCurrent else { return }
+                    self.refreshError = message; onRefreshFailure?(message)
+                })
+            guard sessionIsCurrent else { throw CancellationError() }
+            finishConfirmedMove()
+            return moved
+        } catch {
+            guard sessionIsCurrent else { throw error }
+            if pendingMove?.confirmedCard != nil { finishConfirmedMove() }
+            else if let apiError = error as? APIError, let status = apiError.statusCode,
+                    status < 500, !apiError.isAmbiguousMutation { pendingMove = nil; persist() }
+            if (error as? APIError)?.isUnauthorized == true { model.handle(error) }
+            throw error
+        }
+    }
+
+    private func reconcileUnknownMove() async throws -> Card {
+        guard sessionIsCurrent, let model, let move = pendingMove else { throw CancellationError() }
+        try await model.loadProject(id: projectID, in: workspace)
+        guard sessionIsCurrent, let current = currentCard else {
+            throw APIError(message: "This Card is unavailable. The original Move destination and version remain retained.")
+        }
+        // Persist the readback transition before allowing another operation.
+        let record = SharedCardDraftRecord(pending: pending, savedCard: savedCard ?? current,
+            alternatives: alternatives, legacyImported: true, conflicts: conflicts, pendingMove: nil)
+        do { try model.drafts.save(record, ownerID: ownerID, resourceKey: resourceKey) }
+        catch { persistenceFailed = true; throw error }
+        pendingMove = nil; moveReceiptPersisted = false
+        reconcile(with: current)
+        savedMessage = current.columnId == move.columnID && current.position == move.position
+            ? "The requested destination is currently saved. Readback does not identify which request moved it."
+            : "The original destination is not current. Review the saved Column, then choose a separate Move if still intended."
+        return current
+    }
+
+    private func finishConfirmedMove() {
+        guard sessionIsCurrent, let model, let moved = pendingMove?.confirmedCard else { return }
+        if !moveReceiptPersisted { persist() }
+        guard moveReceiptPersisted else { return }
+        let record = SharedCardDraftRecord(pending: pending, savedCard: savedCard ?? moved,
+            alternatives: alternatives, legacyImported: true, conflicts: conflicts, pendingMove: nil)
+        do {
+            try model.drafts.save(record, ownerID: ownerID, resourceKey: resourceKey)
+            pendingMove = nil; moveReceiptPersisted = false; persistenceFailed = false; persistenceError = nil
+            savedMessage = "Card moved. Local text has not been saved."
+        } catch {
+            persistenceFailed = true
+            persistenceError = "Card moved. Local cleanup failed. Retry cleanup without moving again. \(error.localizedDescription)"
+        }
     }
 
     func persist() {
         guard loaded, sessionIsCurrent, !draftLoadFailed, let model, let savedCard else { return }
         do {
             let record = SharedCardDraftRecord(pending: pending, savedCard: savedCard,
-                alternatives: alternatives, legacyImported: true)
+                alternatives: alternatives, legacyImported: true, conflicts: conflicts, pendingMove: pendingMove)
             try model.drafts.save(record, ownerID: ownerID, resourceKey: resourceKey)
             persistenceFailed = false
             persistenceError = nil
             receiptPersisted = pending.confirmed != nil
+            moveReceiptPersisted = pendingMove?.confirmedCard != nil
         } catch {
             persistenceFailed = true
-            persistenceError = pending.confirmed != nil
+            persistenceError = pendingMove?.confirmedCard != nil
+                ? "Card moved. The completion receipt could not be protected. Retry cleanup without moving again. \(error.localizedDescription)"
+                : pending.confirmed != nil
                 ? "Card saved. This Mac could not record completion. Retry cleanup. \(error.localizedDescription)"
                 : "This Mac could not write the draft to disk. Your text is retained in this app for your account. Copy or export it before quitting. \(error.localizedDescription)"
         }
     }
 
     func useAlternative(id: String) {
-        guard sessionIsCurrent, !saving, !reviewingConflict,
+        guard sessionIsCurrent, !saving, !reviewingConflict, pending.submitted == nil, pending.confirmed == nil, pendingMove == nil,
               let index = alternatives.firstIndex(where: { $0.id == id }) else { return }
         let selected = alternatives[index]
+        do {
+            try model?.drafts.associateLegacy(ownerID: ownerID, legacyKey: selected.id, destination: resourceKey)
+        } catch { errorMessage = "The recovered draft could not be associated. Its original copy is retained. \(error.localizedDescription)"; return }
         alternatives[index] = RetainedCardEditingDraft(id: UUID().uuidString, label: "Other retained draft", pending: pending)
         suppressPersistence = true
         pending = selected.pending
         latest = nil
         savedMessage = nil
         suppressPersistence = false
+        if let current = currentCard, pending.submitted == nil, pending.confirmed == nil {
+            savedCard = current
+            conflicts = Set(CardDraftField.allCases.filter { !pending.draft.matches(CardDraft(card: current), field: $0) })
+            pending.draft.version = current.version
+            pending.draft.archivedAt = current.archivedAt
+            pending.draft.externalKey = current.externalKey
+            pending.requiresConflictReview = !conflicts.isEmpty
+            latest = conflicts.isEmpty ? nil : current
+        }
         persist()
     }
 
     func keepCurrentDraftRemovingAlternatives() {
-        guard sessionIsCurrent, !saving, let model, let savedCard else { return }
+        guard sessionIsCurrent, !saving, let model, let savedCard,
+              alternatives.allSatisfy({ $0.pending.submitted == nil && $0.pending.confirmed == nil }) else {
+            errorMessage = "Resolve the unconfirmed retained request before removing its draft."
+            return
+        }
         let record = SharedCardDraftRecord(pending: pending, savedCard: savedCard,
-            alternatives: [], legacyImported: true)
+            alternatives: [], legacyImported: true, conflicts: conflicts, pendingMove: pendingMove)
         do {
             try model.drafts.save(record, ownerID: ownerID, resourceKey: resourceKey)
             alternatives = []
@@ -230,19 +402,9 @@ final class SharedCardEditingSession {
     }
 
     func keepDraftForNextSave() {
-        guard sessionIsCurrent, !isReadOnly, !saving, let latest else { return }
-        suppressPersistence = true
-        pending.draft.version = latest.version
-        pending.draft.archivedAt = latest.archivedAt
-        pending.draft.externalKey = latest.externalKey
-        if pending.draft.columnId == latest.columnId { pending.draft.position = latest.position }
-        pending.submitted = nil
-        pending.key = UUID().uuidString
-        pending.requiresConflictReview = false
-        savedCard = latest
-        self.latest = nil
-        suppressPersistence = false
-        persist()
+        // Compatibility for existing callers: choose each text field explicitly.
+        // Placement deliberately remains unresolved until a separate Move.
+        for field in Array(conflicts) where field != .placement { resolve(field, useSaved: false) }
     }
 
     func reviewConflict() async {
@@ -252,8 +414,9 @@ final class SharedCardEditingSession {
         do {
             try await model.loadProject(id: projectID, in: workspace)
             guard sessionIsCurrent else { return }
-            latest = currentCard
-            if latest == nil { errorMessage = "This Card is no longer available. Your local draft is retained." }
+            if let current = currentCard { reconcile(with: current) }
+            latest = conflicts.isEmpty ? nil : currentCard
+            if currentCard == nil { errorMessage = "This Card is no longer available. Your local draft is retained." }
         } catch {
             guard sessionIsCurrent else { return }
             if (error as? APIError)?.isUnauthorized == true { model.handle(error) }
@@ -280,17 +443,24 @@ final class SharedCardEditingSession {
         savedMessage = nil
         errorMessage = nil
         defer { saving = false }
-        if pending.confirmed != nil { finishConfirmedDraft(); return }
-        let retryingUncertainRequest = pending.submitted != nil
-        if pending.submitted == nil {
-            if let project = model.project(id: projectID, in: workspace),
-               currentCard?.columnId != pending.draft.columnId {
-                pending.draft.position = (project.cards.filter {
-                    $0.columnId == pending.draft.columnId && $0.id != cardID
-                }.map(\.position).max() ?? -1) + 1
-            }
-            pending.submitted = pending.draft
+        if pendingMove != nil {
+            do {
+                if pendingMove?.confirmedCard != nil { finishConfirmedMove() }
+                else { _ = try await reconcileUnknownMove() }
+            } catch { if sessionIsCurrent { errorMessage = error.localizedDescription } }
+            return
         }
+        if pending.confirmed != nil { finishConfirmedDraft(); return }
+        if pending.submitted != nil {
+            await reconcileUnknownUpdate()
+            return
+        }
+        let retryingUncertainRequest = false
+        if let savedCard {
+            // Placement is sent exclusively by the destination-only Move path.
+            pending.draft.adopt(CardDraft(card: savedCard), field: .placement)
+        }
+        pending.submitted = pending.draft
         persist()
         guard !persistenceFailed else {
             if !retryingUncertainRequest { pending.submitted = nil; persist() }
@@ -343,6 +513,40 @@ final class SharedCardEditingSession {
         finishConfirmedDraft()
     }
 
+    private func reconcileUnknownUpdate() async {
+        guard sessionIsCurrent, let model, let submitted = pending.submitted else { return }
+        do {
+            try await model.loadProject(id: projectID, in: workspace)
+            guard sessionIsCurrent, let current = currentCard else {
+                errorMessage = "This Card is unavailable. The submitted snapshot and draft are retained."
+                return
+            }
+            suppressPersistence = true
+            pending.submitted = nil
+            pending.key = UUID().uuidString
+            suppressPersistence = false
+            if submitted.matchesEditableFields(of: CardDraft(card: current)) {
+                // Matching current values cannot attribute a lost PATCH response.
+                suppressPersistence = true
+                pending.draft = CardDraft(card: current)
+                savedCard = current
+                conflicts = []
+                pending.requiresConflictReview = false
+                latest = nil
+                suppressPersistence = false
+                savedMessage = "Current saved values match the submitted changes."
+                persist()
+            } else {
+                reconcile(with: current)
+                errorMessage = "The current saved Card differs from the submitted changes. Review your retained draft, then choose Save for a new request."
+            }
+        } catch {
+            guard sessionIsCurrent else { return }
+            errorMessage = "The previous save is still unconfirmed. Its exact snapshot is retained. \(error.localizedDescription)"
+            if (error as? APIError)?.isUnauthorized == true { model.handle(error) }
+        }
+    }
+
     private func finishConfirmedDraft() {
         guard sessionIsCurrent, pending.confirmed != nil, let model else { return }
         if !receiptPersisted { persist() }
@@ -357,7 +561,7 @@ final class SharedCardEditingSession {
         }
         let clean = PendingCardDraft(draft: CardDraft(card: saved), key: UUID().uuidString)
         let record = SharedCardDraftRecord(pending: clean, savedCard: saved,
-            alternatives: alternatives, legacyImported: true)
+            alternatives: alternatives, legacyImported: true, conflicts: [])
         do {
             // Replacing the receipt atomically with the saved baseline completes
             // recovery without ever replaying an already confirmed mutation.
@@ -365,6 +569,7 @@ final class SharedCardEditingSession {
             suppressPersistence = true
             pending = clean
             savedCard = saved
+            conflicts = []
             latest = nil
             recoveredDraft = false
             receiptPersisted = false
@@ -388,11 +593,12 @@ final class SharedCardEditingSession {
             guard sessionIsCurrent, let current = currentCard else { return }
             let clean = PendingCardDraft(draft: CardDraft(card: current), key: UUID().uuidString)
             let record = SharedCardDraftRecord(pending: clean, savedCard: current,
-                alternatives: [], legacyImported: true)
+                alternatives: [], legacyImported: true, conflicts: [])
             try model.drafts.save(record, ownerID: ownerID, resourceKey: resourceKey)
             suppressPersistence = true
             pending = clean
             savedCard = current
+            conflicts = []
             alternatives = []
             latest = nil
             recoveredDraft = false
@@ -413,25 +619,24 @@ final class SharedCardEditingSession {
     }
 
     private func removeLegacyCopies() {
-        guard sessionIsCurrent, let model else { return }
-        for item in legacyResourceKeys {
-            do { try model.drafts.remove(ownerID: ownerID, resourceKey: item.key) }
-            catch { errorMessage = "The shared draft is saved. An older local draft copy could not be removed. \(error.localizedDescription)" }
-        }
+        // Migration never deletes an origin-ambiguous source. Association receipts
+        // prevent it from being offered to a different origin on a later launch.
     }
 
     func invalidate() {
         guard !invalidated else { return }
         if loaded, !draftLoadFailed, let model, let savedCard,
-           isDirty || pending.submitted != nil || pending.confirmed != nil || !alternatives.isEmpty {
+           isDirty || pending.submitted != nil || pending.confirmed != nil || pendingMove != nil || !alternatives.isEmpty {
             let record = SharedCardDraftRecord(pending: pending, savedCard: savedCard,
-                alternatives: alternatives, legacyImported: true)
+                alternatives: alternatives, legacyImported: true, conflicts: conflicts, pendingMove: pendingMove)
             try? model.drafts.retainForRecovery(record, ownerID: ownerID, resourceKey: resourceKey)
         }
         invalidated = true
         suppressPersistence = true
         pending = PendingCardDraft(draft: CardDraft(columnId: ""), key: UUID().uuidString)
         savedCard = nil
+        pendingMove = nil
+        moveReceiptPersisted = false
         alternatives = []
         latest = nil
         errorMessage = nil

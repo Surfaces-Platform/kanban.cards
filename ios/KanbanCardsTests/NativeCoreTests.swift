@@ -52,11 +52,29 @@ final class NativeCoreTests: XCTestCase {
         XCTAssertTrue(body["priority"] is NSNull)
         XCTAssertTrue(body["nextActor"] is NSNull)
         XCTAssertNil(body["archivedAt"])
+        XCTAssertNil(body["columnId"], "Existing-Card text Save must not move the Card.")
         XCTAssertNil(body["position"])
         XCTAssertNil(body["externalKey"])
         XCTAssertNil(body["id"])
         XCTAssertNil(body["version"])
     }
+
+    func testSI005MovePatchContainsOnlyDestinationAndOptionalOrder() async throws {
+        try await authenticate()
+        URLProtocolStub.state.enqueue(json: Self.cardResult)
+        var card = try JSONDecoder().decode(CardResultForMove.self, from: Data(Self.cardResult.utf8)).card
+        card.version = 7
+        _ = try await client.moveCard(card, to: "done", position: 3, projectID: "project-a", in: workspace)
+        let request = try XCTUnwrap(URLProtocolStub.state.requests.last)
+        let payload = try jsonBody(request)
+        XCTAssertEqual(Set(payload.keys), ["columnId", "position"])
+        XCTAssertEqual(payload["columnId"] as? String, "done")
+        XCTAssertEqual(payload["position"] as? Double, 3)
+        XCTAssertEqual(request.value(forHTTPHeaderField: "X-Kanban-Version"), "7")
+        XCTAssertNil(request.value(forHTTPHeaderField: "Idempotency-Key"))
+    }
+
+    private struct CardResultForMove: Decodable { var card: Card }
 
     func testProjectMetadataPatchCannotOverwriteHiddenColumnsOrArchiveState() async throws {
         try await authenticate()

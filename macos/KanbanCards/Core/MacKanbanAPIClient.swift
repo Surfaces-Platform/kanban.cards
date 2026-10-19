@@ -336,7 +336,7 @@ final class KanbanAPIClient {
             }
             let serverMessage = (try? JSONDecoder().decode(ServerFailure.self, from: data))?.error
             throw APIError(message: serverMessage ?? "The request could not be completed. Try again.",
-                statusCode: http.statusCode, isAmbiguousMutation: mutation && http.statusCode >= 500, sessionGeneration: sessionGeneration)
+                statusCode: http.statusCode, isAmbiguousMutation: mutation && (http.statusCode == 408 || http.statusCode >= 500), sessionGeneration: sessionGeneration)
         }
         do { return try JSONDecoder().decode(Result.self, from: data) }
         catch {
@@ -409,8 +409,8 @@ private struct CardWriteBody: Encodable {
         try container.encode(draft.nextAction, forKey: .nextAction)
         try container.encode(draft.priority, forKey: .priority)
         try container.encode(draft.blockedReason, forKey: .blockedReason)
-        try container.encode(draft.columnId, forKey: .columnId)
         if creation {
+            try container.encode(draft.columnId, forKey: .columnId)
             try container.encode(draft.position, forKey: .position)
             try container.encodeIfPresent(draft.externalKey, forKey: .externalKey)
         }

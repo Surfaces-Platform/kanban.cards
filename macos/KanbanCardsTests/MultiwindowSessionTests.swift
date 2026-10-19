@@ -220,6 +220,8 @@ final class MultiwindowSessionTests: XCTestCase {
             _ = try await model.moveCard(cardID: "card-a", to: "done", projectID: latest.id, in: workspace)
             XCTFail("The first response must be uncertain.")
         } catch { XCTAssertTrue((error as? APIError)?.isAmbiguousMutation == true) }
+        XCTAssertEqual(stub.requestCount(path: "/api/projects/project-a"), 1,
+                       "Opening an uncached Project for Move must reuse that fresh read before its versioned PATCH.")
         let moveRequest = try XCTUnwrap(stub.lastRequest(path: "/api/projects/project-a/cards/card-a", method: "PATCH"))
         let body = try jsonBody(moveRequest)
         XCTAssertEqual(Set(body.keys), ["columnId", "position"])

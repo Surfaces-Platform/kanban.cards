@@ -30,10 +30,8 @@ final class WorkspaceCreationTests: XCTestCase {
         let app = launch()
         app.staticTexts["iPhone app"].firstMatch.tap()
         app.staticTexts["Review the iPhone app"].firstMatch.tap()
-        app.buttons["Edit"].tap()
         replace(app.textFields["card-title"], with: "Retained draft across Workspaces")
-        app.buttons["Cancel"].tap()
-        app.navigationBars.buttons.element(boundBy: 0).tap()
+        app.buttons["Close"].tap()
         app.navigationBars.buttons.element(boundBy: 0).tap()
 
         openWorkspaceForm(in: app, current: "Demo Workspace")
@@ -53,7 +51,6 @@ final class WorkspaceCreationTests: XCTestCase {
         XCTAssertTrue(app.staticTexts["iPhone app"].firstMatch.waitForExistence(timeout: 5))
         app.staticTexts["iPhone app"].firstMatch.tap()
         app.staticTexts["Review the iPhone app"].firstMatch.tap()
-        app.buttons["Edit"].tap()
         assertValue(app.textFields["card-title"], equals: "Retained draft across Workspaces")
         attach(app, named: "Existing Card draft preserved after switching Workspaces")
     }

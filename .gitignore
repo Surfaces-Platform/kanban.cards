@@ -28,3 +28,4 @@ npm-debug.log*
 # Xcode per-user state
 xcuserdata/
 *.xcuserstate
+/output/shared-editing-2026-10-19/

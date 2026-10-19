@@ -47,6 +47,8 @@ The [native macOS app](macos/README.md) opens a Project board and independent Ca
 
 See the [native authentication contract](docs/native-auth.md) for app association, sign-in requests, session storage, and release verification.
 
+The [shared interaction workflow](docs/shared-interactions/README.md) defines the target feature set, editing and recovery rules, source-based parity matrix, and acceptance scenarios for Mac, iPhone, and web. Its validation command checks the specification; client runtime acceptance remains separate.
+
 ## Set up the existing owner
 
 The first passkey must attach to the existing internal owner ID so the owner's Workspace IDs, storage IDs, board data, and agent-key hashes stay intact. Public signup always creates a separate owner and Workspace.
@@ -193,3 +195,5 @@ The controller verifies the exact Git-created artifact, passkey health, database
 2. [DESIGN.md](DESIGN.md) governs the experience.
 3. [UI_CONTRACT.md](UI_CONTRACT.md) records browser constraints.
 4. [Design research](docs/design-language.md) preserves historical research.
+
+The [shared editing slice](docs/shared-interactions/slice-1.md) implements explicit Save, durable drafts and field reconciliation across macOS, iOS and web.
