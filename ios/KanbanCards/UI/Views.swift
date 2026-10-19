@@ -1,4 +1,5 @@
 import SwiftUI
+import Observation
 
 struct RootView: View {
     @Environment(AppModel.self) private var model
@@ -144,29 +145,60 @@ struct ProjectsView: View {
     }
 }
 
+@MainActor
+@Observable
+final class ArchivedProjectsRefreshState {
+    private(set) var loading = true
+    private(set) var loadFailed = false
+    private var refreshID: UUID?
+
+    func refresh(load: @MainActor () async throws -> Void,
+                 handleError: @MainActor (Error) -> Void) async {
+        let requestID = UUID()
+        refreshID = requestID
+        loading = true
+        loadFailed = false
+        defer { if refreshID == requestID { loading = false } }
+        do {
+            try await load()
+            guard refreshID == requestID else { return }
+            loadFailed = false
+        } catch is CancellationError {
+            return
+        } catch {
+            // A same-session 401 still ends authentication when its list request
+            // was superseded. AppModel excludes failures from replaced sessions.
+            let unauthorized = (error as? APIError)?.isUnauthorized == true
+            if unauthorized { handleError(error) }
+            guard refreshID == requestID else { return }
+            loadFailed = true
+            if !unauthorized { handleError(error) }
+        }
+    }
+}
+
 struct ArchivedProjectsView: View {
     @Environment(AppModel.self) private var model
     let workspace: Workspace
-    @State private var loading = true
-    @State private var loadFailed = false
+    @State private var refreshState = ArchivedProjectsRefreshState()
     private var projects: [ProjectSummary] { (model.projectLists[workspace.id] ?? []).filter { $0.archivedAt != nil } }
 
     var body: some View {
         List {
-            if loading { ProgressView("Loading Archived Projects") }
+            if refreshState.loading { ProgressView("Loading Archived Projects") }
             ForEach(projects) { project in
                 NavigationLink { ProjectView(workspace: workspace, projectID: project.id, readOnly: true) } label: {
                     LabeledContent(project.name, value: "\(project.cardCount) Cards")
                 }
                 .accessibilityIdentifier("archive.project.\(project.id)")
             }
-            if loadFailed {
+            if refreshState.loadFailed {
                 ContentUnavailableView {
                     Label("Archived Projects unavailable", systemImage: "archivebox")
                 } actions: {
                     Button("Retry") { Task { await refresh() } }
                 }
-            } else if !loading && projects.isEmpty {
+            } else if !refreshState.loading && projects.isEmpty {
                 ContentUnavailableView("No archived Projects", systemImage: "archivebox")
             }
         }
@@ -176,15 +208,9 @@ struct ArchivedProjectsView: View {
     }
 
     private func refresh() async {
-        loading = true
-        defer { loading = false }
-        do {
-            try await model.loadProjects(in: workspace)
-            loadFailed = false
-        } catch {
-            loadFailed = true
-            model.handle(error)
-        }
+        await refreshState.refresh(
+            load: { try await model.loadProjects(in: workspace) },
+            handleError: { model.handle($0) })
     }
 }
 

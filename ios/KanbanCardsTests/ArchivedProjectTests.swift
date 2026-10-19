@@ -275,6 +275,144 @@ final class ArchivedProjectTests: XCTestCase {
         XCTAssertFalse(session.authorized)
     }
 
+    func testLatestArchivedRefreshSuccessIgnoresOlderCancellationAndServerFailure() async {
+        let oldErrors: [Error] = [CancellationError(), APIError(message: "Older synthetic failure", statusCode: 500)]
+        for oldError in oldErrors {
+            let state = ArchivedProjectsRefreshState()
+            let old = ArchivedProjectsRefreshGate()
+            let latest = ArchivedProjectsRefreshGate()
+            var reported: [Error] = []
+            let oldTask = Task {
+                await state.refresh(load: { try await old.load() }, handleError: { reported.append($0) })
+            }
+            await old.waitUntilStarted()
+            let latestTask = Task {
+                await state.refresh(load: { try await latest.load() }, handleError: { reported.append($0) })
+            }
+            await latest.waitUntilStarted()
+            latest.finish()
+            await latestTask.value
+            XCTAssertFalse(state.loading)
+            XCTAssertFalse(state.loadFailed)
+            old.finish(error: oldError)
+            await oldTask.value
+            XCTAssertFalse(state.loading)
+            XCTAssertFalse(state.loadFailed)
+            XCTAssertTrue(reported.isEmpty)
+        }
+    }
+
+    func testOlderArchivedRefreshCompletionCannotEndLatestPendingLoad() async {
+        let oldErrors: [Error?] = [nil, CancellationError(), APIError(message: "Older synthetic failure", statusCode: 500)]
+        for oldError in oldErrors {
+            let state = ArchivedProjectsRefreshState()
+            let old = ArchivedProjectsRefreshGate()
+            let latest = ArchivedProjectsRefreshGate()
+            var reported: [Error] = []
+            let oldTask = Task {
+                await state.refresh(load: { try await old.load() }, handleError: { reported.append($0) })
+            }
+            await old.waitUntilStarted()
+            let latestTask = Task {
+                await state.refresh(load: { try await latest.load() }, handleError: { reported.append($0) })
+            }
+            await latest.waitUntilStarted()
+            old.finish(error: oldError)
+            await oldTask.value
+            XCTAssertTrue(state.loading, "Only the latest request can finish its loading state.")
+            XCTAssertFalse(state.loadFailed)
+            XCTAssertTrue(reported.isEmpty)
+            latest.finish()
+            await latestTask.value
+            XCTAssertFalse(state.loading)
+            XCTAssertFalse(state.loadFailed)
+        }
+    }
+
+    func testCurrentArchivedRefreshFailureCanRetryWithoutKeepingFailedState() async {
+        let state = ArchivedProjectsRefreshState()
+        var reported: [Error] = []
+        await state.refresh(load: { throw APIError(message: "Current synthetic failure", statusCode: 500) },
+            handleError: { reported.append($0) })
+        XCTAssertFalse(state.loading)
+        XCTAssertTrue(state.loadFailed)
+        XCTAssertEqual(reported.count, 1)
+        let retry = ArchivedProjectsRefreshGate()
+        let retryTask = Task {
+            await state.refresh(load: { try await retry.load() }, handleError: { reported.append($0) })
+        }
+        await retry.waitUntilStarted()
+        XCTAssertTrue(state.loading)
+        XCTAssertFalse(state.loadFailed)
+        retry.finish()
+        await retryTask.value
+        XCTAssertFalse(state.loading)
+        XCTAssertFalse(state.loadFailed)
+        XCTAssertEqual(reported.count, 1)
+    }
+
+    func testCurrentArchivedRefreshCancellationDoesNotPresentFailure() async {
+        let state = ArchivedProjectsRefreshState()
+        var reported: [Error] = []
+        await state.refresh(load: { throw CancellationError() }, handleError: { reported.append($0) })
+        XCTAssertFalse(state.loading)
+        XCTAssertFalse(state.loadFailed)
+        XCTAssertTrue(reported.isEmpty)
+    }
+
+    func testSupersededArchivedRefresh401StillClearsCurrentOwnerCaches() async throws {
+        try await load(project(archived: true))
+        let state = ArchivedProjectsRefreshState()
+        let old = ArchivedProjectsRefreshGate()
+        let generation = model.api.sessionGeneration
+        var reported = 0
+        let oldTask = Task {
+            await state.refresh(load: { try await old.load() }, handleError: {
+                reported += 1; self.model.handle($0)
+            })
+        }
+        await old.waitUntilStarted()
+        await state.refresh(load: {}, handleError: { self.model.handle($0) })
+        XCTAssertTrue(model.signedIn)
+        old.finish(error: APIError(message: "Synthetic current owner expired", statusCode: 401,
+            sessionGeneration: generation))
+        await oldTask.value
+        XCTAssertEqual(reported, 1)
+        XCTAssertFalse(model.signedIn)
+        XCTAssertTrue(model.workspaces.isEmpty)
+        XCTAssertTrue(model.projectLists.isEmpty)
+        XCTAssertTrue(model.loadedProjects.isEmpty)
+        XCTAssertFalse(state.loading)
+        XCTAssertFalse(state.loadFailed, "A superseded request cannot replace successful list state.")
+    }
+
+    func testSupersededArchivedRefresh401FromDifferentGenerationCannotClearCurrentOwner() async throws {
+        try await load(project(archived: true))
+        let state = ArchivedProjectsRefreshState()
+        let old = ArchivedProjectsRefreshGate()
+        let oldGeneration = UUID()
+        XCTAssertNotEqual(oldGeneration, model.api.sessionGeneration)
+        var reported = 0
+        let oldTask = Task {
+            await state.refresh(load: { try await old.load() }, handleError: {
+                reported += 1; self.model.handle($0)
+            })
+        }
+        await old.waitUntilStarted()
+        await state.refresh(load: {}, handleError: { self.model.handle($0) })
+        old.finish(error: APIError(message: "Synthetic replaced owner expired", statusCode: 401,
+            sessionGeneration: oldGeneration))
+        await oldTask.value
+        XCTAssertEqual(reported, 1, "The coordinator forwards authorization errors to the model's generation guard.")
+        XCTAssertTrue(model.signedIn)
+        XCTAssertFalse(model.workspaces.isEmpty)
+        XCTAssertFalse(model.projectLists.isEmpty)
+        XCTAssertFalse(model.loadedProjects.isEmpty)
+        XCTAssertNil(model.errorMessage)
+        XCTAssertFalse(state.loading)
+        XCTAssertFalse(state.loadFailed)
+    }
+
     private func assertAllMutationsBlocked() async {
         let saved = project(archived: true)
         await assertReadOnly { _ = try await self.model.saveProject(ProjectDraft(project: saved), in: self.workspace, key: "project-intent") }
@@ -342,6 +480,36 @@ final class ArchivedProjectTests: XCTestCase {
     private func fileURL(_ resource: String) -> URL {
         func hash(_ value: String) -> String { SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined() }
         return directory.appendingPathComponent(hash(ownerID)).appendingPathComponent(hash(resource) + ".json")
+    }
+}
+
+/// Explicit continuations establish request ordering without sleeps or network timing.
+@MainActor
+private final class ArchivedProjectsRefreshGate {
+    private var continuation: CheckedContinuation<Void, Error>?
+    private var started = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func load() async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            self.continuation = continuation
+            started = true
+            let ready = waiters
+            waiters = []
+            for waiter in ready { waiter.resume() }
+        }
+    }
+
+    func waitUntilStarted() async {
+        if started { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func finish(error: Error? = nil) {
+        guard let continuation else { preconditionFailure("Synthetic refresh must start before completion") }
+        self.continuation = nil
+        if let error { continuation.resume(throwing: error) }
+        else { continuation.resume() }
     }
 }
 
