@@ -1417,7 +1417,7 @@ function renderComments(card: ProjectCard): string {
 
 function renderActivity(card: ProjectCard): string {
   const activity = (activeProject?.activity || []).filter((item) => item.cardId === card.id).slice(-12).reverse();
-  return `<section id="activity-panel" class="activity-panel" role="tabpanel" aria-labelledby="activity-tab" tabindex="0"><ol class="activity-list">${activity.map((item) => `<li><span>${escapeHtml(item.summary)}</span><time class="jk-meta" datetime="${escapeHtml(item.createdAt)}">${escapeHtml(formatDate(item.createdAt))}</time></li>`).join("")}</ol></section>`;
+  return `<section id="activity-panel" class="activity-panel" role="tabpanel" aria-labelledby="activity-tab" tabindex="0"><ol class="activity-list">${activity.map((item) => `<li><span>${escapeHtml(item.summary)}</span><span class="activity-actor jk-meta">By ${escapeHtml(item.actorLabel)}</span><time class="jk-meta" datetime="${escapeHtml(item.createdAt)}">${escapeHtml(formatDate(item.createdAt))}</time></li>`).join("")}</ol></section>`;
 }
 
 function renderCreateDestination(project: Project, draft: CardDraft): string {
