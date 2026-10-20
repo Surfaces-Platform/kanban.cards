@@ -35,9 +35,13 @@ jobs:
       - name: Run tests
         run: npm test
 
-  native-ios:
+  native-ios-tests:
     runs-on: xcode-27
     timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [baseline, creation]
     env:
       DEVELOPER_DIR: /Applications/Xcode_27.app/Contents/Developer
 
@@ -46,24 +50,42 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run native unit and UI tests
+        env:
+          TEST_SUITE: ${{ matrix.suite }}
         run: |
+          if [ "$TEST_SUITE" = creation ]; then
+            test_selection='-only-testing:KanbanCardsUITests/CreationFlowTests'
+          else
+            test_selection='-skip-testing:KanbanCardsUITests/CreationFlowTests'
+          fi
           xcodebuild -project ios/KanbanCards.xcodeproj \
             -scheme KanbanCards -configuration Debug \
             -destination 'platform=iOS Simulator,name=iPhone 17,OS=27.0' \
             -derivedDataPath .local/ios/DerivedData \
-            -resultBundlePath .local/ios/NativeTests.xcresult \
+            -resultBundlePath ".local/ios/$TEST_SUITE.xcresult" \
             -parallel-testing-enabled NO -collect-test-diagnostics never \
-            CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM='' test
+            CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM='' \
+            "$test_selection" test
 
       - name: Upload failed native test results
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: native-ios-results
-          path: .local/ios/NativeTests.xcresult
+          name: native-ios-${{ matrix.suite }}-results
+          path: .local/ios/${{ matrix.suite }}.xcresult
           include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7
+
+  native-ios:
+    if: always()
+    needs: [native-ios-tests]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every iPhone test suite to pass
+        env:
+          NATIVE_IOS_RESULT: ${{ needs.native-ios-tests.result }}
+        run: test "$NATIVE_IOS_RESULT" = success
 
   native-macos:
     runs-on: xcode-27

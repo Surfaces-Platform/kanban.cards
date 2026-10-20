@@ -433,7 +433,7 @@ final class AppModel {
     #if DEBUG
     private func prepareDemoCreation(key: String) async throws {
         if ProcessInfo.processInfo.arguments.contains("--demo-creation-save-delay") {
-            try await Task.sleep(for: .seconds(6))
+            try await Task.sleep(for: .seconds(30))
         }
         if ProcessInfo.processInfo.arguments.contains("--demo-creation-save-error") {
             throw APIError(message: "Demo creation request was rejected.", statusCode: 422)

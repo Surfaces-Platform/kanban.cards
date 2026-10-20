@@ -246,7 +246,7 @@ final class CreationFlowTests: XCTestCase {
             assertProgress("Creating \(kind.noun.lowercased())…", in: app)
             attach(app, named: "Creating \(kind.noun) shows active progress")
             XCTAssertTrue(
-                app.textFields[kind.titleID].waitForNonExistence(timeout: 15),
+                app.textFields[kind.titleID].waitForNonExistence(timeout: 45),
                 "The confirmed request should finish and close the editor.")
             XCTAssertTrue(app.staticTexts[title].firstMatch.waitForExistence(timeout: 5))
             app.terminate()
@@ -267,14 +267,14 @@ final class CreationFlowTests: XCTestCase {
             assertProgress("Creating \(kind.noun.lowercased())…", in: app)
             let unresolved = app.staticTexts[
                 "The save hasn’t been confirmed yet. Check its result before making changes."]
-            XCTAssertTrue(unresolved.waitForExistence(timeout: 15), app.debugDescription)
+            XCTAssertTrue(unresolved.waitForExistence(timeout: 45), app.debugDescription)
             XCTAssertEqual(app.buttons["creation.primary"].label, "Check Save")
             XCTAssertFalse(app.textFields[kind.titleID].isEnabled)
             attach(app, named: "Unconfirmed \(kind.noun) gives a clear Check Save action")
             app.buttons["creation.primary"].tap()
             assertProgress("Checking save…", in: app)
             attach(app, named: "Checking \(kind.noun) save shows active progress")
-            XCTAssertTrue(app.textFields[kind.titleID].waitForNonExistence(timeout: 15))
+            XCTAssertTrue(app.textFields[kind.titleID].waitForNonExistence(timeout: 45))
             XCTAssertTrue(app.staticTexts[title].firstMatch.waitForExistence(timeout: 5))
             app.terminate()
         }
@@ -373,7 +373,7 @@ final class CreationFlowTests: XCTestCase {
             open(kind, in: app)
             enter(
                 kind, title: "Labeled \(kind.noun)",
-                body: "A description with its own persistent label.", in: app)
+                body: "A description with its own persistent label.", in: app, pacedTyping: true)
             let titleLabel = app.staticTexts["\(kind.titleID)-label"]
             let bodyLabel = app.staticTexts["\(kind.bodyID)-label"]
             XCTAssertTrue(titleLabel.exists, "A filled field still needs its visible label.")
@@ -390,7 +390,7 @@ final class CreationFlowTests: XCTestCase {
                 ] {
                     let field = inputField(identifier, in: app)
                     reveal(field, in: app)
-                    replace(field, with: value)
+                    replace(field, with: value, pacedTyping: true)
                     let label = app.staticTexts["\(identifier)-label"]
                     XCTAssertTrue(label.exists, "\(identifier) must keep its label after typing.")
                     assertValue(field, equals: value)
@@ -465,11 +465,14 @@ final class CreationFlowTests: XCTestCase {
         XCTAssertFalse(app.buttons["This is the original Workspace"].exists)
     }
 
-    private func enter(_ kind: Kind, title: String, body: String, in app: XCUIApplication) {
-        replace(app.textFields[kind.titleID], with: title)
+    private func enter(
+        _ kind: Kind, title: String, body: String, in app: XCUIApplication,
+        pacedTyping: Bool = false
+    ) {
+        replace(app.textFields[kind.titleID], with: title, pacedTyping: pacedTyping)
         let description = bodyField(kind, in: app)
         XCTAssertTrue(description.waitForExistence(timeout: 5), app.debugDescription)
-        replace(description, with: body)
+        replace(description, with: body, pacedTyping: pacedTyping)
         XCTAssertTrue(app.buttons["creation.primary"].isEnabled)
     }
 
@@ -609,7 +612,9 @@ final class CreationFlowTests: XCTestCase {
         XCTAssertTrue(element.exists && element.isHittable, app.debugDescription)
     }
 
-    private func replace(_ field: XCUIElement, with value: String) {
+    private func replace(
+        _ field: XCUIElement, with value: String, pacedTyping: Bool = false
+    ) {
         field.tap()
         let existing = field.value as? String ?? ""
         if !existing.isEmpty && existing != field.placeholderValue {
@@ -643,13 +648,25 @@ final class CreationFlowTests: XCTestCase {
             field.typeText(XCUIKeyboardKey.delete.rawValue)
             assertEditableValue(field, equals: "", phase: "Select All and Delete")
         }
-        if !value.isEmpty { field.typeText(value) }
+        if pacedTyping {
+            // Keep the label/layout test deterministic on loaded hosted simulators.
+            // Every input still passes through the native keyboard; never repair a mismatch.
+            for character in value { field.typeText(String(character)) }
+        } else if !value.isEmpty {
+            field.typeText(value)
+        }
         assertEditableValue(field, equals: value, phase: "Replacement")
     }
 
     private func assertEditableValue(_ field: XCUIElement, equals expected: String, phase: String) {
+        let matchesValue = NSPredicate { _, _ in
+            let value = field.value as? String ?? ""
+            return value == expected || (expected.isEmpty && value == field.placeholderValue)
+        }
+        let matches = XCTWaiter.wait(
+            for: [XCTNSPredicateExpectation(predicate: matchesValue, object: nil)], timeout: 5
+        ) == .completed
         let actual = field.value as? String ?? ""
-        let matches = actual == expected || (expected.isEmpty && actual == field.placeholderValue)
         if !matches, let app = runningApp {
             attach(app, named: "\(phase) failed for \(field.identifier)")
         }
