@@ -133,19 +133,15 @@ final class NativeWorkflowTests: XCTestCase {
         XCTAssertTrue(app.staticTexts["New work"].waitForExistence(timeout: 5))
     }
 
-    func testUnreadCreationDraftsSurviveCancelRetryAndRelaunch() throws {
+    func testUnreadCreationDraftsDoNotBlockNewFormsAfterRelaunch() throws {
         let app = launch(extra: ["--demo-unreadable-creation-drafts"])
         app.buttons["New Project"].tap()
         assertUnreadCreationDraft(in: app, field: "project-name")
-        app.buttons["Retry reading retained draft"].tap()
-        assertUnreadCreationDraft(in: app, field: "project-name")
-        app.buttons["Cancel"].tap()
+        app.buttons["creation.cancel"].tap()
         app.staticTexts["iPhone app"].firstMatch.tap()
         app.buttons["New Card"].tap()
         assertUnreadCreationDraft(in: app, field: "card-title")
-        app.buttons["Retry reading retained draft"].tap()
-        assertUnreadCreationDraft(in: app, field: "card-title")
-        app.buttons["Cancel"].tap()
+        app.buttons["creation.cancel"].tap()
         app.terminate()
         // Do not reseed or reset: both original unread records must still exist.
         app.launchArguments = ["--demo"]
@@ -154,22 +150,20 @@ final class NativeWorkflowTests: XCTestCase {
         app.buttons["New Project"].tap()
         assertUnreadCreationDraft(in: app, field: "project-name")
         attach(app, named: "Unread Project draft retained after Cancel and relaunch")
-        app.buttons["Cancel"].tap()
+        app.buttons["creation.cancel"].tap()
         app.staticTexts["iPhone app"].firstMatch.tap()
         app.buttons["New Card"].tap()
         assertUnreadCreationDraft(in: app, field: "card-title")
         attach(app, named: "Unread Card creation draft retained after Cancel and relaunch")
-        app.buttons["Cancel"].tap()
+        app.buttons["creation.cancel"].tap()
     }
 
     private func assertUnreadCreationDraft(in app: XCUIApplication, field: String) {
-        XCTAssertTrue(app.buttons["Retry reading retained draft"].waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertFalse(app.buttons["Create"].isEnabled)
-        XCTAssertFalse(app.textFields[field].isEnabled)
-        XCTAssertTrue(app.buttons["Copy retained record"].exists)
-        XCTAssertTrue(app.buttons["Export retained record"].exists)
-        let discard = app.buttons["Discard draft"]
-        if discard.exists { XCTAssertFalse(discard.isEnabled) }
+        XCTAssertTrue(app.textFields[field].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.textFields[field].isEnabled, "An unread old draft must not disable a fresh form.")
+        XCTAssertTrue(app.buttons["creation.saved-drafts"].exists, "The old draft must remain recoverable separately.")
+        XCTAssertFalse(app.buttons["Retry reading retained draft"].exists)
+        XCTAssertFalse(app.buttons["This is the original Workspace"].exists)
     }
 
     private func launch(extra: [String] = []) -> XCUIApplication {

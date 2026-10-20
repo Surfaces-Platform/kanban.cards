@@ -67,6 +67,11 @@ struct CardEditor: View {
     private var projectReadOnly: Bool { model.loadedProjects[projectID]?.archivedAt != nil }
 
     var body: some View {
+        if card == nil { NewCardEditor(workspace: workspace, projectID: projectID) }
+        else { existingEditor }
+    }
+
+    private var existingEditor: some View {
         NavigationStack {
             Form {
                 if projectReadOnly { Section { Text("Archived Project. Your local draft is retained; server changes are unavailable.") } }
@@ -336,6 +341,11 @@ struct ProjectEditor: View {
     private var projectReadOnly: Bool { project.map { (model.loadedProjects[$0.id] ?? $0).archivedAt != nil } ?? false }
 
     var body: some View {
+        if project == nil { NewProjectEditor(workspace: workspace) }
+        else { existingEditor }
+    }
+
+    private var existingEditor: some View {
         NavigationStack {
             Form {
                 if projectReadOnly { Section { Text("Archived Project. Your local draft is retained; server changes are unavailable.") } }

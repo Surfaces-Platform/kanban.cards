@@ -233,6 +233,7 @@ struct ProjectView: View {
     let projectID: String
     let readOnly: Bool
     @State private var creating = false
+    @State private var recoveringCreation = false
     @State private var editing = false
     @State private var filtering = false
     @State private var filter = CardFilter()
@@ -255,6 +256,8 @@ struct ProjectView: View {
                         Section {
                             Text("Archived Project. Cards, Comments, and Activity are read-only. Retained drafts can be recovered locally.")
                                 .accessibilityIdentifier("archive.notice")
+                            Button("Saved Card Drafts", systemImage: "tray") { recoveringCreation = true }
+                                .accessibilityIdentifier("archive.saved-card-drafts")
                         }
                     }
                     if filter.active {
@@ -282,6 +285,7 @@ struct ProjectView: View {
                 }
                 .refreshable { await refresh() }
                 .sheet(isPresented: $creating) { CardEditor(workspace: workspace, projectID: projectID, card: nil) }
+                .sheet(isPresented: $recoveringCreation) { NewCardEditor(workspace: workspace, projectID: projectID, recoveryOnly: true) }
                 .sheet(isPresented: $editing) { ProjectEditor(workspace: workspace, project: project) }
                 .sheet(isPresented: $filtering) { FilterView(filter: $filter) }
             } else if loading {
