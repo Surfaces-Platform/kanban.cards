@@ -738,22 +738,33 @@ private struct CreationEditor<Payload: CreationPayload, Fields: View>: View {
         }
         let scoped = model.drafts.scopedKey(
             workspace: workspace, projectID: projectID, resourceKey: resourceKey)
-        func appendOld(_ data: Data, unknown: Bool) {
+        @discardableResult
+        func appendOld(_ data: Data, unknown: Bool) -> Bool {
             let fingerprint = DraftStore.fingerprint(data)
-            guard !imported.contains(fingerprint) else { return }
             let value = try? JSONDecoder().decode(Payload.self, from: data)
             let valid = value.flatMap { candidate -> Payload? in
                 guard (try? candidate.validateCreationIdentity()) != nil else { return nil }
                 return candidate
             }
+            let id = "old:\(fingerprint)"
+            guard !imported.contains(fingerprint), !items.contains(where: { $0.id == id }) else {
+                return valid != nil
+            }
             items.append(
                 RecoveryCandidate(
-                    id: "old:\(fingerprint)", payload: valid, sourceFingerprint: fingerprint,
+                    id: id, payload: valid, sourceFingerprint: fingerprint,
                     requiresCopy: unknown, rawText: String(data: data, encoding: .utf8)))
+            return valid != nil
+        }
+        var scopedIsReadable = false
+        do {
+            if let scopedData = try model.drafts.rawRecordData(ownerID: ownerID, resourceKey: scoped) {
+                scopedIsReadable = appendOld(scopedData, unknown: false)
+            }
+        } catch {
+            items.append(RecoveryCandidate(id: "old-scoped-unreadable"))
         }
         do {
-            let scopedData = try model.drafts.rawRecordData(ownerID: ownerID, resourceKey: scoped)
-            if let scopedData { appendOld(scopedData, unknown: false) }
             let binding = try model.drafts.rawRecordData(
                 ownerID: ownerID, resourceKey: "legacy-scope:v2:\(resourceKey)")
             if binding == nil {
@@ -762,12 +773,10 @@ private struct CreationEditor<Payload: CreationPayload, Fields: View>: View {
                 {
                     appendOld(old, unknown: true)
                 }
-            } else if scopedData == nil,
-                let _: Payload = try model.drafts.loadScoped(
+            } else if !scopedIsReadable,
+                let old = try model.drafts.boundLegacyRecordData(
                     ownerID: ownerID, workspace: workspace, projectID: projectID,
-                    resourceKey: resourceKey,
-                    legacyResourceKey: resourceKey, as: Payload.self),
-                let old = try model.drafts.rawRecordData(ownerID: ownerID, resourceKey: resourceKey)
+                    resourceKey: resourceKey, legacyResourceKey: resourceKey)
             {
                 appendOld(old, unknown: false)
             }

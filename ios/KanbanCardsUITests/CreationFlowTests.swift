@@ -188,6 +188,41 @@ final class CreationFlowTests: XCTestCase {
         }
     }
 
+    func testBoundLegacyBackupRemainsUsableWhenScopedCopyIsDamagedAfterRelaunch() {
+        for kind in Kind.allCases {
+            let app = launch(extra: ["--demo-bound-corrupt-creation-drafts"])
+            let title = "Bound \(kind.noun) backup"
+            let body = "Recover this original \(kind.noun) backup after the newer scoped record is damaged."
+            open(kind, in: app)
+            assertFresh(kind, in: app)
+            openRecovery(in: app)
+            XCTAssertTrue(
+                app.staticTexts["Draft unavailable"].firstMatch.exists,
+                "The damaged scoped copy should remain visible alongside its usable backup.")
+            selectDraft(named: title, in: app)
+            XCTAssertTrue(app.staticTexts[body].firstMatch.exists)
+            XCTAssertTrue(app.buttons["recovery.resume"].exists)
+            XCTAssertFalse(
+                app.buttons["recovery.copy"].exists,
+                "A valid existing Workspace binding permits continuing the original request.")
+            attach(app, named: "Bound \(kind.noun) backup remains available beside damaged copy")
+            closeRecovery(in: app)
+            cancel(in: app)
+
+            relaunch(app)
+            open(kind, in: app)
+            assertFresh(kind, in: app)
+            openRecovery(in: app)
+            selectDraft(named: title, in: app)
+            XCTAssertTrue(app.staticTexts[body].firstMatch.exists)
+            tapRecoveryAction("recovery.resume", in: app)
+            assertValue(app.textFields[kind.titleID], equals: title)
+            assertValue(bodyField(kind, in: app), equals: body)
+            attach(app, named: "Bound \(kind.noun) backup resumes full text after relaunch")
+            app.terminate()
+        }
+    }
+
     func testTypedDraftSurvivesTerminationWithoutCancelAndReopensOnlyByChoice() {
         for kind in Kind.allCases {
             let app = launch()

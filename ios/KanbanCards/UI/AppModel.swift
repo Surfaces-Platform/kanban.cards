@@ -102,6 +102,31 @@ final class AppModel {
                 try? drafts.save(cardPending, ownerID: "demo-owner", resourceKey: "card:\(project.id):new")
                 try? drafts.save(projectPending, ownerID: "demo-owner", resourceKey: "project:demo-workspace:new")
             }
+            if ProcessInfo.processInfo.arguments.contains("--demo-bound-corrupt-creation-drafts"),
+               let workspace = workspaces.first {
+                var cardDraft = CardDraft(columnId: "next")
+                cardDraft.title = "Bound Card backup"
+                cardDraft.body = "Recover this original Card backup after the newer scoped record is damaged."
+                let cardPending = PendingCardDraft(draft: cardDraft, key: "demo-bound-card-request")
+                let projectPending = PendingProjectDraft(
+                    draft: ProjectDraft(name: "Bound Project backup",
+                        description: "Recover this original Project backup after the newer scoped record is damaged."),
+                    key: "demo-bound-project-request")
+                let cardResource = "card:\(project.id):new"
+                let projectResource = "project:\(workspace.id):new"
+                // Keep a valid original and its exact Workspace binding, then
+                // damage only the newer scoped copy to exercise backup discovery.
+                try? drafts.save(cardPending, ownerID: "demo-owner", resourceKey: cardResource)
+                try? drafts.recoverLegacy(cardPending, ownerID: "demo-owner", workspace: workspace,
+                    projectID: project.id, resourceKey: cardResource, legacyResourceKey: cardResource)
+                try? drafts.save(projectPending, ownerID: "demo-owner", resourceKey: projectResource)
+                try? drafts.recoverLegacy(projectPending, ownerID: "demo-owner", workspace: workspace,
+                    projectID: "new", resourceKey: projectResource, legacyResourceKey: projectResource)
+                for (projectID, resource) in [(project.id, cardResource), ("new", projectResource)] {
+                    let scopedKey = drafts.scopedKey(workspace: workspace, projectID: projectID, resourceKey: resource)
+                    try? drafts.save("Synthetic damaged scoped creation record", ownerID: "demo-owner", resourceKey: scopedKey)
+                }
+            }
             if ProcessInfo.processInfo.arguments.contains("--demo-creation-recovery-metadata") {
                 var cardDraft = CardDraft(columnId: "doing")
                 cardDraft.title = "Card with saved details"

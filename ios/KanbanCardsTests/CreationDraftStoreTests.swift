@@ -239,6 +239,107 @@ final class CreationDraftStoreTests: XCTestCase {
             ).records.count, 1)
     }
 
+    func testBoundLegacyBytesRemainAvailableWhenScopedPayloadIsCorrupt() throws {
+        let store = DraftStore(directory: directory)
+        let original = Data(
+            "{\n  \"body\": \"  Keep exact bytes\\n\",\n  \"title\": \"Legacy idea\"\n}\n".utf8)
+        try writeOld(original, resourceKey: resourceKey)
+        let payload = try JSONDecoder().decode(Payload.self, from: original)
+        try store.recoverLegacy(
+            payload, ownerID: ownerID, workspace: workspace, projectID: projectID,
+            resourceKey: resourceKey, legacyResourceKey: resourceKey)
+        let scopedKey = store.scopedKey(
+            workspace: workspace, projectID: projectID, resourceKey: resourceKey)
+        let corrupted = Data("{corrupt scoped payload".utf8)
+        try writeOld(corrupted, resourceKey: scopedKey)
+
+        let relaunched = DraftStore(directory: directory)
+        XCTAssertThrowsError(
+            try relaunched.loadScoped(
+                ownerID: ownerID, workspace: workspace, projectID: projectID,
+                resourceKey: resourceKey, legacyResourceKey: resourceKey, as: Payload.self))
+        XCTAssertEqual(
+            try relaunched.boundLegacyRecordData(
+                ownerID: ownerID, workspace: workspace, projectID: projectID,
+                resourceKey: resourceKey, legacyResourceKey: resourceKey), original)
+        XCTAssertEqual(try Data(contentsOf: oldURL(resourceKey: resourceKey)), original)
+        XCTAssertEqual(try Data(contentsOf: oldURL(resourceKey: scopedKey)), corrupted)
+    }
+
+    func testBoundLegacyBytesRemainAvailableWhenScopedPayloadIsMissing() throws {
+        let store = DraftStore(directory: directory)
+        let original = Data("{\"title\":\"Legacy idea\",\"body\":\"Keep the original\\n\"}\n".utf8)
+        try writeOld(original, resourceKey: resourceKey)
+        try store.recoverLegacy(
+            JSONDecoder().decode(Payload.self, from: original), ownerID: ownerID,
+            workspace: workspace, projectID: projectID, resourceKey: resourceKey,
+            legacyResourceKey: resourceKey)
+        let scopedKey = store.scopedKey(
+            workspace: workspace, projectID: projectID, resourceKey: resourceKey)
+        try FileManager.default.removeItem(at: oldURL(resourceKey: scopedKey))
+
+        let relaunched = DraftStore(directory: directory)
+        XCTAssertEqual(
+            try relaunched.boundLegacyRecordData(
+                ownerID: ownerID, workspace: workspace, projectID: projectID,
+                resourceKey: resourceKey, legacyResourceKey: resourceKey), original)
+        XCTAssertEqual(try Data(contentsOf: oldURL(resourceKey: resourceKey)), original)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: oldURL(resourceKey: scopedKey).path))
+    }
+
+    func testBoundLegacyBytesRequireExistingBindingForExactOwnerAndScope() throws {
+        let store = DraftStore(directory: directory)
+        let payload = Payload(title: "Legacy idea", body: "Only its confirmed destination")
+        try store.save(payload, ownerID: ownerID, resourceKey: resourceKey)
+        XCTAssertNil(
+            try store.boundLegacyRecordData(
+                ownerID: ownerID, workspace: workspace, projectID: projectID,
+                resourceKey: resourceKey, legacyResourceKey: resourceKey),
+            "Discovering legacy bytes must not establish their scope.")
+        try store.recoverLegacy(
+            payload, ownerID: ownerID, workspace: workspace, projectID: projectID,
+            resourceKey: resourceKey, legacyResourceKey: resourceKey)
+        // Matching raw bytes in another owner's folder are still unbound.
+        try store.save(payload, ownerID: "owner-b", resourceKey: resourceKey)
+        let otherLegacyKey = "card:other:new"
+        try store.save(payload, ownerID: ownerID, resourceKey: otherLegacyKey)
+        let relaunched = DraftStore(directory: directory)
+        let changedOrigin = Workspace(
+            id: workspace.id, slug: workspace.slug, name: workspace.name,
+            url: URL(string: "https://studio.kanban.cards/")!)
+        let changedWorkspace = Workspace(
+            id: "workspace-b", slug: workspace.slug, name: workspace.name, url: workspace.url)
+
+        XCTAssertNotNil(
+            try relaunched.boundLegacyRecordData(
+                ownerID: ownerID, workspace: workspace, projectID: projectID,
+                resourceKey: resourceKey, legacyResourceKey: resourceKey))
+        XCTAssertNil(
+            try relaunched.boundLegacyRecordData(
+                ownerID: "owner-b", workspace: workspace, projectID: projectID,
+                resourceKey: resourceKey, legacyResourceKey: resourceKey))
+        XCTAssertNil(
+            try relaunched.boundLegacyRecordData(
+                ownerID: ownerID, workspace: changedOrigin, projectID: projectID,
+                resourceKey: resourceKey, legacyResourceKey: resourceKey))
+        XCTAssertNil(
+            try relaunched.boundLegacyRecordData(
+                ownerID: ownerID, workspace: changedWorkspace, projectID: projectID,
+                resourceKey: resourceKey, legacyResourceKey: resourceKey))
+        XCTAssertNil(
+            try relaunched.boundLegacyRecordData(
+                ownerID: ownerID, workspace: workspace, projectID: "project-b",
+                resourceKey: resourceKey, legacyResourceKey: resourceKey))
+        XCTAssertNil(
+            try relaunched.boundLegacyRecordData(
+                ownerID: ownerID, workspace: workspace, projectID: projectID,
+                resourceKey: "card:other:new", legacyResourceKey: resourceKey))
+        XCTAssertNil(
+            try relaunched.boundLegacyRecordData(
+                ownerID: ownerID, workspace: workspace, projectID: projectID,
+                resourceKey: resourceKey, legacyResourceKey: otherLegacyKey))
+    }
+
     private struct Payload: Codable, Equatable {
         var title: String
         var body: String
@@ -268,9 +369,13 @@ final class CreationDraftStoreTests: XCTestCase {
     private func writeOld(_ data: Data, resourceKey: String) throws {
         let folder = directory.appendingPathComponent(DraftStore.fingerprint(Data(ownerID.utf8)))
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        try data.write(
-            to: folder.appendingPathComponent(DraftStore.fingerprint(Data(resourceKey.utf8)))
-                .appendingPathExtension("json"))
+        try data.write(to: oldURL(resourceKey: resourceKey))
+    }
+
+    private func oldURL(resourceKey: String) -> URL {
+        directory.appendingPathComponent(DraftStore.fingerprint(Data(ownerID.utf8)))
+            .appendingPathComponent(DraftStore.fingerprint(Data(resourceKey.utf8)))
+            .appendingPathExtension("json")
     }
 
     private func creationURL(id: UUID) throws -> URL {

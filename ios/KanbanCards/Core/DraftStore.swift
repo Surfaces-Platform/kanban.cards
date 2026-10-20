@@ -129,6 +129,15 @@ final class DraftStore {
         return try load(ownerID: ownerID, resourceKey: legacyResourceKey, as: type)
     }
 
+    /// Read the preserved backup only when its recorded destination matches exactly.
+    /// A damaged scoped copy must not prevent recovery of these original bytes.
+    func boundLegacyRecordData(ownerID: String, workspace: Workspace, projectID: String,
+        resourceKey: String, legacyResourceKey: String) throws -> Data? {
+        let binding = try load(ownerID: ownerID, resourceKey: bindingKey(legacyResourceKey), as: LegacyScope.self)
+        guard binding == legacyScope(workspace: workspace, projectID: projectID, resourceKey: resourceKey) else { return nil }
+        return try rawRecordData(ownerID: ownerID, resourceKey: legacyResourceKey)
+    }
+
     func unprovenLegacy<T: Decodable>(ownerID: String, legacyResourceKey: String, as type: T.Type) throws -> T? {
         guard try load(ownerID: ownerID, resourceKey: bindingKey(legacyResourceKey), as: LegacyScope.self) == nil else { return nil }
         return try load(ownerID: ownerID, resourceKey: legacyResourceKey, as: type)
