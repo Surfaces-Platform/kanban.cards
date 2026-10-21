@@ -10,6 +10,16 @@ Select the shared `KanbanCards` scheme. The project uses Swift 6, requires iOS 2
 
 Every application screen must use standard Apple components with system appearance and behavior. The [native app plan](../docs/iphone-native-app-plan.md) defines the component inventory. Use Apple's [Human Interface Guidelines](https://developer.apple.com/design/human-interface-guidelines), [Adopting Liquid Glass](https://developer.apple.com/documentation/technologyoverviews/adopting-liquid-glass), and [Materials guidance](https://developer.apple.com/design/human-interface-guidelines/materials) before changing the interface. Do not add custom control styles, materials, drawing, web views, or third-party UI dependencies.
 
+## Create Projects and Cards
+
+New Project and New Card open empty forms. Earlier drafts stay available through **Saved drafts** without blocking new work. New Card starts with Title, Description, and Column; **More details** contains assignment, priority, next action, and blocker.
+
+Typing saves a separate draft on this iPhone. Cancel closes an untouched form immediately. After typing, Cancel offers **Keep Draft**, **Discard Draft**, and **Continue Editing**. Swiping down keeps a successfully saved draft. A failed local save stays visible with a retry and text export.
+
+Open **Saved drafts** to preview earlier work, including a Card's Column, next actor, priority, next action, and blocker. **Continue Draft** resumes a draft saved for the current Workspace. If an earlier create request has no confirmed result, **Check Save** retries that same request. Creating and checking show a progress indicator while the request runs. A draft whose original Workspace is unknown offers **Copy to New Card** or **Copy to New Project**; this copies the displayed contents and keeps the original. Unreadable older records remain available to export, and neither case disables the fresh form. Field names stay visible after typing, and opening another draft clears the previous draft's error.
+
+If the current form already contains work, the recovery action becomes **Keep Current and Copy Draft** or **Keep Current and Open Draft**. It saves that work before switching. **Close** returns to the current form without switching.
+
 ## Create and switch Workspaces
 
 Open the Workspace title menu above the Project list to switch Workspaces or choose **New Workspace…**. The native form asks for a name and address. Cancel preserves the selected Workspace; successful creation opens its empty Project list. Accounts with no Workspaces have a visible New Workspace action. Existing Card drafts remain available when switching back.
@@ -19,6 +29,8 @@ Native creation uses the owner-session `POST /api/workspaces` contract. The back
 ## Browse archived Projects
 
 Open **Archived Projects** at the bottom of a Workspace's Project list, then choose a Project. Its Cards, Archived Cards, Comments, Activity, and filters remain available. Archived Projects have no server editing, Move, archive, restore, or Comment actions.
+
+Choose **Saved Card Drafts** in an archived Project to preview and export unfinished new Cards. Restore the Project in the Mac app before resuming or creating a Card on this iPhone. If the Project becomes archived during creation, the sheet shows the saved draft collection with the same preview and export actions.
 
 A retained Card draft can still be confirmed for its original Workspace, copied, or exported. Confirmation protects a local copy on this iPhone and preserves the older record. It does not restore the Project or Card or save draft text to the server. Local draft fields and Revert remain disabled while browsing an archived Project.
 

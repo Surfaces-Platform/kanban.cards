@@ -18,6 +18,9 @@ final class AppModel {
     private var workspaceLoadID: UUID?
     private var workspaceCreationID: UUID?
     private var uncertainWorkspaceCreationBaselines: [WorkspaceCreationIntent: Set<String>] = [:]
+    #if DEBUG
+    private var demoCreationAttempts: Set<String> = []
+    #endif
     private(set) var loadingWorkspaces = false
     private(set) var creatingWorkspace = false
     private(set) var workspaceLoadFailed = false
@@ -84,6 +87,65 @@ final class AppModel {
                     try? drafts.save("Synthetic unread creation record; retain operation-key-\(resource)",
                         ownerID: "demo-owner", resourceKey: key)
                 }
+            }
+            if ProcessInfo.processInfo.arguments.contains("--demo-legacy-creation-drafts") {
+                var cardDraft = CardDraft(columnId: "next")
+                cardDraft.title = "Older Card idea"
+                cardDraft.body = "Keep this original Card draft while I start something new."
+                let cardPending = PendingCardDraft(draft: cardDraft, key: "demo-legacy-card-request")
+                let projectPending = PendingProjectDraft(
+                    draft: ProjectDraft(name: "Older Project idea",
+                        description: "Keep this original Project draft while I start something new."),
+                    key: "demo-legacy-project-request")
+                // Owner-only keys represent pre-scope drafts; recovering text must
+                // not imply that the user or app knows their original Workspace.
+                try? drafts.save(cardPending, ownerID: "demo-owner", resourceKey: "card:\(project.id):new")
+                try? drafts.save(projectPending, ownerID: "demo-owner", resourceKey: "project:demo-workspace:new")
+            }
+            if ProcessInfo.processInfo.arguments.contains("--demo-bound-corrupt-creation-drafts"),
+               let workspace = workspaces.first {
+                var cardDraft = CardDraft(columnId: "next")
+                cardDraft.title = "Bound Card backup"
+                cardDraft.body = "Recover this original Card backup after the newer scoped record is damaged."
+                let cardPending = PendingCardDraft(draft: cardDraft, key: "demo-bound-card-request")
+                let projectPending = PendingProjectDraft(
+                    draft: ProjectDraft(name: "Bound Project backup",
+                        description: "Recover this original Project backup after the newer scoped record is damaged."),
+                    key: "demo-bound-project-request")
+                let cardResource = "card:\(project.id):new"
+                let projectResource = "project:\(workspace.id):new"
+                // Keep a valid original and its exact Workspace binding, then
+                // damage only the newer scoped copy to exercise backup discovery.
+                try? drafts.save(cardPending, ownerID: "demo-owner", resourceKey: cardResource)
+                try? drafts.recoverLegacy(cardPending, ownerID: "demo-owner", workspace: workspace,
+                    projectID: project.id, resourceKey: cardResource, legacyResourceKey: cardResource)
+                try? drafts.save(projectPending, ownerID: "demo-owner", resourceKey: projectResource)
+                try? drafts.recoverLegacy(projectPending, ownerID: "demo-owner", workspace: workspace,
+                    projectID: "new", resourceKey: projectResource, legacyResourceKey: projectResource)
+                for (projectID, resource) in [(project.id, cardResource), ("new", projectResource)] {
+                    let scopedKey = drafts.scopedKey(workspace: workspace, projectID: projectID, resourceKey: resource)
+                    try? drafts.save("Synthetic damaged scoped creation record", ownerID: "demo-owner", resourceKey: scopedKey)
+                }
+            }
+            if ProcessInfo.processInfo.arguments.contains("--demo-creation-recovery-metadata") {
+                var cardDraft = CardDraft(columnId: "doing")
+                cardDraft.title = "Card with saved details"
+                cardDraft.body = "Review every saved detail before copying."
+                cardDraft.nextActor = .agent
+                cardDraft.priority = .high
+                cardDraft.nextAction = "Review the saved plan"
+                cardDraft.blockedReason = "Waiting for approval"
+                try? drafts.save(PendingCardDraft(draft: cardDraft, key: "demo-details-request"),
+                    ownerID: "demo-owner", resourceKey: "card:\(project.id):new")
+            }
+            if ProcessInfo.processInfo.arguments.contains("--demo-archived-creation-draft"),
+               let workspace = workspaces.first {
+                var cardDraft = CardDraft(columnId: "next")
+                cardDraft.title = "Card saved before archiving"
+                cardDraft.body = "Keep this draft available after the Project is archived."
+                try? drafts.saveCreationDraft(PendingCardDraft(draft: cardDraft, key: "demo-archived-request"),
+                    id: UUID(), ownerID: "demo-owner", workspace: workspace,
+                    projectID: "demo-archived-project", resourceKey: "card:demo-archived-project:new")
             }
             #endif
         }
@@ -320,6 +382,9 @@ final class AppModel {
         if let id = draft.id { try requireWritableProject(id, in: workspace) }
         let project: Project
         if isDemo {
+            #if DEBUG
+            if draft.id == nil { try await prepareDemoCreation(key: key) }
+            #endif
             let timestamp = ServerTimestamp.string()
             if let id = draft.id, var existing = loadedProjects[id] {
                 existing.name = draft.name
@@ -350,10 +415,23 @@ final class AppModel {
 
     func saveCard(_ proposed: CardDraft, projectID: String, in workspace: Workspace, key: String,
                   onConfirmed: ((Card) -> Void)? = nil) async throws -> Card {
+        #if DEBUG
+        if isDemo, proposed.id == nil,
+           ProcessInfo.processInfo.arguments.contains("--demo-archive-project-on-save"),
+           var project = loadedProjects[projectID] {
+            project.archivedAt = ServerTimestamp.string()
+            loadedProjects[projectID] = project
+            updateSummary(project, workspaceID: workspace.id)
+            throw APIError(message: "This Project was archived.", statusCode: 409)
+        }
+        #endif
         try requireWritableProject(projectID, in: workspace)
         let draft = proposed
         let card: Card
         if isDemo {
+            #if DEBUG
+            if draft.id == nil { try await prepareDemoCreation(key: key) }
+            #endif
             guard var project = loadedProjects[projectID] else { throw AppFailure.missingProject }
             if let id = draft.id, let current = project.cards.first(where: { $0.id == id }), current.version != draft.version { throw AppFailure.conflict }
             let timestamp = ServerTimestamp.string()
@@ -376,6 +454,21 @@ final class AppModel {
         if isDemo { onConfirmed?(card) }
         return card
     }
+
+    #if DEBUG
+    private func prepareDemoCreation(key: String) async throws {
+        if ProcessInfo.processInfo.arguments.contains("--demo-creation-save-delay") {
+            try await Task.sleep(for: .seconds(30))
+        }
+        if ProcessInfo.processInfo.arguments.contains("--demo-creation-save-error") {
+            throw APIError(message: "Demo creation request was rejected.", statusCode: 422)
+        }
+        if ProcessInfo.processInfo.arguments.contains("--demo-creation-save-uncertain"),
+           demoCreationAttempts.insert(key).inserted {
+            throw APIError(message: "The connection was interrupted.", isAmbiguousMutation: true)
+        }
+    }
+    #endif
 
     func addComment(_ body: String, cardID: String, projectID: String, in workspace: Workspace, key: String,
                     onConfirmed: (() -> Void)? = nil) async throws {

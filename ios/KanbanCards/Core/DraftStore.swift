@@ -5,15 +5,18 @@ import Foundation
 final class DraftStore {
     private let directory: URL
     private let fileManager: FileManager
+    private let creationStore: CreationDraftStore
     private var memory: [String: Data] = [:]
     private var failedWrites = Set<String>()
     var failWrites = false
 
     init(directory: URL? = nil, fileManager: FileManager = .default) {
         self.fileManager = fileManager
-        self.directory = directory ?? fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let draftDirectory = directory ?? fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("kanban.cards", isDirectory: true)
             .appendingPathComponent("Drafts", isDirectory: true)
+        self.directory = draftDirectory
+        self.creationStore = CreationDraftStore(directory: draftDirectory, fileManager: fileManager)
         #if DEBUG
         failWrites = ProcessInfo.processInfo.arguments.contains("--demo-draft-write-failure")
         #endif
@@ -34,6 +37,46 @@ final class DraftStore {
         let decoded = try JSONDecoder().decode(type, from: data)
         memory[key] = data
         return decoded
+    }
+
+    /// Read-only access for identifying the exact retained source. Merely
+    /// discovering an old slot never binds, rewrites, deletes, or replays it.
+    func rawRecordData(ownerID: String, resourceKey: String) throws -> Data? {
+        if let data = memory[memoryKey(ownerID, resourceKey)] { return data }
+        let url = fileURL(ownerID: ownerID, resourceKey: resourceKey)
+        guard fileManager.fileExists(atPath: url.path) else { return nil }
+        return try Data(contentsOf: url)
+    }
+
+    static func fingerprint(_ data: Data) -> String { CreationDraftStore.fingerprint(data) }
+
+    func listCreationDrafts(ownerID: String, workspace: Workspace, projectID: String,
+        resourceKey: String) -> CreationDraftListing {
+        creationStore.list(ownerID: ownerID,
+            scope: scopedKey(workspace: workspace, projectID: projectID, resourceKey: resourceKey))
+    }
+
+    @discardableResult
+    func saveCreationDraft<T: Encodable>(_ draft: T, id: UUID, ownerID: String,
+        workspace: Workspace, projectID: String, resourceKey: String,
+        sourceFingerprint: String? = nil, savedAt: Date = Date()) throws -> CreationDraftRecord {
+        try creationStore.save(JSONEncoder().encode(draft), id: id, ownerID: ownerID,
+            scope: scopedKey(workspace: workspace, projectID: projectID, resourceKey: resourceKey),
+            sourceFingerprint: sourceFingerprint, savedAt: savedAt, failWrites: failWrites)
+    }
+
+    func resolveCreationDraft(id: UUID, ownerID: String, workspace: Workspace,
+        projectID: String, resourceKey: String) throws {
+        try creationStore.resolve(id: id, ownerID: ownerID,
+            scope: scopedKey(workspace: workspace, projectID: projectID, resourceKey: resourceKey),
+            failWrites: failWrites)
+    }
+
+    func discardCreationDraft(id: UUID, ownerID: String, workspace: Workspace,
+        projectID: String, resourceKey: String) throws {
+        try creationStore.discard(id: id, ownerID: ownerID,
+            scope: scopedKey(workspace: workspace, projectID: projectID, resourceKey: resourceKey),
+            failWrites: failWrites)
     }
 
     /// A retry must perform a new read, but failed-write memory may be the
@@ -84,6 +127,15 @@ final class DraftStore {
         let binding = try load(ownerID: ownerID, resourceKey: bindingKey(legacyResourceKey), as: LegacyScope.self)
         guard binding == legacyScope(workspace: workspace, projectID: projectID, resourceKey: resourceKey) else { return nil }
         return try load(ownerID: ownerID, resourceKey: legacyResourceKey, as: type)
+    }
+
+    /// Read the preserved backup only when its recorded destination matches exactly.
+    /// A damaged scoped copy must not prevent recovery of these original bytes.
+    func boundLegacyRecordData(ownerID: String, workspace: Workspace, projectID: String,
+        resourceKey: String, legacyResourceKey: String) throws -> Data? {
+        let binding = try load(ownerID: ownerID, resourceKey: bindingKey(legacyResourceKey), as: LegacyScope.self)
+        guard binding == legacyScope(workspace: workspace, projectID: projectID, resourceKey: resourceKey) else { return nil }
+        return try rawRecordData(ownerID: ownerID, resourceKey: legacyResourceKey)
     }
 
     func unprovenLegacy<T: Decodable>(ownerID: String, legacyResourceKey: String, as type: T.Type) throws -> T? {
@@ -156,6 +208,7 @@ final class DraftStore {
         let prefix = digest(ownerID) + ":"
         memory = memory.filter { !$0.key.hasPrefix(prefix) }
         failedWrites = Set(failedWrites.filter { !$0.hasPrefix(prefix) })
+        creationStore.removeMemory(ownerID: ownerID)
     }
 
     private func memoryKey(_ ownerID: String, _ resourceKey: String) -> String { digest(ownerID) + ":" + digest(resourceKey) }
