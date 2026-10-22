@@ -37,7 +37,7 @@ jobs:
 
   native-ios-tests:
     runs-on: xcode-27
-    timeout-minutes: 35
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -49,9 +49,29 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Boot an isolated iPhone simulator
+        id: simulator
+        timeout-minutes: 5
+        shell: bash
+        env:
+          TEST_SUITE: ${{ matrix.suite }}
+        run: |
+          mkdir -p .local/ios/bootstrap
+          xcodebuild -version > .local/ios/bootstrap/xcode-version.txt
+          xcrun simctl list runtimes --json > .local/ios/bootstrap/runtimes.json
+          simulator_id=$(xcrun simctl create \
+            "KanbanCards-${TEST_SUITE}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            com.apple.CoreSimulator.SimDeviceType.iPhone-17 \
+            com.apple.CoreSimulator.SimRuntime.iOS-27-0)
+          echo "id=$simulator_id" >> "$GITHUB_OUTPUT"
+          xcrun simctl boot "$simulator_id"
+          xcrun simctl bootstatus "$simulator_id" -b 2>&1 | tee .local/ios/bootstrap/bootstatus.log
+          xcrun simctl list devices --json > .local/ios/bootstrap/devices.json
+
       - name: Run native unit and UI tests
         env:
           TEST_SUITE: ${{ matrix.suite }}
+          SIMULATOR_ID: ${{ steps.simulator.outputs.id }}
         run: |
           if [ "$TEST_SUITE" = creation ]; then
             test_selection='-only-testing:KanbanCardsUITests/CreationFlowTests'
@@ -60,7 +80,7 @@ jobs:
           fi
           xcodebuild -project ios/KanbanCards.xcodeproj \
             -scheme KanbanCards -configuration Debug \
-            -destination 'platform=iOS Simulator,name=iPhone 17,OS=27.0' \
+            -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
             -derivedDataPath .local/ios/DerivedData \
             -resultBundlePath ".local/ios/$TEST_SUITE.xcresult" \
             -parallel-testing-enabled NO -collect-test-diagnostics never \
@@ -72,10 +92,20 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: native-ios-${{ matrix.suite }}-results
-          path: .local/ios/${{ matrix.suite }}.xcresult
+          path: |
+            .local/ios/${{ matrix.suite }}.xcresult
+            .local/ios/bootstrap
           include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7
+
+      - name: Remove the CI-owned simulator
+        if: always() && steps.simulator.outputs.id != ''
+        env:
+          SIMULATOR_ID: ${{ steps.simulator.outputs.id }}
+        run: |
+          xcrun simctl shutdown "$SIMULATOR_ID" || true
+          xcrun simctl delete "$SIMULATOR_ID" || true
 
   native-ios:
     if: always()
