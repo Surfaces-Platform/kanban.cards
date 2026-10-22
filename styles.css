@@ -177,6 +177,13 @@ h3 {
 
 .workspace-route-card {
   inline-size: min(100%, 36rem);
+  min-inline-size: 0;
+}
+
+.workspace-route-card > *,
+.workspace-route-card .access-form > *,
+.workspace-route-card .jk-field > * {
+  min-inline-size: 0;
 }
 
 .workspace-choices {
