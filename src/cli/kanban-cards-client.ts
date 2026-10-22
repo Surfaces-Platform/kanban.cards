@@ -4,8 +4,25 @@ import os from "node:os";
 import path from "node:path";
 
 const DEFAULT_BASE_URL = "http://127.0.0.1:4317/api";
-const USER_CONFIG_PATH = path.join(os.homedir(), ".kanban-cards", "config.json");
+const CONFIG_DIRECTORY = process.env.KANBAN_CARDS_CONFIG_DIR ?? path.join(os.homedir(), ".kanban-cards");
+const USER_CONFIG_PATH = path.join(CONFIG_DIRECTORY, "config.json");
 const REPO_CONFIG_NAME = ".kanban-cards.json";
+
+const PAIRING_CONFIG_PATH = path.join(CONFIG_DIRECTORY, "pairing.json");
+const PAIRING_TTL_MS = 10 * 60_000;
+const PAIRING_POLL_MS = 1_500;
+
+interface PendingPairing {
+  pairingId: string;
+  deviceToken: string;
+  userCode: string;
+  expiresAt: string;
+  apiBaseUrl: string;
+  authOrigin: string;
+  workspaceId: string;
+  projectId: string;
+  label: string;
+}
 
 type CliOptions = Record<string, string | boolean | undefined>;
 
@@ -32,10 +49,17 @@ interface RequestOptions {
   expectedVersion?: string;
 }
 
+class ConnectionRequestError extends Error {
+  constructor(message: string, readonly status?: number) { super(message); }
+}
+
 try {
   const [command, ...args] = process.argv.slice(2);
   const options = parseArgs(args);
-  const skipsConfig = !command || command === "setup" || command === "help" || command === "--help";
+  if (process.env.KANBAN_CARDS_CONFIG_DIR !== undefined && command && command !== "help" && command !== "--help") {
+    await preparePrivateConfigDirectory(await findRepositoryRoot(repoStart(options)));
+  }
+  const skipsConfig = !command || command === "setup" || command === "connect" || command === "help" || command === "--help";
   const userConfig = skipsConfig ? {} : await loadUserConfig();
   const runtime = resolveRuntime(userConfig);
   const result = await run(command, options, runtime);
@@ -51,6 +75,7 @@ async function run(action: string | undefined, opts: CliOptions, context: Runtim
   if (!action || action === "help" || action === "--help") return usage();
 
   if (action === "setup") return setup(opts);
+  if (action === "connect") return connect(opts);
 
   requireToken(context);
 
@@ -175,6 +200,232 @@ async function run(action: string | undefined, opts: CliOptions, context: Runtim
   }
 
   throw new Error(`Unknown command: ${action}`);
+}
+
+/** Pair the active Codex host with one Workspace without asking for an API key. */
+async function connect(opts: CliOptions): Promise<void> {
+  assertKnownOptions(opts, ["url", "project-id", "label", "repo"]);
+  const apiBaseUrl = workspaceApiUrl(stringOption(opts, "url"));
+  const projectId = stringOption(opts, "project-id");
+  if (!safeIdentifier(projectId)) throw new Error("The Project ID is invalid.");
+  const label = optionalStringOption(opts, "label") || "Codex";
+  if (label.length > 80 || /[\r\n\x00-\x1f]/.test(label)) throw new Error("The connection label must be one line of at most 80 characters.");
+  const repositoryRoot = await findRepositoryRoot(repoStart(opts));
+  const bindingPath = path.join(repositoryRoot, REPO_CONFIG_NAME);
+  await assertSafeExistingRepoConfig(bindingPath);
+  await preparePrivateConfigDirectory(repositoryRoot);
+
+  const session = await connectionRequest(`${apiBaseUrl}/session`);
+  const workspaceId = exactWorkspaceId(session, apiBaseUrl);
+  const authOrigin = pairingAuthOrigin(apiBaseUrl, session);
+  let pairing = await loadPendingPairing();
+  if (pairing && Date.parse(pairing.expiresAt) <= Date.now()) {
+    await fs.rm(PAIRING_CONFIG_PATH, { force: true });
+    pairing = undefined;
+  }
+  if (pairing && (pairing.apiBaseUrl !== apiBaseUrl || pairing.authOrigin !== authOrigin ||
+      pairing.workspaceId !== workspaceId || pairing.projectId !== projectId || pairing.label !== label)) {
+    throw new Error("A connection approval is already pending for another Workspace, Project, or label. Finish that approval or wait for it to expire before starting another.");
+  }
+  const saved = await loadUserConfig();
+  const bound = await readJsonIfPresent(bindingPath);
+  if (saved.apiBaseUrl === apiBaseUrl && typeof saved.token === "string" && saved.token &&
+      saved.actor === label && isRecord(bound) && bound.projectId === projectId) {
+    let previousSession: unknown;
+    try { previousSession = await connectionRequest(`${apiBaseUrl}/session`, { token: saved.token }); }
+    catch (error) {
+      if (!(error instanceof ConnectionRequestError) || (error.status !== 401 && error.status !== 403)) throw error;
+    }
+    if (isRecord(previousSession) && previousSession.authenticated === true && hasReadWriteAccess(previousSession)) {
+      if (exactWorkspaceId(previousSession, apiBaseUrl) !== workspaceId) throw new Error("The saved credential does not match the requested Workspace.");
+      const project = await connectionRequest(`${apiBaseUrl}/projects/${encodeURIComponent(projectId)}`, { token: saved.token });
+      if (!isRecord(project) || !isRecord(project.project) || project.project.id !== projectId) throw new Error("The selected Project could not be verified in the saved Workspace connection.");
+      if (pairing) await fs.rm(PAIRING_CONFIG_PATH, { force: true });
+      process.stdout.write("Workspace access is already approved. Continue this Project in Codex.\n");
+      return;
+    }
+  }
+  if (!pairing) {
+    const created = await connectionRequest(`${authOrigin}/api/native-auth/agent-pairings`, { body: { workspaceId, label } });
+    if (!isRecord(created) || !safeIdentifier(created.pairingId) ||
+        typeof created.deviceToken !== "string" || !/^[A-Za-z0-9_-]{32,256}$/.test(created.deviceToken) ||
+        typeof created.userCode !== "string" || !/^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(created.userCode) ||
+        typeof created.expiresAt !== "string" || !validPairingExpiry(created.expiresAt)) {
+      throw new Error("The pairing service returned an incomplete approval request. Start connection again.");
+    }
+    pairing = { pairingId: created.pairingId, deviceToken: created.deviceToken, userCode: created.userCode,
+      expiresAt: created.expiresAt, apiBaseUrl, authOrigin, workspaceId, projectId, label };
+    await writeJsonAtomic(PAIRING_CONFIG_PATH, pairing, 0o600);
+  }
+
+  process.stdout.write(`Approval code: ${pairing.userCode}\nIn Kanban.cards, open this Project, choose Set up Codex, then Review approval code. Enter the code and approve Agent access. Keep this Codex task open while it waits.\n`);
+  const deadline = Math.min(Date.parse(pairing.expiresAt), Date.now() + PAIRING_TTL_MS);
+  while (Date.now() < deadline) {
+    const result = await connectionRequest(`${authOrigin}/api/native-auth/agent-pairings/poll`, {
+      body: { pairingId: pairing.pairingId, deviceToken: pairing.deviceToken },
+      timeoutMs: Math.max(1, Math.min(30_000, deadline - Date.now()))
+    });
+    if (!isRecord(result)) throw new Error("The pairing service returned an incomplete approval status. Retry connect to resume the same request.");
+    if (result.status === "pending") {
+      await new Promise(resolve => setTimeout(resolve, Math.max(1, Math.min(PAIRING_POLL_MS, deadline - Date.now()))));
+      continue;
+    }
+    if (result.status === "denied" || result.status === "expired") {
+      await fs.rm(PAIRING_CONFIG_PATH, { force: true });
+      throw new Error(result.status === "denied" ? "Connection approval was denied or revoked. Run connect again only when you want to request access." : "Connection approval expired. Run connect again for a new code.");
+    }
+    if (result.status !== "approved" || !isRecord(result.connection) ||
+        result.connection.workspaceId !== workspaceId || typeof result.credential !== "string" ||
+        !/^kac_[A-Za-z0-9_-]{32,512}$/.test(result.credential) ||
+        typeof result.apiBaseUrl !== "string" || workspaceApiUrl(result.apiBaseUrl) !== apiBaseUrl ||
+        !Array.isArray(result.connection.scopes) || !result.connection.scopes.includes("read") || !result.connection.scopes.includes("write") ||
+        result.connection.revokedAt != null) {
+      await fs.rm(PAIRING_CONFIG_PATH, { force: true });
+      throw new Error("The approved connection did not match the requested Workspace and access. No credentials or Project binding were saved.");
+    }
+    const authenticated = await connectionRequest(`${apiBaseUrl}/session`, { token: result.credential });
+    if (!isRecord(authenticated) || authenticated.authenticated !== true || !hasReadWriteAccess(authenticated) || exactWorkspaceId(authenticated, apiBaseUrl) !== workspaceId) {
+      await fs.rm(PAIRING_CONFIG_PATH, { force: true });
+      throw new Error("The approved credential did not authenticate the requested Workspace with read/write access. No credentials or Project binding were saved.");
+    }
+    const project = await connectionRequest(`${apiBaseUrl}/projects/${encodeURIComponent(projectId)}`, { token: result.credential });
+    if (!isRecord(project) || !isRecord(project.project) || project.project.id !== projectId) {
+      throw new Error("The selected Project could not be verified in the approved Workspace. No credentials or Project binding were saved.");
+    }
+    const previousConfig = await fs.readFile(USER_CONFIG_PATH, "utf8").catch(error => {
+      if (isNodeError(error) && error.code === "ENOENT") return undefined;
+      throw error;
+    });
+    await writeJsonAtomic(USER_CONFIG_PATH, { apiBaseUrl, token: result.credential, actor: label }, 0o600);
+    try {
+      await writeJsonAtomic(bindingPath, { projectId }, 0o644);
+    } catch {
+      if (previousConfig === undefined) await fs.rm(USER_CONFIG_PATH, { force: true });
+      else await writeJsonAtomic(USER_CONFIG_PATH, JSON.parse(previousConfig), 0o600);
+      throw new Error("The Project binding could not be saved. Retry connect to resume the approved request.");
+    }
+    await fs.rm(PAIRING_CONFIG_PATH, { force: true });
+    process.stdout.write("Access approved. Continue this Project in Codex.\n");
+    return;
+  }
+  await fs.rm(PAIRING_CONFIG_PATH, { force: true });
+  throw new Error("Connection approval expired. Run connect again for a new code.");
+}
+
+function workspaceApiUrl(value: string): string {
+  const normalized = normalizeBaseUrl(value);
+  const url = new URL(normalized);
+  if (url.pathname !== "/" && url.pathname !== "/api") throw new Error("Use the Workspace URL or its /api URL, without a Project path.");
+  return `${url.origin}/api`;
+}
+
+function exactWorkspaceId(session: unknown, apiBaseUrl: string): string {
+  if (!isRecord(session) || session.context !== "workspace" || !isRecord(session.workspace) ||
+      !safeIdentifier(session.workspace.id) || typeof session.workspace.url !== "string" ||
+      workspaceApiUrl(session.workspace.url) !== apiBaseUrl) {
+    throw new Error("The requested URL did not identify the exact Workspace. No credentials or Project binding were saved.");
+  }
+  return session.workspace.id;
+}
+
+function pairingAuthOrigin(apiBaseUrl: string, session: unknown): string {
+  const target = new URL(apiBaseUrl);
+  if (target.hostname.endsWith(".kanban.cards") && target.hostname !== "auth.kanban.cards") return "https://auth.kanban.cards";
+  if (!isLoopbackHostname(target.hostname) || !isRecord(session) || typeof session.loginUrl !== "string") {
+    throw new Error("Native pairing requires a kanban.cards Workspace or a configured local test service.");
+  }
+  let auth: URL;
+  try { auth = new URL(session.loginUrl); } catch { throw new Error("The local service did not identify its authentication origin."); }
+  if (!isLoopbackHostname(auth.hostname) || auth.protocol !== target.protocol || auth.port !== target.port || auth.username || auth.password || auth.search || auth.hash) {
+    throw new Error("The local authentication origin must use the same loopback service.");
+  }
+  return auth.origin;
+}
+
+function hasReadWriteAccess(value: Record<string, unknown>): boolean {
+  return Array.isArray(value.scopes) && value.scopes.includes("read") && value.scopes.includes("write");
+}
+
+function safeIdentifier(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{1,160}$/.test(value);
+}
+
+function validPairingExpiry(value: string): boolean {
+  const expires = Date.parse(value);
+  return Number.isFinite(expires) && expires > Date.now() && expires <= Date.now() + PAIRING_TTL_MS + 30_000;
+}
+
+async function loadPendingPairing(): Promise<PendingPairing | undefined> {
+  const value = await readJsonIfPresent(PAIRING_CONFIG_PATH);
+  if (value === undefined) return undefined;
+  if (!isRecord(value) || !safeIdentifier(value.pairingId) || typeof value.deviceToken !== "string" ||
+      !/^[A-Za-z0-9_-]{32,256}$/.test(value.deviceToken) || typeof value.userCode !== "string" ||
+      !/^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(value.userCode) || typeof value.expiresAt !== "string" ||
+      !Number.isFinite(Date.parse(value.expiresAt)) || typeof value.apiBaseUrl !== "string" ||
+      typeof value.authOrigin !== "string" || !safeIdentifier(value.workspaceId) ||
+      typeof value.projectId !== "string" || typeof value.label !== "string") {
+    throw new Error("The saved connection approval is invalid. Remove only pairing.json from the configured private credential directory, then retry connect.");
+  }
+  await fs.chmod(PAIRING_CONFIG_PATH, 0o600);
+  return value as unknown as PendingPairing;
+}
+
+async function preparePrivateConfigDirectory(repositoryRoot: string): Promise<void> {
+  const directory = path.dirname(USER_CONFIG_PATH);
+  if (!path.isAbsolute(CONFIG_DIRECTORY) || !CONFIG_DIRECTORY || /[\r\n\0]/.test(CONFIG_DIRECTORY)) {
+    throw new Error("KANBAN_CARDS_CONFIG_DIR must be an absolute private directory path.");
+  }
+  const repo = await fs.realpath(repositoryRoot);
+  const isInside = (candidate: string): boolean => candidate === repo || candidate.startsWith(`${repo}${path.sep}`);
+  if (isInside(path.resolve(directory)) || isInside(await prospectiveRealPath(directory))) {
+    throw new Error("The user credential directory must be outside the repository.");
+  }
+  const existing = await fs.lstat(directory).catch(error => {
+    if (isNodeError(error) && error.code === "ENOENT") return undefined;
+    throw error;
+  });
+  if (existing && (!existing.isDirectory() || existing.isSymbolicLink())) throw new Error("The user credential directory must be a private regular directory.");
+  await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+  if (isInside(await fs.realpath(directory))) throw new Error("The user credential directory must be outside the repository.");
+  await fs.chmod(directory, 0o700);
+  for (const file of [USER_CONFIG_PATH, PAIRING_CONFIG_PATH]) {
+    const stat = await fs.lstat(file).catch(error => {
+      if (isNodeError(error) && error.code === "ENOENT") return undefined;
+      throw error;
+    });
+    if (stat && (!stat.isFile() || stat.isSymbolicLink())) throw new Error("The user credential files must be regular private files.");
+    if (stat) await fs.chmod(file, 0o600);
+  }
+}
+
+/** Resolve existing parents before creating a directory, including symlinked ancestors. */
+async function prospectiveRealPath(directory: string): Promise<string> {
+  let candidate = path.resolve(directory);
+  const missing: string[] = [];
+  while (true) {
+    try { return path.join(await fs.realpath(candidate), ...missing.reverse()); }
+    catch (error) {
+      if (!isNodeError(error) || error.code !== "ENOENT") throw error;
+      missing.push(path.basename(candidate));
+      const parent = path.dirname(candidate);
+      if (parent === candidate) throw new Error("The private credential directory could not be resolved.");
+      candidate = parent;
+    }
+  }
+}
+
+/** Pairing errors never echo remote bodies, URLs, credentials, or transport internals. */
+async function connectionRequest(url: string, options: { body?: Record<string, unknown>; token?: string; timeoutMs?: number } = {}): Promise<unknown> {
+  let response: Response;
+  try {
+    response = await fetch(url, { method: options.body ? "POST" : "GET", redirect: "error",
+      headers: { ...(options.body ? { "Content-Type": "application/json" } : {}), ...(options.token ? { Authorization: `Bearer ${options.token}` } : {}) },
+      body: options.body ? JSON.stringify(options.body) : undefined, signal: AbortSignal.timeout(options.timeoutMs ?? 30_000) });
+  } catch {
+    throw new ConnectionRequestError("The connection service could not be reached. Retry connect to resume an unfinished approval.");
+  }
+  if (!response.ok) throw new ConnectionRequestError(`The connection service rejected the request (${response.status}). Retry after checking access in Kanban.cards.`, response.status);
+  try { return await response.json(); } catch { throw new Error("The connection service returned an invalid response. Retry connect to resume an unfinished approval."); }
 }
 
 async function setup(opts: CliOptions): Promise<Record<string, unknown>> {
@@ -439,7 +690,7 @@ function requireNonEmptyBody(body: Record<string, unknown>, command: string): vo
 }
 
 function requireToken(context: RuntimeContext): void {
-  if (!context.token) throw new Error("Run setup with --token-stdin before using the API.");
+  if (!context.token) throw new Error("Run connect --url <WorkspaceURL> --project-id <ID> --label Codex before using the API.");
 }
 
 function normalizeBaseUrl(value: string): string {
@@ -484,7 +735,7 @@ function parseArgs(values: string[]): CliOptions {
   const parsed: CliOptions = {};
   for (let index = 0; index < values.length; index += 1) {
     const value = values[index];
-    if (!value.startsWith("--")) throw new Error(`Unexpected argument: ${value}`);
+    if (!value.startsWith("--")) throw new Error("Unexpected argument. Use named options; never pass credentials as arguments.");
     const equalsIndex = value.indexOf("=");
     const key = equalsIndex > 2 ? value.slice(2, equalsIndex) : value.slice(2);
     if (Object.hasOwn(parsed, key)) throw new Error(`Repeated option: --${key}. Supply each option once.`);
@@ -506,8 +757,10 @@ function parseArgs(values: string[]): CliOptions {
 function usage(): Record<string, unknown> {
   return {
     userConfig: USER_CONFIG_PATH,
+    privateConfigDirectoryEnvironment: "KANBAN_CARDS_CONFIG_DIR (absolute path outside the target repository)",
     repositoryConfig: REPO_CONFIG_NAME,
     commands: [
+      "connect --url <workspace-url> --project-id <project-id> [--label Codex] [--repo <path>]",
       "setup [--url <api-url>] [--actor <label>] --token-stdin",
       "session",
       "projects",

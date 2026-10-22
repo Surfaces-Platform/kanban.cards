@@ -178,3 +178,7 @@ Return `{ "activity": Activity[], "projectRevision": number }`. Agent calls reco
 | `activity` | `GET /projects/:projectId/activity` |
 
 `create-card` and `update-card` accept `--next-actor human|agent|unassigned`, `--next-action <text>`, `--priority High|Medium|Low|unset`, and `--blocked-reason <text>`. The helper maps `unassigned` and `unset` to API `null`. Pass `""` for an action or blocker to clear it. `update-card` still requires `--version` for metadata-only changes.
+
+## Saved Project Idea
+
+A Project can include `idea: { originalInput, brief, completionCriteria }`. `originalInput` preserves the owner’s exact text and cannot be replaced after capture. Native onboarding returns the first Project with its saved Idea. Read it through the normal `project` command before creating bounded Cards. The plugin does not require a separate planning service.

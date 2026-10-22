@@ -1,0 +1,37 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "kanban-cards",
+  "version": "0.1.0",
+  "description": "Connect Codex to Kanban.cards with native approval, then track and complete Project work.",
+  "author": {
+    "name": "Kanban.cards",
+    "url": "https://kanban.cards"
+  },
+  "homepage": "https://kanban.cards",
+  "repository": "https://github.com/Surfaces-Platform/kanban.cards",
+  "keywords": [
+    "kanban",
+    "project",
+    "cards"
+  ],
+  "extensions": {
+    "com.openai": {
+      "onboardingSkill": "./skills/setup/SKILL.md",
+      "interface": {
+        "displayName": "Kanban.cards",
+        "shortDescription": "Connect Codex and keep Project Cards up to date",
+        "longDescription": "Approve Workspace access in the Kanban.cards app, then use Codex to carry out bounded Project work and keep Cards up to date. Requires an execution host with Node.js and network access.",
+        "developerName": "Kanban.cards",
+        "category": "Productivity",
+        "capabilities": [
+          "Read",
+          "Write"
+        ],
+        "websiteURL": "https://kanban.cards",
+        "defaultPrompt": [
+          "Use Kanban.cards to connect this Project with native approval, then read its Idea and Cards and carry out the authorized work."
+        ]
+      }
+    }
+  }
+}

@@ -20,6 +20,23 @@ const AUTH = `https://${AUTH_HOST}`;
 const SECRET = "native-session-test-secret-at-least-32-bytes";
 const APP_ID = "ABCDEFGHIJ.test.kanban.ios";
 
+test("session reports only verified AgentConnection scopes and never infers writes from owner or read-only sessions", async () => fixture(async h => {
+  const reader = await h.accessStore.createAgentConnection({ providerSubject: h.owner.id, workspaceId: h.first.id, label: "Reader", scopes: ["read"] });
+  const writer = await h.accessStore.createAgentConnection({ providerSubject: h.owner.id, workspaceId: h.first.id, label: "Reader and writer", scopes: ["read", "write"] });
+  const writeOnly = await h.accessStore.createAgentConnection({ providerSubject: h.owner.id, workspaceId: h.first.id, label: "Write only", scopes: ["write"] });
+  const readSession = await h.request("first.kanban.cards", "/api/session", { token: reader.credential, headers: { "X-Kanban-Scopes": "read,write" } });
+  assert.equal(readSession.status, 200);
+  assert.deepEqual(readSession.data.scopes, ["read"]);
+  assert.deepEqual((await h.request("first.kanban.cards", "/api/session", { token: writer.credential })).data.scopes, ["read", "write"]);
+  assert.equal((await h.request("first.kanban.cards", "/api/session", { token: writeOnly.credential })).status, 403);
+  const native = await h.signin();
+  for (const options of [{ token: native.token }, { cookie: h.tenantCookie }, {}]) {
+    const result = await h.request("first.kanban.cards", "/api/session", options);
+    assert.equal(result.status, 200);
+    assert.equal("scopes" in result.data, false);
+  }
+}));
+
 async function fixture(run: (h: Awaited<ReturnType<typeof harness>>) => Promise<void>, appIds = [APP_ID]) {
   const h = await harness(appIds);
   try { await run(h); } finally { await new Promise<void>((resolve, reject) => h.server.close(e => e ? reject(e) : resolve())); await fs.rm(h.directory, { recursive: true, force: true }); }

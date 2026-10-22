@@ -1,3 +1,4 @@
+import { normalizeProjectIdea } from "./project-idea";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -293,6 +294,7 @@ function normalizeProject(value: unknown): Project {
     id,
     name,
     description: stringValue(project.description),
+    ...(project.idea === undefined ? {} : { idea: normalizeProjectIdea(project.idea) }),
     columns,
     cards,
     activity,
