@@ -40,7 +40,7 @@ test("the skill helper keeps credentials user-scoped and reconciles a bound proj
     server.listen(0, "127.0.0.1", resolve);
   });
   const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api`;
-  const env = cleanEnv({ HOME: home });
+  const env = cleanEnv({ KANBAN_CARDS_CONFIG_DIR: path.join(home, ".kanban-cards") });
 
   try {
     await assert.rejects(
@@ -166,7 +166,7 @@ test("the skill helper verifies a tenant-bound AgentConnection, preserves stable
   });
   const rootApi = `http://localhost:${port}/api`;
   const tenantApi = `http://${workspace.slug}.localhost:${port}/api`;
-  const env = cleanEnv({ HOME: home });
+  const env = cleanEnv({ KANBAN_CARDS_CONFIG_DIR: path.join(home, ".kanban-cards") });
 
   try {
     await assert.rejects(
@@ -212,7 +212,7 @@ test("the skill helper creates, clears, and filters card handoff fields without 
     server.listen(0, "127.0.0.1", resolve);
   });
   const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api`;
-  const options = { cwd: repository, env: cleanEnv({ HOME: home }) };
+  const options = { cwd: repository, env: cleanEnv({ KANBAN_CARDS_CONFIG_DIR: path.join(home, ".kanban-cards") }) };
   const run = async (args: string[]) => JSON.parse((await runCli(args, options)).stdout);
 
   try {

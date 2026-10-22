@@ -1,0 +1,35 @@
+name: Auth browser acceptance
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the exact requested revision
+        uses: actions/checkout@v4
+      - name: Record the tested revision
+        run: git rev-parse HEAD
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Install Chromium on the Linux runner
+        run: npx playwright install --with-deps chromium
+      - name: Run browser acceptance with isolated test data
+        run: npm run test:browser
+      - name: Retain failed test evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: auth-browser-acceptance-failure
+          path: output/playwright/context-dock-regression/
+          retention-days: 7

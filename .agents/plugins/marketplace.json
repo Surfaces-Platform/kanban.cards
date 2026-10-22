@@ -1,0 +1,20 @@
+{
+  "name": "kanban-cards",
+  "interface": {
+    "displayName": "Kanban.cards"
+  },
+  "plugins": [
+    {
+      "name": "kanban-cards",
+      "source": {
+        "source": "local",
+        "path": "./plugins/kanban-cards"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

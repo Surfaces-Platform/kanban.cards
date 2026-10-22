@@ -1,10 +1,11 @@
+import { normalizeInitialProject } from "./project-idea";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { Pool } from "pg";
 
 import { normalizePostgresConnectionString, resolvePostgresSsl } from "./postgres-config";
-import type { PostgresOptions } from "./types";
+import type { InitialProjectInput, PostgresOptions } from "./types";
 
 export const ACCESS_REGISTRY_SCHEMA_VERSION = 1 as const;
 export const DEFAULT_ACCESS_TABLE_NAME = "kanban_v3_access_registry";
@@ -34,6 +35,9 @@ export interface AccessWorkspace {
   slug: string;
   name: string;
   storageId: string;
+  initialProjectId?: string;
+  pendingInitialProject?: InitialProjectInput;
+  creationRequest?: { key: string; hash: string };
   ownerIds: string[];
   createdAt: string;
   updatedAt: string;
@@ -111,8 +115,23 @@ export interface NativeOwnerSession {
   credentialHash: string;
   rootOrigin: string;
   createdAt: string;
+  /** Legacy sessions use createdAt for freshness. */
+  verifiedAt?: string;
   expiresAt: string;
   revokedAt: string | null;
+}
+
+export interface NativeAgentPairing {
+  id: string;
+  deviceTokenHash: string;
+  userCodeHash: string;
+  workspaceId: string;
+  label: string;
+  createdAt: string;
+  expiresAt: string;
+  ownerId: string | null;
+  connectionId: string | null;
+  approvedAt: string | null;
 }
 
 export interface RecoveryCode {
@@ -150,6 +169,7 @@ export interface AccessRegistryState {
   authChallenges: AuthChallenge[];
   authSessions: AuthSession[];
   nativeSessions: NativeOwnerSession[];
+  nativeAgentPairings: NativeAgentPairing[];
   recoveryCodes: RecoveryCode[];
   authHandoffs: AuthHandoff[];
   authRateLimits: AuthRateLimit[];
@@ -167,6 +187,9 @@ export interface CreateWorkspaceInput {
   displayName: string;
   slug: string;
   name: string;
+  initialProject?: InitialProjectInput;
+  idempotencyKey?: string;
+  requestHash?: string;
 }
 
 export interface BindLegacyWorkspaceInput extends CreateWorkspaceInput {}
@@ -433,6 +456,7 @@ export function freshAccessRegistryState(): AccessRegistryState {
     authChallenges: [],
     authSessions: [],
     nativeSessions: [],
+    nativeAgentPairings: [],
     recoveryCodes: [],
     authHandoffs: [],
     authRateLimits: [],
@@ -458,6 +482,7 @@ export function normalizeAccessRegistry(rawState: unknown): AccessRegistryState 
   const authChallenges = optionalArray(state.authChallenges, "Access registry authChallenges").map(normalizeAuthChallenge);
   const authSessions = optionalArray(state.authSessions, "Access registry authSessions").map(normalizeAuthSession);
   const nativeSessions = optionalArray(state.nativeSessions, "Access registry nativeSessions").map(normalizeNativeSession);
+  const nativeAgentPairings = optionalArray(state.nativeAgentPairings, "Access registry nativeAgentPairings").map(normalizeNativeAgentPairing);
   const recoveryCodes = optionalArray(state.recoveryCodes, "Access registry recoveryCodes").map(normalizeRecoveryCode);
   const authHandoffs = optionalArray(state.authHandoffs, "Access registry authHandoffs").map(normalizeAuthHandoff);
   const authRateLimits = optionalArray(state.authRateLimits, "Access registry authRateLimits").map(normalizeAuthRateLimit);
@@ -473,6 +498,9 @@ export function normalizeAccessRegistry(rawState: unknown): AccessRegistryState 
   assertUnique(workspaces.map((workspace) => workspace.storageId), "workspace storage id");
   assertUnique(handoffs.map((handoff) => handoff.id), "handoff id");
   assertUnique(handoffs.map((handoff) => handoff.tokenHash), "handoff token hash");
+  assertUnique(nativeAgentPairings.map(pairing => pairing.id), "native pairing id");
+  assertUnique(nativeAgentPairings.map(pairing => pairing.userCodeHash), "native pairing user code");
+  assertUnique(nativeAgentPairings.map(pairing => pairing.deviceTokenHash), "native pairing device secret");
   assertUnique(agentConnections.map((connection) => connection.id), "agent connection id");
   assertUnique(agentConnections.map((connection) => connection.credentialHash), "agent credential hash");
   assertUnique(passkeys.map((passkey) => passkey.id), "passkey credential id");
@@ -498,6 +526,7 @@ export function normalizeAccessRegistry(rawState: unknown): AccessRegistryState 
     }
   }
   for (const workspace of workspaces) {
+    if (workspace.pendingInitialProject && !workspace.initialProjectId) throw new Error(`Workspace ${workspace.id} has pending Project input without a Project id.`);
     if (Date.parse(workspace.updatedAt) < Date.parse(workspace.createdAt)) {
       throw new Error(`Workspace ${workspace.id} cannot be updated before it is created.`);
     }
@@ -551,7 +580,17 @@ export function normalizeAccessRegistry(rawState: unknown): AccessRegistryState 
   for (const session of nativeSessions) {
     if (!ownerIds.has(session.ownerId)) throw new Error(`Native session ${session.id} refers to a missing owner.`);
     if (Date.parse(session.expiresAt) <= Date.parse(session.createdAt)) throw new Error(`Native session ${session.id} must expire after it is created.`);
+    assertNotBefore(session.verifiedAt ?? session.createdAt, session.createdAt, "Native session verifiedAt");
     assertNotBefore(session.revokedAt, session.createdAt, "Native session revokedAt");
+  }
+  for (const pairing of nativeAgentPairings) {
+    if (Date.parse(pairing.expiresAt) <= Date.parse(pairing.createdAt)) throw new Error("Native pairing expiry is invalid.");
+    if (Boolean(pairing.ownerId) !== Boolean(pairing.connectionId) || Boolean(pairing.ownerId) !== Boolean(pairing.approvedAt)) throw new Error("Native pairing approval is incomplete.");
+    if (pairing.connectionId) {
+      const connection = agentConnections.find(value => value.id === pairing.connectionId);
+      if (!connection || connection.ownerId !== pairing.ownerId || connection.workspaceId !== pairing.workspaceId) throw new Error("Native pairing connection scope is invalid.");
+    }
+    assertNotBefore(pairing.approvedAt, pairing.createdAt, "Native pairing approvedAt");
   }
   for (const handoff of authHandoffs) {
     const session = sessionsById.get(handoff.sessionId);
@@ -562,7 +601,7 @@ export function normalizeAccessRegistry(rawState: unknown): AccessRegistryState 
   }
   return {
     schemaVersion: ACCESS_REGISTRY_SCHEMA_VERSION, owners, workspaces, handoffs, revokedSessions, agentConnections,
-    passkeys, authChallenges, authSessions, nativeSessions, recoveryCodes, authHandoffs, authRateLimits, setupConsumed
+    passkeys, authChallenges, authSessions, nativeSessions, nativeAgentPairings, recoveryCodes, authHandoffs, authRateLimits, setupConsumed
   };
 }
 
@@ -766,47 +805,7 @@ function accessStoreFromAdapter(adapter: AccessRegistryAdapter, nowOption?: () =
   }
 
   async function createAgentConnection(input: CreateAgentConnectionInput): Promise<IssuedAgentConnection> {
-    const subject = normalizeProviderSubject(input.providerSubject);
-    const workspaceId = requiredIdentifier(input.workspaceId, "Workspace id");
-    const label = normalizeAgentLabel(input.label);
-    const scopes = normalizeAgentScopes(input.scopes);
-    const expiresAt = input.expiresAt == null ? null : timestamp(input.expiresAt, "Agent connection expiresAt");
-    const authSessionId = input.authSessionId === undefined ? null : normalizeSessionId(input.authSessionId);
-    const secret = crypto.randomBytes(32).toString("base64url");
-    return (await adapter.update((state) => {
-      const issuedAt = validNow(now);
-      if (expiresAt && Date.parse(expiresAt) <= Date.parse(issuedAt)) throw new Error("Agent connection expiry must be in the future.");
-      const owner = findOwner(state, subject);
-      const workspace = state.workspaces.find((candidate) => candidate.id === workspaceId);
-      if (!owner || !workspace?.ownerIds.includes(owner.id)) throw new AccessStoreError("ACCESS_FORBIDDEN", "Workspace access is unavailable.");
-      if (authSessionId) {
-        const session = state.authSessions.find((candidate) => candidate.id === authSessionId && candidate.ownerId === owner.id);
-        const currentTime = Date.parse(issuedAt);
-        if (!session || session.revokedAt || hasRevokedSession(state, owner.id, authSessionId) || Date.parse(session.expiresAt) <= currentTime || Date.parse(session.verifiedAt) > currentTime || currentTime - Date.parse(session.verifiedAt) > FRESH_OWNER_VERIFICATION_MS) {
-          throw new AccessStoreError("ACCESS_FORBIDDEN", "Verify your passkey in an active session before creating an API key.");
-        }
-      }
-      if (state.agentConnections.filter((connection) => connection.ownerId === owner.id && connection.workspaceId === workspaceId && !connection.revokedAt).length >= MAX_ACTIVE_AGENT_CONNECTIONS_PER_WORKSPACE) {
-        throw new AccessStoreError("ACCESS_FORBIDDEN", "A Workspace can have up to 50 unrevoked API keys. Revoke an existing key before creating another.");
-      }
-      const currentTime = Date.parse(issuedAt);
-      state.authRateLimits = state.authRateLimits.filter((limit) => Date.parse(limit.resetAt) > currentTime);
-      const rateLimitId = `agent-key-issuance:${crypto.createHash("sha256").update(owner.id).digest("hex")}`;
-      let rateLimit = state.authRateLimits.find((limit) => limit.id === rateLimitId);
-      if (rateLimit && rateLimit.count >= MAX_AGENT_CONNECTIONS_PER_HOUR) {
-        throw new AccessStoreError("ACCESS_RATE_LIMITED", `API-key creation limit reached. Try again after ${rateLimit.resetAt}.`);
-      }
-      const id = uniqueId("agent", new Set(state.agentConnections.map((candidate) => candidate.id)));
-      const credential = `kac_${id}_${secret}`;
-      const connection: AgentConnection = { id, credentialHash: hashAgentCredential(credential), ownerId: owner.id, workspaceId, label, scopes, createdAt: issuedAt, lastUsedAt: null, expiresAt, revokedAt: null };
-      state.agentConnections.push(connection);
-      if (!rateLimit) {
-        rateLimit = { id: rateLimitId, count: 0, resetAt: new Date(currentTime + AGENT_CONNECTION_RATE_WINDOW_MS).toISOString() };
-        state.authRateLimits.push(rateLimit);
-      }
-      rateLimit.count += 1;
-      return { connection, credential };
-    })).result;
+    return (await adapter.update(state => issueAgentConnectionInRegistry(state, input, validNow(now)))).result;
   }
 
   async function revokeAgentConnection(providerSubject: string, workspaceId: string, connectionId: string): Promise<AgentConnection> {
@@ -878,10 +877,17 @@ export function createWorkspaceInRegistry(
   const slug = normalizeWorkspaceSlug(input.slug);
   const name = normalizeWorkspaceName(input.name);
   const timestampValue = timestamp(createdAt, "Workspace createdAt");
+  const existingOwner = findOwner(state, providerSubject);
+  if (input.idempotencyKey && existingOwner) {
+    const replay = state.workspaces.find(workspace => workspace.ownerIds.includes(existingOwner.id) && workspace.creationRequest?.key === input.idempotencyKey);
+    if (replay) {
+      if (replay.creationRequest!.hash !== input.requestHash) throw new AccessStoreError("ACCESS_CONFLICT", "Idempotency key was already used with a different request.");
+      return replay;
+    }
+  }
   if (state.workspaces.some((workspace) => workspace.slug === slug)) {
     throw new AccessStoreError("ACCESS_CONFLICT", `Workspace slug ${slug} is already registered.`);
   }
-  const existingOwner = findOwner(state, providerSubject);
   if (existingOwner && state.workspaces.filter((workspace) => workspace.ownerIds.includes(existingOwner.id)).length >= MAX_WORKSPACES_PER_OWNER) {
     throw new AccessStoreError("ACCESS_FORBIDDEN", "An owner can have up to 10 Workspaces.");
   }
@@ -891,6 +897,8 @@ export function createWorkspaceInRegistry(
     slug,
     name,
     storageId: uniqueId("state", new Set(state.workspaces.map((candidate) => candidate.storageId))),
+    ...(input.initialProject ? { initialProjectId: `project-${crypto.randomUUID()}`, pendingInitialProject: normalizeInitialProject(input.initialProject) } : {}),
+    ...(input.idempotencyKey ? { creationRequest: { key: input.idempotencyKey, hash: input.requestHash! } } : {}),
     ownerIds: [owner.id],
     createdAt: timestampValue,
     updatedAt: timestampValue
@@ -950,10 +958,21 @@ function normalizeWorkspace(value: unknown): AccessWorkspace {
     slug: normalizeWorkspaceSlug(workspace.slug),
     name: normalizeWorkspaceName(workspace.name),
     storageId: requiredIdentifier(workspace.storageId, "Workspace storage id"),
+    ...(workspace.initialProjectId === undefined ? {} : { initialProjectId: requiredIdentifier(workspace.initialProjectId, "Initial Project id") }),
+    ...(workspace.pendingInitialProject === undefined ? {} : { pendingInitialProject: normalizeInitialProject(workspace.pendingInitialProject) }),
+    ...(workspace.creationRequest === undefined ? {} : { creationRequest: normalizeWorkspaceCreationRequest(workspace.creationRequest) }),
     ownerIds: requireArray(workspace.ownerIds, "Workspace ownerIds").map((ownerId) => requiredIdentifier(ownerId, "Workspace owner id")),
     createdAt: timestamp(workspace.createdAt, "Workspace createdAt"),
     updatedAt: timestamp(workspace.updatedAt, "Workspace updatedAt")
   };
+}
+
+function normalizeWorkspaceCreationRequest(value: unknown): { key: string; hash: string } {
+  const request = requireRecord(value, "Workspace creation request");
+  const key = requiredString(request.key, "Workspace idempotency key");
+  const hash = requiredString(request.hash, "Workspace request hash");
+  if (key.length > 200 || !/^[a-f0-9]{64}$/.test(hash)) throw new Error("Invalid Workspace creation request.");
+  return { key, hash };
 }
 
 function normalizeHandoff(value: unknown): AccessHandoff {
@@ -980,6 +999,49 @@ function normalizeRevokedSession(value: unknown): RevokedAccessSession {
     sessionId: normalizeSessionId(session.sessionId),
     revokedAt: timestamp(session.revokedAt, "Revoked session revokedAt")
   };
+}
+
+export function issueAgentConnectionInRegistry(state: AccessRegistryState, input: CreateAgentConnectionInput,
+                                               issuedAt: string, secret = crypto.randomBytes(32).toString("base64url")): IssuedAgentConnection {
+  const subject = normalizeProviderSubject(input.providerSubject);
+  const workspaceId = requiredIdentifier(input.workspaceId, "Workspace id");
+  const label = normalizeAgentLabel(input.label);
+  const scopes = normalizeAgentScopes(input.scopes);
+  const expiresAt = input.expiresAt == null ? null : timestamp(input.expiresAt, "Agent connection expiresAt");
+  const authSessionId = input.authSessionId === undefined ? null : normalizeSessionId(input.authSessionId);
+  if (!/^[A-Za-z0-9_-]{43}$/.test(secret)) throw new Error("Agent credential secret is invalid.");
+
+  if (expiresAt && Date.parse(expiresAt) <= Date.parse(issuedAt)) throw new Error("Agent connection expiry must be in the future.");
+  const owner = findOwner(state, subject);
+  const workspace = state.workspaces.find((candidate) => candidate.id === workspaceId);
+  if (!owner || !workspace?.ownerIds.includes(owner.id)) throw new AccessStoreError("ACCESS_FORBIDDEN", "Workspace access is unavailable.");
+  if (authSessionId) {
+    const session = state.authSessions.find((candidate) => candidate.id === authSessionId && candidate.ownerId === owner.id);
+    const currentTime = Date.parse(issuedAt);
+    if (!session || session.revokedAt || hasRevokedSession(state, owner.id, authSessionId) || Date.parse(session.expiresAt) <= currentTime || Date.parse(session.verifiedAt) > currentTime || currentTime - Date.parse(session.verifiedAt) > FRESH_OWNER_VERIFICATION_MS) {
+      throw new AccessStoreError("ACCESS_FORBIDDEN", "Verify your passkey in an active session before creating an API key.");
+    }
+  }
+  if (state.agentConnections.filter((connection) => connection.ownerId === owner.id && connection.workspaceId === workspaceId && !connection.revokedAt).length >= MAX_ACTIVE_AGENT_CONNECTIONS_PER_WORKSPACE) {
+    throw new AccessStoreError("ACCESS_FORBIDDEN", "A Workspace can have up to 50 unrevoked API keys. Revoke an existing key before creating another.");
+  }
+  const currentTime = Date.parse(issuedAt);
+  state.authRateLimits = state.authRateLimits.filter((limit) => Date.parse(limit.resetAt) > currentTime);
+  const rateLimitId = `agent-key-issuance:${crypto.createHash("sha256").update(owner.id).digest("hex")}`;
+  let rateLimit = state.authRateLimits.find((limit) => limit.id === rateLimitId);
+  if (rateLimit && rateLimit.count >= MAX_AGENT_CONNECTIONS_PER_HOUR) {
+    throw new AccessStoreError("ACCESS_RATE_LIMITED", `API-key creation limit reached. Try again after ${rateLimit.resetAt}.`);
+  }
+  const id = uniqueId("agent", new Set(state.agentConnections.map((candidate) => candidate.id)));
+  const credential = `kac_${id}_${secret}`;
+  const connection: AgentConnection = { id, credentialHash: hashAgentCredential(credential), ownerId: owner.id, workspaceId, label, scopes, createdAt: issuedAt, lastUsedAt: null, expiresAt, revokedAt: null };
+  state.agentConnections.push(connection);
+  if (!rateLimit) {
+    rateLimit = { id: rateLimitId, count: 0, resetAt: new Date(currentTime + AGENT_CONNECTION_RATE_WINDOW_MS).toISOString() };
+    state.authRateLimits.push(rateLimit);
+  }
+  rateLimit.count += 1;
+  return { connection, credential };
 }
 
 function normalizeAgentConnection(value: unknown): AgentConnection {
@@ -1038,6 +1100,22 @@ function normalizeAuthSession(value: unknown): AuthSession {
   };
 }
 
+function normalizeNativeAgentPairing(value: unknown): NativeAgentPairing {
+  const pairing = requireRecord(value, "Native agent pairing");
+  return {
+    id: requiredIdentifier(pairing.id, "Native pairing id"),
+    deviceTokenHash: storedHash(pairing.deviceTokenHash, "Native pairing device hash"),
+    userCodeHash: storedHash(pairing.userCodeHash, "Native pairing user code hash"),
+    workspaceId: requiredIdentifier(pairing.workspaceId, "Native pairing Workspace id"),
+    label: normalizeAgentLabel(pairing.label),
+    createdAt: timestamp(pairing.createdAt, "Native pairing createdAt"),
+    expiresAt: timestamp(pairing.expiresAt, "Native pairing expiresAt"),
+    ownerId: pairing.ownerId == null ? null : requiredIdentifier(pairing.ownerId, "Native pairing owner id"),
+    connectionId: pairing.connectionId == null ? null : requiredIdentifier(pairing.connectionId, "Native pairing connection id"),
+    approvedAt: pairing.approvedAt == null ? null : timestamp(pairing.approvedAt, "Native pairing approvedAt")
+  };
+}
+
 function normalizeNativeSession(value: unknown): NativeOwnerSession {
   const session = requireRecord(value, "Native session");
   return {
@@ -1046,6 +1124,7 @@ function normalizeNativeSession(value: unknown): NativeOwnerSession {
     credentialHash: storedHash(session.credentialHash, "Native session credential hash"),
     rootOrigin: normalizeAuthOrigin(session.rootOrigin, "Native session rootOrigin"),
     createdAt: timestamp(session.createdAt, "Native session createdAt"),
+    ...(session.verifiedAt === undefined ? {} : { verifiedAt: timestamp(session.verifiedAt, "Native session verifiedAt") }),
     expiresAt: timestamp(session.expiresAt, "Native session expiresAt"),
     revokedAt: session.revokedAt == null ? null : timestamp(session.revokedAt, "Native session revokedAt")
   };

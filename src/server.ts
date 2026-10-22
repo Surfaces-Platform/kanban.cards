@@ -1,3 +1,4 @@
+import { normalizeInitialProject, normalizeProjectIdea } from "./project-idea";
 import crypto from "node:crypto";
 import { BRAND_PUBLIC_ASSETS, renderBrandHead, renderProductName } from "./brand";
 import { DEFAULT_PAGE_TITLE, PUBLIC_WEBSITE_ASSETS, publicPageTitle } from "./public-website";
@@ -242,6 +243,34 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     if (fresh && Date.now() - Date.parse(active.session.verifiedAt) > 5 * 60_000) throw httpError(403, "Fresh passkey verification required.");
     return { ...active, context };
   }
+  // Access and board state use separate stores. A durable pending bootstrap and
+  // fixed Project id make interruption between their commits safely recoverable.
+  async function bootstrapWorkspace(workspace: AccessWorkspace): Promise<Project | undefined> {
+    if (!workspace.initialProjectId) return undefined;
+    const store = workspaceStoreResolver.resolve(workspace.storageId);
+    const projectId = workspace.initialProjectId;
+    if (!workspace.pendingInitialProject) {
+      const existing = (await store.read()).projects.find(project => project.id === projectId);
+      if (!existing) throw httpError(503, "Initial Project setup is unavailable. Try again.");
+      return existing;
+    }
+    const { result } = await store.update(state => {
+      const existing = state.projects.find(project => project.id === projectId);
+      if (existing) return existing;
+      if (!workspace.pendingInitialProject) throw httpError(503, "Initial Project setup is unavailable. Try again.");
+      const input = workspace.pendingInitialProject;
+      const now = workspace.createdAt;
+      const project: Project = { id: projectId, name: input.name, description: "", idea: input.idea, columns: normalizeColumns(undefined, undefined), cards: [], activity: [], revision: 1, archivedAt: null, createdAt: now, updatedAt: now };
+      addActivity(project, { channel: "web", label: ownerLabel }, "project.created", `Created project ${project.name}.`);
+      state.projects.push(project);
+      return project;
+    });
+    if (workspace.pendingInitialProject) await accessStore.authTransaction(state => {
+      const stored = state.workspaces.find(candidate => candidate.id === workspace.id && candidate.initialProjectId === projectId);
+      if (stored) delete stored.pendingInitialProject;
+    });
+    return result;
+  }
   const loginCookieName = production ? "__Host-kanban_login_nonce" : "kanban_login_nonce";
   app.disable("x-powered-by");
   app.use(securityHeaders(passkeyAuthConfig, hostFamilies));
@@ -295,7 +324,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     }
     const context = await resolveAccessContext(req, contextConfig);
     const family = context.hostFamily || primaryHostFamily;
-    res.json({ authenticated: Boolean(context.auth), context: context.kind, rootUrl: family.rootOrigin, authMode: passkeyAuthConfig ? "passkey" : "local", loginUrl: passkeyAuthConfig ? `${authOrigin}/sign-in` : "", ...(context.auth ? { label: context.auth.actor.label, email: context.identity?.email, ...(context.identity ? { ownerId: context.identity.providerSubject } : context.kind === "local" ? { ownerId: "local-owner" } : {}) } : {}), ...(context.auth?.method === "native" ? { authenticationMethod: "native", expiresAt: context.auth.expiresAt } : {}), ...(context.workspace ? { workspace: publicAccessWorkspace(context.workspace, family) } : {}), setupAvailable: Boolean(passkeyAuthConfig?.setupOwnerId && !((await accessStore.read()).setupConsumed)) });
+    res.json({ authenticated: Boolean(context.auth), context: context.kind, rootUrl: family.rootOrigin, authMode: passkeyAuthConfig ? "passkey" : "local", loginUrl: passkeyAuthConfig ? `${authOrigin}/sign-in` : "", ...(context.auth ? { label: context.auth.actor.label, email: context.identity?.email, ...(context.identity ? { ownerId: context.identity.providerSubject } : context.kind === "local" ? { ownerId: "local-owner" } : {}) } : {}), ...(context.auth?.method === "agent" ? { scopes: [...(context.auth.scopes || [])] } : {}), ...(context.auth?.method === "native" ? { authenticationMethod: "native", expiresAt: context.auth.expiresAt } : {}), ...(context.workspace ? { workspace: publicAccessWorkspace(context.workspace, family) } : {}), setupAvailable: Boolean(passkeyAuthConfig?.setupOwnerId && !((await accessStore.read()).setupConsumed)) });
   }));
   app.post("/api/auth-start", asyncHandler(async (req, res) => {
     noStore(res);
@@ -439,6 +468,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       : await verifiedRootIdentity(req, passkeyAuthConfig, trustForwardedHost, accessStore);
     if (!identity) throw httpError(401, "Owner sign-in required.");
     const workspaces = await accessStore.listWorkspacesForOwner(identity.providerSubject);
+    await Promise.all(workspaces.map(bootstrapWorkspace));
     res.json({ workspaces: workspaces.filter((workspace) => supportsWorkspace(family, workspace.slug)).map((workspace) => publicAccessWorkspace(workspace, family)) });
   }));
 
@@ -458,6 +488,10 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     const body = asRecord(req.body);
     const slug = workspaceSlug(body.slug);
     workspaceHost(slug, family);
+    const initialProject = body.initialProject === undefined ? undefined : normalizeInitialProject(body.initialProject);
+    const idempotencyKey = optionalString(req.get("idempotency-key"));
+    if (idempotencyKey && idempotencyKey.length > 200) throw httpError(400, "Idempotency key must be at most 200 characters.");
+    const requestHash = crypto.createHash("sha256").update(stableJson({ name: workspaceName(body.name), slug, ...(initialProject ? { initialProject } : {}) })).digest("hex");
     let workspace: AccessWorkspace;
     try {
       workspace = await accessStore.createWorkspace({
@@ -465,18 +499,21 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
         email: identity.email,
         displayName: identity.displayName,
         name: workspaceName(body.name),
-        slug
+        slug,
+        ...(initialProject ? { initialProject } : {}),
+        ...(idempotencyKey ? { idempotencyKey, requestHash } : {})
       });
     } catch (error) {
       if (error instanceof AccessStoreError && error.code === "ACCESS_CONFLICT") {
-        throw httpError(409, "Workspace address is already in use.");
+        throw httpError(409, error.message.includes("Idempotency") ? error.message : "Workspace address is already in use.");
       }
       if (error instanceof AccessStoreError && error.code === "ACCESS_FORBIDDEN") {
         throw httpError(403, error.message);
       }
       throw error;
     }
-    res.status(201).json({ workspace: publicAccessWorkspace(workspace, family) });
+    const project = await bootstrapWorkspace(workspace);
+    res.status(201).json({ workspace: publicAccessWorkspace(workspace, family), ...(project ? { project } : {}) });
   }));
 
   app.post("/api/workspace-handoffs", asyncHandler(async (req, res) => {
@@ -623,6 +660,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       if (context.workspace?.storageId === DEFAULT_WORKSPACE_ID) await requireExistingLegacyState();
       req.ownerAuth = auth;
       if (req.method !== "GET" && req.method !== "HEAD" && auth.method === "cookie") assertRequestOrigin(req, true, trustForwardedHost);
+      if (context.workspace?.pendingInitialProject) await bootstrapWorkspace(context.workspace);
       next();
     })().catch(next);
   });
@@ -643,6 +681,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
         id: makeId("project"),
         name: requiredString(body.name, "Project name"),
         description: optionalText(body.description),
+        ...(body.idea === undefined ? {} : { idea: normalizeProjectIdea(body.idea) }),
         columns: normalizeColumns(body.columns, undefined),
         cards: [],
         activity: [],
@@ -701,6 +740,12 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       }
       if (hasOwn(body, "description")) {
         project.description = optionalText(body.description);
+        changed = true;
+      }
+      if (hasOwn(body, "idea")) {
+        const input = asRecord(body.idea);
+        if (project.idea && hasOwn(input, "originalInput") && input.originalInput !== project.idea.originalInput) throw httpError(409, "The original Idea is preserved and cannot be changed.");
+        project.idea = normalizeProjectIdea(project.idea ? { ...project.idea, ...input } : input);
         changed = true;
       }
       if (hasOwn(body, "columns")) {
@@ -1263,7 +1308,8 @@ function publicAccessWorkspace(workspace: AccessWorkspace, family: HostFamily): 
     id: workspace.id,
     slug: workspace.slug,
     name: workspace.name,
-    url: originForHost(workspaceHost(workspace.slug, family))
+    url: originForHost(workspaceHost(workspace.slug, family)),
+    ...(workspace.initialProjectId ? { initialProjectId: workspace.initialProjectId } : {})
   };
 }
 

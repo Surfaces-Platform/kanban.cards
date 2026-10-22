@@ -11,7 +11,7 @@
     "build": "npm run clean && npm run build:server && npm run build:client && npm run build:cli && npm run build:static",
     "build:server": "tsc -p tsconfig.node.json",
     "build:client": "esbuild src/client/app.ts --bundle --format=iife --target=es2020 --outfile=public/app.js",
-    "build:cli": "esbuild src/cli/kanban-cards-client.ts --bundle --platform=node --format=esm --target=node20 --banner:js='#!/usr/bin/env node' --outfile=.agents/skills/kanban-cards/scripts/kanban-cards-client.mjs && chmod +x .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs",
+    "build:cli": "esbuild src/cli/kanban-cards-client.ts --bundle --platform=node --format=esm --target=node22 --banner:js='#!/usr/bin/env node' --outfile=.agents/skills/kanban-cards/scripts/kanban-cards-client.mjs && chmod +x .agents/skills/kanban-cards/scripts/kanban-cards-client.mjs && node .agents/skills/kanban-cards/scripts/package-codex-plugin.mjs",
     "build:static": "cp judgmentkit.css public/judgmentkit.css && cp styles.css public/styles.css && cp robots.txt public/robots.txt && node scripts/copy-brand-assets.mjs && node scripts/copy-website-assets.mjs",
     "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.client.json --noEmit && tsc -p tsconfig.cli.json --noEmit && tsc -p tsconfig.test.json --noEmit",
     "check:release-policy": "tsx scripts/check-release-policy.ts",

@@ -52,10 +52,22 @@ export interface Activity {
   createdAt: string;
 }
 
+export interface ProjectIdea {
+  originalInput: string;
+  brief: string;
+  completionCriteria: string;
+}
+
+export interface InitialProjectInput {
+  name: string;
+  idea: ProjectIdea;
+}
+
 export interface Project {
   id: string;
   name: string;
   description: string;
+  idea?: ProjectIdea;
   columns: Column[];
   cards: Card[];
   activity: Activity[];

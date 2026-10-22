@@ -1,0 +1,4 @@
+interface:
+  display_name: "kanban.cards"
+  short_description: "Connect Codex, track Cards, and finish Project work"
+  default_prompt: "Use $kanban-cards to connect the selected Project with native approval, read its saved Idea and Cards, execute the authorized work, and report verified results."
