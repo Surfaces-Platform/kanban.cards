@@ -63,6 +63,12 @@ export interface InitialProjectInput {
   idea: ProjectIdea;
 }
 
+export interface WorkspaceActivity extends Activity {
+  projectName: string;
+  projectArchivedAt: string | null;
+  cardTitle?: string;
+}
+
 export interface Project {
   id: string;
   name: string;

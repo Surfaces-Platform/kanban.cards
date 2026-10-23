@@ -97,12 +97,39 @@ test("two owners cannot cross tenant boundaries through cookie, header, or scope
   assert.equal((await f.request("mike.kanban.cards", "/api/agent-connections", { token: key.credential })).status, 401);
 }));
 
+test("Workspace Activity stays in its authenticated tenant and preserves each verified agent name", async () => fixture(async f => {
+  const first = await f.request("mike.kanban.cards", "/api/projects", { method: "POST", cookie: f.tenantCookie, origin: "https://mike.kanban.cards", body: { name: "Mike history" } });
+  const second = await f.request("other.kanban.cards", "/api/projects", { method: "POST", cookie: f.secondCookie, origin: "https://other.kanban.cards", body: { name: "Private other history" } });
+  assert.equal(first.status, 201);
+  assert.equal(second.status, 201);
+  const agents = await Promise.all(["Claude Research", "Codex Writer"].map(label => f.accessStore.createAgentConnection({ providerSubject: f.owner.id, workspaceId: f.first.id, label, scopes: ["read", "write"] })));
+  for (const agent of agents) {
+    const result = await f.request("mike.kanban.cards", `/api/projects/${first.data.project.id}/cards`, { method: "POST", token: agent.credential, body: { title: agent.connection.label + " result" } });
+    assert.equal(result.status, 201);
+  }
+  const reader = await f.accessStore.createAgentConnection({ providerSubject: f.owner.id, workspaceId: f.first.id, label: "Read only", scopes: ["read"] });
+  const feed = await f.request("mike.kanban.cards", "/api/activity", { token: reader.credential });
+  assert.equal(feed.status, 200);
+  assert.match(feed.headers.get("cache-control") || "", /no-store/);
+  assert.deepEqual([...new Set(feed.data.activity.map((a: any) => a.projectId))], [first.data.project.id]);
+  for (const agent of agents) assert.ok(feed.data.activity.some((a: any) => a.actor.label === agent.connection.label && a.actor.agentConnectionId === agent.connection.id));
+  const foreign = await f.request("other.kanban.cards", "/api/activity", { cookie: f.secondCookie });
+  assert.equal(foreign.status, 200);
+  assert.deepEqual(foreign.data.activity.map((a: any) => a.projectId), [second.data.project.id]);
+  assert.equal((await f.request("mike.kanban.cards", "/api/activity")).status, 401);
+  assert.equal((await f.request("kanban.cards", "/api/activity", { cookie: f.rootCookie })).status, 401);
+  assert.equal((await f.request("other.kanban.cards", "/api/activity", { cookie: f.tenantCookie })).status, 401);
+  assert.equal((await f.request("other.kanban.cards", "/api/activity", { token: reader.credential })).status, 401);
+  assert.equal((await f.request("mike.kanban.cards", `/api/activity?workspaceId=${f.second.id}`, { token: reader.credential })).status, 400);
+  assert.equal((await f.request("mike.kanban.cards", "/api/activity", { method: "POST", token: reader.credential, body: {} })).status, 403);
+}));
+
 test("auth host exposes only auth APIs and rejects root/tenant data routes", async () => fixture(async f => {
   const session = await f.request("auth.kanban.cards", "/api/session");
   assert.equal(session.data.context, "auth");
   assert.equal(session.data.authMode, "passkey");
   assert.equal(session.data.authenticated, false);
-  for (const route of ["/api/projects", "/api/workspaces", "/api/access-settings", "/api/agent-connections", "/api/health"]) assert.equal((await f.request("auth.kanban.cards", route, { cookie: f.rootCookie })).status, 404);
+  for (const route of ["/api/projects", "/api/activity", "/api/workspaces", "/api/access-settings", "/api/agent-connections", "/api/health"]) assert.equal((await f.request("auth.kanban.cards", route, { cookie: f.rootCookie })).status, 404);
   assert.equal((await f.request("kanban.cards", "/api/clerk-session", { method: "POST", origin: ROOT, body: {} })).status, 404);
   const headers = (await f.request("kanban.cards", "/")).headers;
   assert.doesNotMatch(headers.get("content-security-policy") || "", /clerk|unsafe-inline/);

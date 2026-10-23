@@ -64,6 +64,15 @@ struct Activity: Codable, Identifiable, Hashable, Sendable {
     var projectId: String
     var cardId: String?
     var createdAt: String
+    var projectName: String? = nil
+    var projectArchivedAt: String? = nil
+    var cardTitle: String? = nil
+    var scopedID: String { "\(projectId):\(id)" }
+}
+
+struct WorkspaceActivityPage: Codable, Hashable, Sendable {
+    var activity: [Activity]
+    var nextCursor: String?
 }
 
 struct ProjectSummary: Codable, Identifiable, Hashable, Sendable {

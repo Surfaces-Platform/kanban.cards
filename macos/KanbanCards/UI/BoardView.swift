@@ -9,6 +9,7 @@ struct BoardView: View {
     @State private var projectID: String?
     @State private var creatingProject = false
     @State private var creatingWorkspace = false
+    @State private var showingWorkspaceActivity = false
     @State private var newProjectPresentation = UUID()
     @State private var openedExamples = false
     @State private var refreshing = false
@@ -16,7 +17,7 @@ struct BoardView: View {
     @State private var cardInteractionLocked = false
 
     private var workspace: Workspace? { model.workspaces.first { $0.id == workspaceID } }
-    private var hasNavigationSheet: Bool { creatingProject || creatingWorkspace }
+    private var hasNavigationSheet: Bool { creatingProject || creatingWorkspace || showingWorkspaceActivity }
     private var canCreateWorkspace: Bool { model.canCreateWorkspace && !hasNavigationSheet && !cardInteractionLocked && !refreshing }
     private var minimumWidth: CGFloat {
         let mode = CardInteractionMode.current
@@ -75,10 +76,10 @@ struct BoardView: View {
         .task { await model.restore(); selectWorkspace() }
         .onChange(of: model.workspaces) { _, _ in selectWorkspace() }
         .onChange(of: model.signedIn) { _, signedIn in
-            if !signedIn { workspaceID = nil; projectID = nil; creatingProject = false; creatingWorkspace = false }
+            if !signedIn { workspaceID = nil; projectID = nil; creatingProject = false; creatingWorkspace = false; showingWorkspaceActivity = false }
         }
-        .onChange(of: model.sessionID) { _, _ in creatingWorkspace = false; creatingProject = false }
-        .onChange(of: workspaceID) { _, _ in projectID = nil }
+        .onChange(of: model.sessionID) { _, _ in creatingWorkspace = false; creatingProject = false; showingWorkspaceActivity = false }
+        .onChange(of: workspaceID) { _, _ in projectID = nil; showingWorkspaceActivity = false }
         .task(id: workspaceID) { await loadProjects() }
         .sheet(isPresented: $creatingProject) {
             if let workspace, model.signedIn {
@@ -91,6 +92,12 @@ struct BoardView: View {
                 projectID = nil
                 navigationError = nil
             }.environment(model)
+        }
+        .sheet(isPresented: $showingWorkspaceActivity) {
+            if let workspace, model.signedIn {
+                WorkspaceActivity(workspace: workspace).environment(model)
+                    .id("\(model.sessionID):\(workspace.id):\(workspace.url)")
+            }
         }
         .focusedSceneValue(\.boardWindowActions, BoardWindowActions(
             canCreateWorkspace: canCreateWorkspace,
@@ -140,6 +147,11 @@ struct BoardView: View {
                         .disabled(!canCreateWorkspace)
                 }
                 if model.loadingWorkspaces { ProgressView("Loading Workspaces") }
+                if workspace != nil {
+                    Button("Workspace Activity", systemImage: "clock") { showingWorkspaceActivity = true }
+                        .accessibilityIdentifier("board.workspace-activity")
+                        .disabled(hasNavigationSheet)
+                }
                 if model.workspaces.isEmpty && !model.loadingWorkspaces {
                     Text(model.workspaceLoadFailed ? "Workspaces unavailable" : "No Workspaces")
                     Button("Retry") { Task { await model.refreshWorkspaces() } }
@@ -843,7 +855,7 @@ struct ProjectActivity: View {
                 ForEach(Array(items)) { item in
                     VStack(alignment: .leading, spacing: 6) {
                         Text(item.summary)
-                        Text(item.actor.label).font(.caption).foregroundStyle(.secondary)
+                        Text("By \(item.actor.label)").font(.caption).foregroundStyle(.secondary)
                         if let date = ServerTimestamp.date(from: item.createdAt) { Text(date, format: .dateTime).font(.caption).foregroundStyle(.secondary) }
                     }.padding(.vertical, 4)
                 }

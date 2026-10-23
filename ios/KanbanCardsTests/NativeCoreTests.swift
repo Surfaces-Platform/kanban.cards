@@ -59,6 +59,43 @@ final class NativeCoreTests: XCTestCase {
         XCTAssertNil(body["version"])
     }
 
+    func testWorkspaceActivityUsesValidatedOriginAndPreservesActorAndArchivedContext() async throws {
+        try await authenticate()
+        URLProtocolStub.state.enqueue(json: #"{"activity":[{"id":"event-a","action":"card.updated","actor":{"channel":"api","label":"Claude Research (pilot)","agentConnectionId":"agent-a"},"summary":"Updated a Card.","projectId":"project-a","cardId":"card-a","createdAt":"2026-10-19T23:00:00.000Z","projectName":"Archived research","projectArchivedAt":"2026-10-19T22:00:00.000Z","cardTitle":"Research"}],"nextCursor":"older-cursor"}"#)
+        let cursor = "opaque+/=cursor"
+        let result = try await client.workspaceActivity(in: workspace, cursor: cursor)
+        let request = try XCTUnwrap(URLProtocolStub.state.requests.last)
+        XCTAssertEqual(request.url?.host, "test.kanban.cards")
+        XCTAssertEqual(request.url?.path, "/api/activity")
+        XCTAssertEqual(request.httpMethod, "GET")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer kcn_test_only")
+        let query = try XCTUnwrap(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems)
+        XCTAssertEqual(query.first { $0.name == "limit" }?.value, "50")
+        XCTAssertEqual(query.first { $0.name == "cursor" }?.value, cursor)
+        let event = try XCTUnwrap(result.activity.first)
+        XCTAssertEqual(event.actor.label, "Claude Research (pilot)")
+        XCTAssertEqual(event.actor.agentConnectionId, "agent-a")
+        XCTAssertEqual(event.projectName, "Archived research")
+        XCTAssertNotNil(event.projectArchivedAt)
+        XCTAssertEqual(event.cardTitle, "Research")
+        XCTAssertEqual(result.nextCursor, "older-cursor")
+    }
+
+    func testWorkspaceActivityFirstPageHasNoCursorAndRejectsUnlistedOrigin() async throws {
+        try await authenticate()
+        URLProtocolStub.state.enqueue(json: #"{"activity":[],"nextCursor":null}"#)
+        let page = try await client.workspaceActivity(in: workspace)
+        XCTAssertTrue(page.activity.isEmpty)
+        XCTAssertNil(page.nextCursor)
+        let request = try XCTUnwrap(URLProtocolStub.state.requests.last)
+        XCTAssertEqual(request.url?.query, "limit=50")
+        let count = URLProtocolStub.state.requests.count
+        let other = Workspace(id: "other", slug: "other", name: "Other", url: URL(string: "https://other.kanban.cards")!)
+        do { _ = try await client.workspaceActivity(in: other); XCTFail("Unlisted Workspace must not receive a bearer.") }
+        catch is APIError { }
+        XCTAssertEqual(URLProtocolStub.state.requests.count, count)
+    }
+
     func testSI005MovePatchContainsOnlyDestinationAndOptionalOrder() async throws {
         try await authenticate()
         URLProtocolStub.state.enqueue(json: Self.cardResult)

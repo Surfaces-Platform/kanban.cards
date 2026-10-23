@@ -26,6 +26,12 @@ Open the Workspace title menu above the Project list to switch Workspaces or cho
 
 Native creation uses the owner-session `POST /api/workspaces` contract. The backend change must be released before an installed client can create real Workspaces. Demo mode keeps creation in memory for isolated simulator testing.
 
+## Read Workspace Activity
+
+Choose **Workspace Activity** from a Workspace's Projects list, including an empty Workspace. The feed includes retained history from active and archived Projects. Each entry names its Project, available Card context, stored actor, and time. **Refresh** loads the latest 50 entries; **Load more** reads older history. Failed refreshes or pages retain readable rows and offer **Retry**.
+
+The backend must provide `GET /api/activity` before an installed client can read Workspace history. Demo mode derives the feed from in-memory Projects, including the `--demo-archived-projects` fixture. Project and Card Activity remain available from their existing views.
+
 ## Browse archived Projects
 
 Open **Archived Projects** at the bottom of a Workspace's Project list, then choose a Project. Its Cards, Archived Cards, Comments, Activity, and filters remain available. Archived Projects have no server editing, Move, archive, restore, or Comment actions.

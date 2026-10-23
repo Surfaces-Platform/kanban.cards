@@ -653,6 +653,39 @@ test("filtered Card reads require the scoped read permission and cannot grant wr
   }
 });
 
+test("Workspace Activity pages retained history without mutating Project revisions or attribution", async () => {
+  await withServer(async ({ baseUrl, token, dataPath }) => {
+    const headers = { ...ownerHeaders(token, "Claude Research"), "Content-Type": "application/json" };
+    assert.equal((await fetch(`${baseUrl}/api/activity`)).status, 401);
+    const read = async (route = "/api/activity") => fetchJson(`${baseUrl}${route}`, { headers });
+    assert.deepEqual(await read(), { activity: [], nextCursor: null });
+    const { project: first } = await fetchJson(`${baseUrl}/api/projects`, { method: "POST", headers, body: JSON.stringify({ name: "Active work" }) });
+    const { project: second } = await fetchJson(`${baseUrl}/api/projects`, { method: "POST", headers, body: JSON.stringify({ name: "Archived research" }) });
+    const { card } = await fetchJson(`${baseUrl}/api/projects/${first.id}/cards`, { method: "POST", headers: { ...headers, "X-Kanban-Actor": "Codex Writer" }, body: JSON.stringify({ title: "Handoff results" }) });
+    await fetchJson(`${baseUrl}/api/projects/${second.id}`, { method: "PATCH", headers: { ...headers, "X-Kanban-Version": String(second.revision) }, body: JSON.stringify({ archivedAt: new Date().toISOString() }) });
+    const before = await fs.readFile(dataPath, "utf8");
+    const response = await fetch(`${baseUrl}/api/activity?limit=2`, { headers });
+    assert.match(response.headers.get("cache-control") || "", /no-store/);
+    const page = await response.json() as any;
+    assert.equal(page.activity.length, 2);
+    assert.equal(typeof page.nextCursor, "string");
+    const older = await read(`/api/activity?limit=2&cursor=${encodeURIComponent(page.nextCursor)}`);
+    assert.equal(older.nextCursor, null);
+    const all = [...page.activity, ...older.activity];
+    assert.equal(all.length, 4);
+    assert.equal(new Set(all.map(a => a.id)).size, 4);
+    assert.ok(all.some(a => a.projectName === "Archived research" && a.projectArchivedAt));
+    assert.ok(all.some(a => a.cardId === card.id && a.cardTitle === "Handoff results" && a.actor.label === "Codex Writer"));
+    const projectHistory = await read(`/api/projects/${first.id}/activity?limit=200`);
+    assert.deepEqual(projectHistory.activity.map((a: any) => a.action), ["project.created", "card.created"]);
+    assert.equal(projectHistory.activity[0].projectName, undefined);
+    for (const query of ["limit=0", "limit=201", "limit=1.5", "limit=1&limit=1", "cursor=invalid!", "cursor=a&cursor=b", "cursor[x]=a"]) {
+      assert.equal((await fetch(`${baseUrl}/api/activity?${query}`, { headers })).status, 400, query);
+    }
+    assert.equal(await fs.readFile(dataPath, "utf8"), before);
+  });
+});
+
 function cardMetadata(card: { nextActor: unknown; nextAction: unknown; priority: unknown; blockedReason: unknown }) {
   return { nextActor: card.nextActor, nextAction: card.nextAction, priority: card.priority, blockedReason: card.blockedReason };
 }

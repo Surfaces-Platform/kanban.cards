@@ -103,6 +103,19 @@ final class NativeAsyncRaceTests: XCTestCase {
         XCTAssertNil(model.errorMessage)
     }
 
+    func testLateWorkspaceActivityAfterSignOutIsRejected() async throws {
+        RaceURLProtocol.state.enqueue(json: #"{"activity":[{"id":"private-event","action":"card.updated","actor":{"channel":"api","label":"Private agent"},"summary":"Private history","projectId":"project-a","createdAt":"2026-10-19T23:00:00.000Z","projectName":"Private Project","projectArchivedAt":null}],"nextCursor":null}"#, held: "old-activity")
+        let slow = Task { try await model.workspaceActivity(in: workspace) }
+        await RaceURLProtocol.state.waitForStart("old-activity")
+        RaceURLProtocol.state.enqueue(json: #"{"signedOutHere":true,"globalSignOutComplete":true}"#)
+        await model.signOut()
+        RaceURLProtocol.state.release("old-activity")
+        do { _ = try await slow.value; XCTFail("Signed-out history must not return to the view.") }
+        catch is CancellationError { }
+        XCTAssertFalse(model.signedIn)
+        XCTAssertNil(model.errorMessage)
+    }
+
     func testOldUnauthorizedResponseCannotRemoveReplacementCredentialOrSignOutModel() async throws {
         RaceURLProtocol.state.enqueue(status: 401, json: #"{"error":"Old session revoked."}"#, held: "old-401")
         let slow = Task { try await model.loadProject(id: "project-a", in: workspace) }

@@ -53,9 +53,14 @@ final class AppModel {
             restoring = false
             guard !ProcessInfo.processInfo.arguments.contains("--demo-empty-workspaces") else { return }
             workspaces = [Workspace(id: "demo-workspace", slug: "demo", name: "Demo Workspace", url: URL(string: "https://demo.invalid")!)]
+            guard !ProcessInfo.processInfo.arguments.contains("--demo-empty-projects") else { return }
             let timestamp = ServerTimestamp.string()
             let card = Card(id: "demo-card", title: "Review the iPhone app", body: "Check the native Card workflow.", nextActor: .human, nextAction: "Review the changes", priority: .high, blockedReason: "", columnId: "next", position: 0, version: 1, createdAt: timestamp, updatedAt: timestamp, comments: [])
-            let project = Project(id: "demo-project", name: "iPhone app", description: "Isolated sample data for simulator verification.", columns: [Column(id: "next", name: "Next", position: 0), Column(id: "doing", name: "Doing", position: 1), Column(id: "done", name: "Done", position: 2)], cards: [card], activity: [], revision: 1, createdAt: timestamp, updatedAt: timestamp)
+            let activity = [
+                Activity(id: "demo-claude-activity", action: "card.updated", actor: ActivityActor(channel: "api", label: "Claude Research (demo)", agentConnectionId: "demo-claude"), summary: "Updated Review the iPhone app.", projectId: "demo-project", cardId: card.id, createdAt: ServerTimestamp.string(from: .now.addingTimeInterval(-60))),
+                Activity(id: "demo-codex-activity", action: "card.updated", actor: ActivityActor(channel: "api", label: "Codex Writer (demo)", agentConnectionId: "demo-codex"), summary: "Reviewed the iPhone app handoff.", projectId: "demo-project", cardId: card.id, createdAt: timestamp)
+            ]
+            let project = Project(id: "demo-project", name: "iPhone app", description: "Isolated sample data for simulator verification.", columns: [Column(id: "next", name: "Next", position: 0), Column(id: "doing", name: "Doing", position: 1), Column(id: "done", name: "Done", position: 2)], cards: [card], activity: activity, revision: 1, createdAt: timestamp, updatedAt: timestamp)
             loadedProjects[project.id] = project
             updateSummary(project, workspaceID: "demo-workspace")
             #if DEBUG
@@ -363,6 +368,57 @@ final class AppModel {
                 return projectSummary(project)
             }
             return summary
+        }
+    }
+
+    func workspaceActivity(in workspace: Workspace, cursor: String? = nil) async throws -> WorkspaceActivityPage {
+        let generation = api.sessionGeneration
+        let owner = ownerID
+        try requireActivitySession(workspace: workspace, owner: owner, generation: generation)
+        if isDemo {
+            // Derive history from all retained Projects, including archived ones.
+            let ids = Set((projectLists[workspace.id] ?? []).map(\.id))
+            let activity = loadedProjects.values.filter { ids.contains($0.id) }.flatMap { project in
+                project.activity.map { event in
+                    var item = event
+                    item.projectName = project.name
+                    item.projectArchivedAt = project.archivedAt
+                    item.cardTitle = project.cards.first { $0.id == event.cardId }?.title
+                    return item
+                }
+            }.sorted {
+                if $0.createdAt != $1.createdAt { return $0.createdAt > $1.createdAt }
+                return $0.scopedID > $1.scopedID
+            }
+            let start: Int
+            if let cursor {
+                guard let index = activity.firstIndex(where: { $0.scopedID == cursor }) else {
+                    throw APIError(message: "Refresh Activity to continue.", statusCode: 400)
+                }
+                start = index + 1
+            } else { start = 0 }
+            let page = Array(activity.dropFirst(start).prefix(50))
+            let next = start + page.count < activity.count ? page.last?.scopedID : nil
+            return WorkspaceActivityPage(activity: page, nextCursor: next)
+        }
+        do {
+            let page = try await api.workspaceActivity(in: workspace, cursor: cursor)
+            try Task.checkCancellation()
+            try requireActivitySession(workspace: workspace, owner: owner, generation: generation)
+            return page
+        } catch {
+            // Current-session 401s must end authentication even when a view has
+            // been dismissed. The transport excludes replaced-session failures.
+            if (error as? APIError)?.isUnauthorized == true { handle(error) }
+            throw error
+        }
+    }
+
+    private func requireActivitySession(workspace: Workspace, owner: String, generation: UUID) throws {
+        guard signedIn, !signOutPending, !endingSession, ownerID == owner,
+              api.sessionGeneration == generation,
+              workspaces.contains(where: { $0.id == workspace.id && $0.url == workspace.url }) else {
+            throw CancellationError()
         }
     }
 

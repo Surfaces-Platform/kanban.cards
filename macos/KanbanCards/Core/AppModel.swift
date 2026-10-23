@@ -2,6 +2,15 @@ import AuthenticationServices
 import Foundation
 import Observation
 
+struct WorkspaceActivityState {
+    var activity: [Activity] = []
+    var nextCursor: String?
+    var hasLoaded = false
+    var isLoading = false
+    var error: String?
+    var failedLoadMore = false
+}
+
 @MainActor
 @Observable
 final class AppModel {
@@ -16,6 +25,8 @@ final class AppModel {
     private var workspaceMutationGenerations: [String: UUID] = [:]
     private var projectRefreshes: [String: UUID] = [:]
     private var workspaceRefreshes: [String: UUID] = [:]
+    private var workspaceActivityRefreshes: [String: UUID] = [:]
+    private var workspaceActivityStates: [String: WorkspaceActivityState] = [:]
     private var workspaceLoadID: UUID?
     private var workspaceCreationID: UUID?
     private var uncertainWorkspaceCreationBaselines: [WorkspaceCreationIntent: Set<String>] = [:]
@@ -175,6 +186,86 @@ final class AppModel {
     func projectListError(in workspace: Workspace) -> String? {
         guard canAccess(workspace) else { return nil }
         return projectListErrors[workspaceKey(workspace)]
+    }
+
+    func workspaceActivity(in workspace: Workspace) -> WorkspaceActivityState {
+        guard canAccess(workspace) else { return WorkspaceActivityState() }
+        return workspaceActivityStates[workspaceKey(workspace)] ?? WorkspaceActivityState()
+    }
+
+    func loadWorkspaceActivity(in workspace: Workspace, loadMore: Bool = false) async throws {
+        try Task.checkCancellation()
+        try requireAccess(workspace)
+        let scope = workspaceKey(workspace)
+        var state = workspaceActivityStates[scope] ?? WorkspaceActivityState()
+        guard !loadMore || (!state.isLoading && state.nextCursor != nil) else { return }
+        let cursor = loadMore ? state.nextCursor : nil
+        let operation = sessionID
+        let session = api.sessionGeneration
+        let refresh = UUID()
+        workspaceActivityRefreshes[scope] = refresh
+        state.isLoading = true
+        state.error = nil
+        state.failedLoadMore = false
+        workspaceActivityStates[scope] = state
+        defer {
+            if workspaceActivityRefreshes[scope] == refresh {
+                workspaceActivityStates[scope]?.isLoading = false
+            }
+        }
+        do {
+            let page: WorkspaceActivityPage
+            if isDemo { page = try demoWorkspaceActivity(in: workspace, cursor: cursor) }
+            else { page = try await api.workspaceActivity(in: workspace, cursor: cursor) }
+            try Task.checkCancellation()
+            try requireCurrent(operation, session: session, in: workspace)
+            guard workspaceActivityRefreshes[scope] == refresh else { throw CancellationError() }
+            var seen = Set<String>()
+            let incoming = (loadMore ? state.activity : []) + page.activity
+            state.activity = incoming.filter { seen.insert($0.scopedID).inserted }
+            state.nextCursor = page.nextCursor
+            state.hasLoaded = true
+            state.error = nil
+            state.isLoading = false
+            workspaceActivityStates[scope] = state
+        } catch {
+            if Task.isCancelled { throw CancellationError() }
+            if operation == sessionID, (error as? APIError)?.isUnauthorized == true { handle(error) }
+            guard operation == sessionID, session == api.sessionGeneration,
+                  workspaceActivityRefreshes[scope] == refresh, canAccess(workspace) else { throw CancellationError() }
+            if !(error is CancellationError) {
+                workspaceActivityStates[scope]?.error = error.localizedDescription
+                workspaceActivityStates[scope]?.failedLoadMore = loadMore
+            }
+            throw error
+        }
+    }
+
+    private func demoWorkspaceActivity(in workspace: Workspace, cursor: String?) throws -> WorkspaceActivityPage {
+        let start: Int
+        if let cursor {
+            guard let offset = Int(cursor), offset >= 0 else { throw APIError(message: "The Activity page is invalid.") }
+            start = offset
+        } else { start = 0 }
+        let prefix = workspaceKey(workspace) + "/"
+        var activity: [Activity] = []
+        for (key, project) in loadedProjects where key.hasPrefix(prefix) {
+            for event in project.activity {
+                var item = event
+                item.projectName = project.name
+                item.projectArchivedAt = project.archivedAt
+                if let cardID = item.cardId {
+                    item.cardTitle = project.cards.first(where: { $0.id == cardID })?.title
+                }
+                activity.append(item)
+            }
+        }
+        activity.sort { lhs, rhs in
+            lhs.createdAt == rhs.createdAt ? lhs.scopedID > rhs.scopedID : lhs.createdAt > rhs.createdAt
+        }
+        let end = min(start + 50, activity.count)
+        return WorkspaceActivityPage(activity: Array(activity.dropFirst(start).prefix(50)),
+            nextCursor: end < activity.count ? String(end) : nil)
     }
 
     /// Refresh inventory before selected content so external additions become discoverable.
@@ -738,6 +829,8 @@ final class AppModel {
         let retained = Set(incoming.map(workspaceKey))
         projectLists = projectLists.filter { retained.contains($0.key) }
         loadedProjects = loadedProjects.filter { key, _ in retained.contains { key.hasPrefix($0 + "/") } }
+        workspaceActivityStates = workspaceActivityStates.filter { retained.contains($0.key) }
+        workspaceActivityRefreshes = workspaceActivityRefreshes.filter { retained.contains($0.key) }
         workspaces = incoming
     }
 
@@ -751,6 +844,19 @@ final class AppModel {
         let project = Self.demoProjectWithAuditFixture()
         loadedProjects[projectKey(project.id, in: workspace)] = project
         updateSummary(project, in: workspace)
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--demo-workspace-activity") {
+            var archived = project
+            archived.id = "demo-archived-project"
+            archived.name = "Archived research"
+            archived.archivedAt = ServerTimestamp.string()
+            archived.activity = [Activity(id: "demo-activity-archived", action: "project.updated",
+                actor: ActivityActor(channel: "api", label: "Claude Research (demo)", agentConnectionId: "demo-claude"),
+                summary: "Updated research findings.", projectId: archived.id, createdAt: ServerTimestamp.string())]
+            loadedProjects[projectKey(archived.id, in: workspace)] = archived
+            updateSummary(archived, in: workspace)
+        }
+        #endif
     }
 
     private func canAccess(_ workspace: Workspace) -> Bool {
@@ -798,6 +904,8 @@ final class AppModel {
         projectLists = [:]
         loadedProjects = [:]
         workspaceRefreshes = [:]
+        workspaceActivityRefreshes = [:]
+        workspaceActivityStates = [:]
         projectRefreshes = [:]
         workspaceMutationGenerations = [:]
         projectMutationGenerations = [:]
@@ -980,7 +1088,10 @@ final class AppModel {
                 version: 1, createdAt: timestamp, updatedAt: timestamp, comments: comments)
         }
         return Project(id: "demo-project", name: "Atlas website", description: "Prepare a clear, accessible launch experience.",
-            columns: defaultColumns, cards: cards, activity: [], revision: 1, createdAt: timestamp, updatedAt: timestamp)
+            columns: defaultColumns, cards: cards, activity: [Activity(id: "demo-activity-homepage", action: "card.updated",
+                actor: ActivityActor(channel: "api", label: "Codex Writer (demo)", agentConnectionId: "demo-codex"),
+                summary: "Updated homepage hierarchy.", projectId: "demo-project", cardId: "demo-card-homepage", createdAt: timestamp)],
+            revision: 1, createdAt: timestamp, updatedAt: timestamp)
     }
 }
 

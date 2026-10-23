@@ -187,6 +187,12 @@ final class KanbanAPIClient {
         return result.projects
     }
 
+    func workspaceActivity(in workspace: Workspace, cursor: String? = nil) async throws -> WorkspaceActivityPage {
+        var query = [URLQueryItem(name: "limit", value: "50")]
+        if let cursor { query.append(URLQueryItem(name: "cursor", value: cursor)) }
+        return try await request(origin: workspaceOrigin(workspace), path: ["activity"], query: query)
+    }
+
     func project(id: String, in workspace: Workspace) async throws -> Project {
         let result: ProjectResult = try await request(origin: workspaceOrigin(workspace), path: ["projects", id])
         return result.project
