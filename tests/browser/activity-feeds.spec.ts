@@ -193,6 +193,8 @@ for (const scope of ["Workspace", "Project"] as const) {
     await authenticate(page, harness);
     await openCard(page, seed.cards.desktopDraft.title);
     await page.getByLabel("Title", { exact: true }).fill("Draft retained through Activity navigation");
+    await page.locator("#move-card-trigger").click();
+    await expect(page.locator("#move-card-panel")).toBeVisible();
     if (scope === "Workspace") await openWorkspaceActivity(page);
     else {
       await page.getByRole("button", { name: "Actions", exact: true }).click();
@@ -203,8 +205,12 @@ for (const scope of ["Workspace", "Project"] as const) {
       await expect(page.getByRole("button", { name, exact: true })).toHaveCount(0);
     }
     await expect(page.locator("#project-editor, form[data-form='card']")).toHaveCount(0);
-    await page.getByRole("button", { name: "Back to board", exact: true }).click();
+    await page.keyboard.press("Escape");
     await expect(page.getByLabel("Title", { exact: true })).toHaveValue("Draft retained through Activity navigation");
+    await expect(page.locator("#move-card-panel")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#move-card-panel")).toHaveCount(0);
+    await expect(page.locator("#move-card-trigger")).toBeFocused();
     for (const name of ["New Project", "Edit Project"]) {
       await page.getByRole("button", { name: "Actions", exact: true }).click();
       await page.getByRole("button", { name, exact: true }).click();

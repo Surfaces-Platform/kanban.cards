@@ -3668,11 +3668,6 @@ root.addEventListener("keydown", (event) => {
     if (!mutationInFlight) cancelAddColumn();
     return;
   }
-  if (movePanelOpen || moveConflict) {
-    event.preventDefault();
-    cancelMove();
-    return;
-  }
   if (accountPanelOpen || projectActionsOpen) {
     event.preventDefault();
     pendingFocusRestore = accountPanelOpen
@@ -3686,6 +3681,11 @@ root.addEventListener("keydown", (event) => {
   if (activityFeed) {
     event.preventDefault();
     closeActivityFeed();
+    return;
+  }
+  if (movePanelOpen || moveConflict) {
+    event.preventDefault();
+    cancelMove();
     return;
   }
   if (selectedCardId || creatingCard) {
