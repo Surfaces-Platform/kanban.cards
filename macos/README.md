@@ -22,6 +22,14 @@ Open the Workspace chooser and choose **New Workspace…** below the separator, 
 
 Demo mode creates synthetic Workspaces in memory for that run. It does not create an account Workspace. The native owner-token API supports creation at the root `POST /api/workspaces`; a deployed server must include that support for signed-in account creation.
 
+## Read Workspace Activity
+
+Choose **Workspace Activity** below the Workspace chooser to see changes across every Project in the selected Workspace, including archived Projects. The command remains available when the Workspace has no active Projects. Each entry shows its Project, Card title when available, stored actor name, and time. Project and Card Activity continue to show the stored actor name on every entry.
+
+**Refresh** reloads the newest entries. **Load more** retrieves older entries, 50 at a time. A failed refresh or page request keeps the entries already displayed and offers **Retry**. A successful empty feed shows **No Workspace Activity**. Switching Workspace or account closes the sheet; responses from replaced sessions cannot populate another Workspace's feed.
+
+The Workspace feed requires the server's read-only `GET /api/activity` endpoint. To review named agents and archived history without an account, launch a Debug app with `--demo --demo-workspace-activity`, then choose **Workspace Activity**. Demo history comes from the retained synthetic Projects and makes no network requests.
+
 ## Open Cards alongside their Column
 
 Opening a Card now shows its Column as a compact list beside the Card details. The app uses this presentation by default and has no Card view selector. Older saved presentation preferences do not change this behavior. Choose another Column or use **Board** to return to the full board.

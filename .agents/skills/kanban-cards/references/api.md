@@ -158,9 +158,15 @@ Return `201 { "comment": Comment, "card": { "id": string, "version": number }, "
 
 ## Activity
 
+### `GET /activity?limit=50&cursor=<opaque>`
+
+Return `{ "activity": WorkspaceActivity[], "nextCursor": string | null }` for the authenticated Workspace. Results combine retained history from active and archived Projects, newest first. Each entry keeps its stored `actor` and adds the current `projectName`, `projectArchivedAt`, and `cardTitle` when the Card still exists. Project history remains the source of these entries; reading the feed does not create Activity or change revisions.
+
+`limit` defaults to 50 and accepts integers from 1 to 200. Pass `nextCursor` unchanged to load older entries; `null` means the last page. A refresh starts with no cursor. Invalid cursors or limits return `400`. Newer changes arriving between page requests do not repeat already loaded entries. The feed is private and is never cached. Read scope is sufficient; a Workspace selector cannot change the credential's scope.
+
 ### `GET /projects/:projectId/activity?limit=25`
 
-Return `{ "activity": Activity[], "projectRevision": number }`. Agent calls record `{ channel: "api", label, agentConnectionId }` from the verified durable connection; request labels cannot override the stored fields. Historical Activity rows may omit `agentConnectionId`.
+Return `{ "activity": Activity[], "projectRevision": number }` in chronological order, bounded by the most recent entries. `limit` defaults to 50 and accepts integers from 1 to 200. Agent calls record `{ channel: "api", label, agentConnectionId }` from the verified durable connection; request labels cannot override the stored fields. Historical Activity rows may omit `agentConnectionId`.
 
 ## Helper command mapping
 

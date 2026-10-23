@@ -13,6 +13,8 @@ Owner
 
 A Project is a board. A Workspace is the tenant boundary. Agent credentials grant `read` or `read` and `write` access to that Workspace; they cannot manage owner credentials or issue other keys.
 
+Open Workspace Activity from the web Workspace menu or the native Projects view to read changes across active and archived Projects. On web, Project Activity is in the Project's Actions menu; Card Activity remains in Card detail. Every level displays the stored name of the owner or agent who made each change. Workspace feeds offer Refresh and Load more, and retain readable entries if an update fails. The [Activity API](.agents/skills/kanban-cards/references/api.md#activity) supports the same scoped history for API clients.
+
 ## First local run
 
 Use Node.js 22 and npm. Keep local test data separate from production.

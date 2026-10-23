@@ -106,12 +106,29 @@ interface ProjectCard extends CardFields {
 
 interface ActivityItem {
   id: string;
+  projectId: string;
+  projectName: string;
+  projectArchivedAt: string | null;
+  cardTitle: string;
   cardId: string | null;
   action: string;
   summary: string;
   actorLabel: string;
   channel: string;
   createdAt: string;
+}
+
+interface ActivityFeed {
+  scope: "workspace" | "project";
+  projectId: string | null;
+  name: string;
+  items: ActivityItem[];
+  nextCursor: string | null;
+  loaded: boolean;
+  loading: boolean;
+  error: string;
+  retryMore: boolean;
+  requestId: number;
 }
 
 interface AgentConnection {
@@ -328,6 +345,7 @@ let descriptionSelection: { start: number; end: number; direction: "forward" | "
 let accountPanelOpen = false;
 let projectActionsOpen = false;
 let sessionEpoch = 0;
+let activityFeed: ActivityFeed | null = null;
 const recoveryStorage: Storage = {
   get length() { return window.localStorage.length; },
   key: index => window.localStorage.key(index),
@@ -475,6 +493,10 @@ function normalizeActivity(value: unknown): ActivityItem {
   const actor = objectValue(item.actor);
   return {
     id: String(item.id || uniqueKey()),
+    projectId: String(item.projectId || ""),
+    projectName: String(item.projectName || "Untitled Project"),
+    projectArchivedAt: item.projectArchivedAt ? String(item.projectArchivedAt) : null,
+    cardTitle: String(item.cardTitle || ""),
     cardId: item.cardId ? String(item.cardId) : null,
     action: String(item.action || item.type || "updated"),
     summary: String(item.summary || item.message || item.action || item.type || "Project updated"),
@@ -874,6 +896,10 @@ function applyCardMutationResponse(projectId: string, payload: unknown): Project
 function recordBrowserActivity(project: Project, summary: string, cardId: string): void {
   project.activity.push({
     id: uniqueKey(),
+    projectId: project.id,
+    projectName: project.name,
+    projectArchivedAt: project.archivedAt,
+    cardTitle: project.cards.find((card) => card.id === cardId)?.title || "",
     cardId,
     action: "browser.local",
     summary,
@@ -1115,9 +1141,9 @@ function renderWorkspaceRoute(): string {
 
 function renderWorkspaceSwitcher(): string {
   const workspace = session?.workspace;
-  if (accessContext !== "workspace" || !workspace) return "";
+  if (accessContext !== "workspace" || !workspace) return renderButton("Workspace Activity", "show-workspace-activity", { disabled: workspaceLocked() });
   const locked = workspaceLocked();
-  return `<div class="header-workspace-switcher"><button id="workspace-switcher-trigger" class="jk-button workspace-switcher-trigger" type="button" data-action="toggle-workspace-menu" aria-label="Workspace: ${escapeHtml(workspace.name)}" aria-expanded="${workspaceMenuOpen}" aria-controls="workspace-switcher-panel"${disabledAttribute(locked)}><span>${escapeHtml(workspace.name)}</span><span aria-hidden="true">⌄</span></button>${workspaceMenuOpen ? `<section id="workspace-switcher-panel" class="menu-panel workspace-switcher-panel" aria-labelledby="workspace-switcher-trigger"><p class="workspace-current"><span aria-hidden="true">✓ </span>${escapeHtml(workspace.name)}<span class="jk-visually-hidden">, current Workspace</span></p>${renderButton("Switch Workspace…", "choose-workspace", { disabled: locked })}<hr>${renderButton("New Workspace…", "new-workspace", { disabled: locked })}</section>` : ""}</div>`;
+  return `<div class="header-workspace-switcher"><button id="workspace-switcher-trigger" class="jk-button workspace-switcher-trigger" type="button" data-action="toggle-workspace-menu" aria-label="Workspace: ${escapeHtml(workspace.name)}" aria-expanded="${workspaceMenuOpen}" aria-controls="workspace-switcher-panel"${disabledAttribute(locked)}><span>${escapeHtml(workspace.name)}</span><span aria-hidden="true">⌄</span></button>${workspaceMenuOpen ? `<section id="workspace-switcher-panel" class="menu-panel workspace-switcher-panel" aria-labelledby="workspace-switcher-trigger"><p class="workspace-current"><span aria-hidden="true">✓ </span>${escapeHtml(workspace.name)}<span class="jk-visually-hidden">, current Workspace</span></p>${renderButton("Workspace Activity", "show-workspace-activity", { disabled: locked })}${renderButton("Switch Workspace…", "choose-workspace", { disabled: locked })}<hr>${renderButton("New Workspace…", "new-workspace", { disabled: locked })}</section>` : ""}</div>`;
 }
 
 function renderHeader(): string {
@@ -1187,7 +1213,7 @@ function renderProjectContext(): string {
 function renderProjectActions(project: Project): string {
   const locked = workspaceLocked();
   const label = projectLoading || mutationKind === "refresh" ? "Refreshing…" : "Refresh";
-  return `<div class="project-action-menu"><button id="project-actions-trigger" class="jk-button action-menu-trigger" type="button" data-action="toggle-project-actions" aria-expanded="${projectActionsOpen ? "true" : "false"}" aria-controls="project-actions-panel"${disabledAttribute(locked)}><span>Actions</span><span aria-hidden="true">•••</span></button>${projectActionsOpen ? `<section id="project-actions-panel" class="menu-panel action-panel" aria-labelledby="project-actions-trigger">${renderButton("New Project", "new-project", { disabled: locked })}${renderButton("New Card", "new-card", { disabled: locked, data: `data-column-id="${escapeHtml(newCardColumn(project))}"` })}${renderButton("Edit Project", "edit-project", { disabled: locked })}${renderButton(label, "refresh-project", { disabled: locked })}</section>` : ""}</div>`;
+  return `<div class="project-action-menu"><button id="project-actions-trigger" class="jk-button action-menu-trigger" type="button" data-action="toggle-project-actions" aria-expanded="${projectActionsOpen ? "true" : "false"}" aria-controls="project-actions-panel"${disabledAttribute(locked)}><span>Actions</span><span aria-hidden="true">•••</span></button>${projectActionsOpen ? `<section id="project-actions-panel" class="menu-panel action-panel" aria-labelledby="project-actions-trigger">${renderButton("New Project", "new-project", { disabled: locked })}${renderButton("New Card", "new-card", { disabled: locked, data: `data-column-id="${escapeHtml(newCardColumn(project))}"` })}${renderButton("Edit Project", "edit-project", { disabled: locked })}${renderButton("Project Activity", "show-project-activity", { disabled: locked })}${renderButton(label, "refresh-project", { disabled: locked })}</section>` : ""}</div>`;
 }
 
 function currentArchiveReceipt(projectId: string): ArchiveReceipt | null {
@@ -1417,7 +1443,7 @@ function renderComments(card: ProjectCard): string {
 
 function renderActivity(card: ProjectCard): string {
   const activity = (activeProject?.activity || []).filter((item) => item.cardId === card.id).slice(-12).reverse();
-  return `<section id="activity-panel" class="activity-panel" role="tabpanel" aria-labelledby="activity-tab" tabindex="0"><ol class="activity-list">${activity.map((item) => `<li><span>${escapeHtml(item.summary)}</span><span class="activity-actor jk-meta">By ${escapeHtml(item.actorLabel)}</span><time class="jk-meta" datetime="${escapeHtml(item.createdAt)}">${escapeHtml(formatDate(item.createdAt))}</time></li>`).join("")}</ol></section>`;
+  return `<section id="activity-panel" class="activity-panel" role="tabpanel" aria-labelledby="activity-tab" tabindex="0"><ol class="activity-list">${activity.map((item) => `<li><span>${escapeHtml(item.summary)}</span><span class="activity-actor jk-meta">By ${escapeHtml(item.actorLabel)}</span><time class="jk-meta" datetime="${escapeHtml(item.createdAt)}">${escapeHtml(formatDate(item.createdAt))}</time></li>`).join("")}</ol>${activity.length ? "" : `<p class="quiet">No Activity for this Card yet.</p>`}</section>`;
 }
 
 function renderCreateDestination(project: Project, draft: CardDraft): string {
@@ -1627,9 +1653,86 @@ async function restoreSelectedCard(): Promise<void> {
   } finally { setWorkspaceMutationsDisabled(false); render(); }
 }
 
+function activityScopeKey(): string {
+  return JSON.stringify([sessionEpoch, session?.ownerId, session?.workspace?.id || "local"]);
+}
+
+function renderActivityFeed(): string {
+  const feed = activityFeed!;
+  const title = feed.scope === "workspace" ? "Workspace Activity" : "Project Activity";
+  const status = feed.loading
+    ? { tone: "neutral" as const, title: feed.items.length ? "Loading Activity…" : "Opening Activity…", message: "" }
+    : feed.error
+      ? { tone: "error" as const, title: "Activity could not be loaded", message: feed.error }
+      : null;
+  const items = feed.items.map((item) => `<li>${feed.scope === "workspace" ? `<span class="activity-context jk-meta">${escapeHtml(item.projectName)}${item.projectArchivedAt ? " · Archived Project" : ""}</span>` : ""}<span>${escapeHtml(item.summary)}</span><span class="activity-actor jk-meta">By ${escapeHtml(item.actorLabel)}</span><time class="jk-meta" datetime="${escapeHtml(item.createdAt)}">${escapeHtml(formatDate(item.createdAt))}</time></li>`).join("");
+  return `<section class="activity-feed jk-panel" aria-labelledby="activity-feed-title" aria-busy="${feed.loading}"><div class="activity-feed-header"><div><p class="eyebrow">${escapeHtml(feed.name)}</p><h1 id="activity-feed-title" tabindex="-1">${title}</h1></div><div class="jk-actions">${renderButton("Refresh", "refresh-activity-feed", { disabled: feed.loading })}${renderButton("Back to board", "close-activity-feed")}</div></div>${renderStatus(status, "activity-feed-status")}${feed.error ? renderButton("Retry", "retry-activity-feed", { disabled: feed.loading }) : ""}<ol class="activity-list" aria-label="${title}">${items}</ol>${feed.loaded && !feed.items.length ? `<p class="quiet">${feed.scope === "workspace" ? "No Activity in this Workspace yet." : "No Activity in this Project yet."}</p>` : ""}${feed.nextCursor ? `<div class="activity-feed-more">${renderButton("Load more", "load-more-activity", { disabled: feed.loading })}</div>` : ""}</section>`;
+}
+
+async function loadActivityFeed(more = false): Promise<void> {
+  const feed = activityFeed;
+  if (!feed || feed.loading || (more && !feed.nextCursor)) return;
+  const scope = activityScopeKey();
+  const requestId = ++feed.requestId;
+  const current = () => activityFeed === feed && feed.requestId === requestId && activityScopeKey() === scope;
+  const cursor = more ? feed.nextCursor : null;
+  const initiatingAction = (document.activeElement as HTMLElement | null)?.dataset.action;
+  feed.loading = true;
+  feed.error = "";
+  feed.retryMore = more;
+  render();
+  try {
+    const path = feed.scope === "workspace"
+      ? `/activity?limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`
+      : `/projects/${safeId(feed.projectId!)}/activity?limit=200`;
+    const payload = objectValue(await api(path));
+    if (!current()) return;
+    if (!Array.isArray(payload.activity) || (feed.scope === "workspace" && payload.nextCursor !== null && typeof payload.nextCursor !== "string")) throw new Error("Try again to load Activity.");
+    const incoming = payload.activity.map(normalizeActivity);
+    if (feed.scope === "project") incoming.reverse();
+    const unique = new Map<string, ActivityItem>();
+    for (const item of more ? [...feed.items, ...incoming] : incoming) unique.set(JSON.stringify([item.projectId, item.id]), item);
+    feed.items = [...unique.values()];
+    feed.nextCursor = feed.scope === "workspace" ? payload.nextCursor : null;
+    feed.loaded = true;
+  } catch (error) {
+    if (!current()) return;
+    if (handlePrivateError(error)) return;
+    feed.error = error instanceof Error ? error.message : "Try again to load Activity.";
+  } finally {
+    if (current()) {
+      feed.loading = false;
+      if (initiatingAction && document.activeElement === document.body) {
+        pendingFocusRestore = { action: initiatingAction === "load-more-activity" && feed.nextCursor ? "load-more-activity" : feed.error ? "retry-activity-feed" : "refresh-activity-feed", occurrence: 0 };
+      }
+      render();
+    }
+  }
+}
+
+async function openActivityFeed(scope: ActivityFeed["scope"]): Promise<void> {
+  if (!session || workspaceLocked() || (scope === "project" && !activeProject)) return;
+  await retainVisibleDrafts();
+  activityFeed = { scope, projectId: scope === "project" ? activeProject!.id : null, name: scope === "project" ? activeProject!.name : session.workspace?.name || "Workspace", items: [], nextCursor: null, loaded: false, loading: false, error: "", retryMore: false, requestId: 0 };
+  workspaceMenuOpen = false;
+  projectActionsOpen = false;
+  accountPanelOpen = false;
+  agentPanelOpen = false;
+  pendingFocusId = "activity-feed-title";
+  await loadActivityFeed();
+}
+
+function closeActivityFeed(): void {
+  if (!activityFeed) return;
+  const scope = activityFeed.scope;
+  activityFeed = null;
+  pendingFocusRestore = { action: scope === "project" ? "toggle-project-actions" : accessContext === "workspace" ? "toggle-workspace-menu" : "show-workspace-activity", occurrence: 0 };
+  render();
+}
+
 function renderWorkspace(): string {
   const project = activeProject;
-  const cardOpen = Boolean(project && !addColumnDraft && !projectEditorMode && (selectedCardId || creatingCard));
+  const cardOpen = Boolean(!activityFeed && project && !addColumnDraft && !projectEditorMode && (selectedCardId || creatingCard));
   const content = projectEditorMode
       ? renderProjectEditor()
       : !projects.length
@@ -1637,7 +1740,7 @@ function renderWorkspace(): string {
         : project
           ? `${renderBoardPane(project)}${cardOpen ? renderCardInspector(project) : ""}`
           : renderEmptyWorkspace();
-  return `<a class="skip-link" href="#main-content">Skip to workspace</a><div class="workspace" data-card-open="${cardOpen ? "true" : "false"}" data-workspace-locked="${workspaceLocked() ? "true" : "false"}">${renderHeader()}${renderRecovery()}${renderProjectReceipt()}<main id="main-content" class="workbench" tabindex="-1">${agentPanelOpen ? renderAgentConnections() : content}</main></div>`;
+  return `<a class="skip-link" href="#main-content">Skip to workspace</a><div class="workspace" data-card-open="${cardOpen ? "true" : "false"}" data-workspace-locked="${workspaceLocked() ? "true" : "false"}">${renderHeader()}${renderRecovery()}${renderProjectReceipt()}<main id="main-content" class="workbench" tabindex="-1">${agentPanelOpen ? renderAgentConnections() : activityFeed ? renderActivityFeed() : content}</main></div>`;
 }
 
 function currentUiState(): string {
@@ -1863,6 +1966,7 @@ function safeSessionRemove(key: string): void {
 
 function clearPrivateState(notice: AuthNotice | null): void {
   sessionEpoch++;
+  activityFeed = null;
   session = null;
   recoveryStore.scope = "";
   projectDrafts.clear();
@@ -3184,6 +3288,7 @@ async function refreshProject(): Promise<void> {
 
 async function switchProject(projectId: string): Promise<void> {
   if (!projects.some((project) => project.id === projectId)) return;
+  activityFeed = null;
   await retainVisibleDrafts();
   selectedCardId = null;
   creatingCard = false;
@@ -3324,6 +3429,7 @@ async function handleAction(button: HTMLElement): Promise<void> {
     return;
   }
   if (action === "manage-agents") {
+    activityFeed = null;
     accountPanelOpen = false;
     agentPanelOpen = true;
     issuedAgentCredential = "";
@@ -3350,6 +3456,12 @@ async function handleAction(button: HTMLElement): Promise<void> {
     render();
     return;
   }
+  if (action === "show-workspace-activity") return openActivityFeed("workspace");
+  if (action === "show-project-activity") return openActivityFeed("project");
+  if (action === "close-activity-feed") return closeActivityFeed();
+  if (action === "refresh-activity-feed") return loadActivityFeed();
+  if (action === "retry-activity-feed") return loadActivityFeed(activityFeed?.retryMore);
+  if (action === "load-more-activity") return loadActivityFeed(true);
   if (action === "toggle-project-actions") {
     workspaceMenuOpen = false;
     projectActionsOpen = !projectActionsOpen;
@@ -3569,6 +3681,11 @@ root.addEventListener("keydown", (event) => {
     accountPanelOpen = false;
     projectActionsOpen = false;
     render();
+    return;
+  }
+  if (activityFeed) {
+    event.preventDefault();
+    closeActivityFeed();
     return;
   }
   if (selectedCardId || creatingCard) {

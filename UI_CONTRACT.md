@@ -37,6 +37,7 @@ The client has passkey sign-up/sign-in, recovery, access settings, zero/one/many
 - A project is the board.
 - Projects contain ordered columns and cards.
 - Cards contain comments. Projects have Activity, and an Activity entry may reference a Card.
+- Workspace Activity combines retained history from active and archived Projects in the authenticated Workspace. Each entry identifies its Project and preserves the stored actor name. Workspace history is a read-only view of Project Activity.
 - The browser and skill use the same `/api/projects` resources.
 - Project updates send `X-Kanban-Version` with the project revision.
 - Card updates send `X-Kanban-Version` with the card version.
@@ -116,6 +117,14 @@ Raw `input`, `select`, and `textarea` markup in the production client renderer i
 - `renderSelect`
 
 Every control uses `.form-control`; selects also use `.select-control`. Fallback markup in `index.html` must not collect credentials or authenticated data.
+
+## Workspace and Project Activity
+
+- Workspace Activity opens from the Workspace menu, including when there are no active Projects. Project Activity opens from the selected Project's Actions menu. Card Activity remains a tab within Card detail.
+- Workspace history loads newest first, 50 entries at a time, and includes archived Projects. Load more requests older entries. Project history shows its most recent 200 entries, newest first. Each feed entry shows the change, a separate `By <stored actor name>` line, and time. Workspace entries also name their Project and mark archived Projects.
+- Opening Activity preserves unsaved Card content. Back to board or Escape returns to the board and restores focus to the entry control. Feed controls remain keyboard accessible during refresh and paging.
+- Initial loading, no Activity, initial failure, refresh failure, and older-page failure have distinct states. Refresh and Load more failures keep readable entries and offer Retry for the failed operation. Account and Workspace changes clear private feed state and reject late responses.
+- Mac and iPhone expose Workspace Activity from the Workspace's Projects view, including an empty Workspace. Native feeds show Project and available Card context, archived Project status, stored actor name, and time, with refresh, paging, empty, and retry states.
 
 ## Visual and accessibility source boundary
 

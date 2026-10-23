@@ -114,6 +114,10 @@ struct ProjectsView: View {
                 Button("Create Project") { creating = true }
             }
             Section {
+                NavigationLink { WorkspaceActivityView(workspace: workspace) } label: {
+                    Label("Workspace Activity", systemImage: "clock")
+                }
+                    .accessibilityIdentifier("workspace.activity")
                 NavigationLink("Archived Projects") { ArchivedProjectsView(workspace: workspace) }
                     .accessibilityIdentifier("project.archived")
             }

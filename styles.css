@@ -2309,3 +2309,41 @@ body[data-state="empty-workspace"] .workbench {
 .stale-review fieldset { margin: .75rem 0; }
 
 .conflict-source { white-space: pre-wrap; }
+
+/* Read-only Workspace and Project Activity share the Card attribution treatment. */
+.activity-feed {
+  grid-column: 1 / -1;
+  inline-size: 100%;
+  max-inline-size: 64rem;
+  min-inline-size: 0;
+  justify-self: center;
+  padding: var(--jk-space-4);
+}
+
+.activity-feed-header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--jk-space-4);
+}
+
+.activity-feed-header > div {
+  min-inline-size: 0;
+}
+
+.activity-feed .activity-list {
+  padding-inline-start: var(--jk-space-4);
+}
+
+.activity-feed .activity-list li {
+  border-block-end: 1px solid var(--jk-color-border);
+  padding-block: var(--jk-space-3);
+  overflow-wrap: anywhere;
+}
+
+.activity-feed-more {
+  display: flex;
+  justify-content: center;
+  margin-block-start: var(--jk-space-4);
+}

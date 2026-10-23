@@ -21,6 +21,7 @@ import {
   type PasskeyAuthConfig
 } from "./passkey-auth";
 import { createStateStore, createWorkspaceStoreResolver, DEFAULT_WORKSPACE_ID } from "./state-store";
+import { ActivityCursorError, workspaceActivityPage } from "./activity";
 import { authorizeNativeCredential, createNativeAuthRouter, isNativeCredential, requireNativeRequest } from "./native-auth";
 import type {
   Activity,
@@ -649,7 +650,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
   });
   for (const [route, asset, contentType] of [...BRAND_PUBLIC_ASSETS, ...PUBLIC_WEBSITE_ASSETS]) app.get(route, sendStaticFile(staticDir, asset, contentType));
 
-  app.use("/api/projects", (req, _res, next) => {
+  app.use(["/api/projects", "/api/activity"], (req, _res, next) => {
     void (async () => {
       if (missingConfiguration.length) throw httpError(503, `Missing required configuration: ${missingConfiguration.join(", ")}.`);
       rejectWorkspaceSelectors(req, req.method !== "GET" && req.method !== "HEAD");
@@ -664,6 +665,22 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
       next();
     })().catch(next);
   });
+
+  app.get("/api/activity", asyncHandler(async (req, res) => {
+    noStore(res);
+    if (Object.keys(req.query).some(key => key !== "limit" && key !== "cursor")
+      || (req.query.limit !== undefined && typeof req.query.limit !== "string")) {
+      throw httpError(400, "Activity accepts one limit and one cursor parameter.");
+    }
+    const state = await requestStore(req).read();
+    const limit = boundedInteger(req.query.limit, 50, 1, 200);
+    try {
+      res.json(workspaceActivityPage(state.projects, limit, req.query.cursor));
+    } catch (error) {
+      if (error instanceof ActivityCursorError) throw httpError(400, error.message);
+      throw error;
+    }
+  }));
 
   app.get("/api/projects", asyncHandler(async (req, res) => {
     noStore(res);
