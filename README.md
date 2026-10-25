@@ -199,3 +199,10 @@ The controller verifies the exact Git-created artifact, passkey health, database
 4. [Design research](docs/design-language.md) preserves historical research.
 
 The [shared editing slice](docs/shared-interactions/slice-1.md) implements explicit Save, durable drafts and field reconciliation across macOS, iOS and web.
+
+
+### Links to work
+
+Use **Copy Workspace link** in the Workspace or account menu, **Copy Project link** in Project Actions, or **Copy Card link** in the Card actions. Each Comment has a timestamp permalink and **Copy Comment link**. People opening a link must already have access to its Workspace; copying a link does not grant access.
+
+Workspace addresses use their existing tenant origin (`https://mike.kanban.cards/`). Project links use `/projects/<project-id>`, Card links add `/cards/<card-id>`, and Comment links add `#<comment-id>` to the Card address. Names and Column placement can change without changing those links. Opening a link, refreshing, and browser Back/Forward resolve the saved object; a signed-out visitor returns to the requested object after signing in. Archived or unavailable objects show an explicit status instead of opening another object.

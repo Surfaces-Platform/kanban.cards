@@ -1,3 +1,4 @@
+import { safeObjectReturnPath } from "./object-urls";
 import { normalizeInitialProject, normalizeProjectIdea } from "./project-idea";
 import crypto from "node:crypto";
 import { BRAND_PUBLIC_ASSETS, renderBrandHead, renderProductName } from "./brand";
@@ -142,14 +143,14 @@ const FALLBACK_INDEX_HTML = `<!doctype html>
   <meta name="robots" content="noindex,nofollow">
 ${renderBrandHead()}
   <title>kanban.cards</title>
-  <link rel="stylesheet" href="judgmentkit.css">
-  <link rel="stylesheet" href="styles.css">
-  <link rel="stylesheet" href="website.css">
+  <link rel="stylesheet" href="/judgmentkit.css">
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/website.css">
 </head>
 <body>
   <div id="app"><main class="centered-view">${renderProductName("strong")}<p>Opening your projects…</p></main></div>
   <div class="toast-region" id="toast-region" role="status" aria-live="polite" aria-atomic="true"></div>
-  <script src="app.js"></script>
+  <script src="/app.js"></script>
 </body>
 </html>`;
 
@@ -549,6 +550,8 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
     if (!family || !passkeyAuthConfig) throw httpError(404, "API route not found.");
     if (!workspace) throw httpError(404, "Workspace unavailable.");
     assertExactOrigin(req, family.rootOrigin);
+    const returnPath = safeObjectReturnPath(asRecord(req.body).returnPath ?? "/");
+    if (!returnPath) throw httpError(400, "Invalid Workspace return address.");
     try {
       const consumed = await accessStore.consumeHandoff({ token: requiredString(asRecord(req.body).token, "Handoff token"), destinationHost: host });
       const active = await activeOwnerSession(accessStore, consumed.sessionId);
@@ -570,7 +573,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
         Math.max(1, Math.floor((Date.parse(active.session.expiresAt) - Date.now()) / 1000))
       ));
       if (req.is("application/x-www-form-urlencoded")) {
-        res.redirect(303, "/");
+        res.redirect(303, returnPath);
         return;
       }
       res.json({ authenticated: true, workspace: publicAccessWorkspace(workspace, family) });
@@ -636,6 +639,7 @@ export function createApp(options: CreateAppOptions = {}): express.Express {
   });
   app.get("/", indexHandler);
   app.get("/index.html", indexHandler);
+  app.get(["/projects/:projectId", "/projects/:projectId/cards/:cardId"], indexHandler);
   app.get("/sign-in", indexHandler);
   app.get("/sign-up", indexHandler);
   app.get("/app.js", sendStaticFile(staticDir, "public/app.js", "application/javascript; charset=utf-8"));

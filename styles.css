@@ -2347,3 +2347,12 @@ body[data-state="empty-workspace"] .workbench {
   justify-content: center;
   margin-block-start: var(--jk-space-4);
 }
+
+/* Permalinks keep the selected Comment visible after reload and keyboard navigation. */
+.comment-list li[data-linked-comment="true"] {
+  outline: 2px solid currentColor;
+  outline-offset: 4px;
+  scroll-margin-block: 2rem;
+}
+.comment-heading a { color: inherit; }
+.object-link-status { padding: var(--jk-space-4); max-width: 40rem; }

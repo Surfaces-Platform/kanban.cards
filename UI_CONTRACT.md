@@ -164,3 +164,12 @@ For client changes, run at minimum:
 - the production browser suite
 
 The current browser contract verifies rendered structure, movement and creation placement, committed-resource recovery, lifecycle states, mutation locks, reconciliation, responsive transformation, private-content absence, document-width overflow, focus, accessible names and states, and console errors in those scenarios. Automated semantics and keyboard evidence do not substitute for spoken assistive-technology verification. Direct spoken verification against production later captured actual VoiceOver system audio after the Mac was unlocked. The critical-path announcements and focus behavior matched the expected contract, so spoken VoiceOver output is verified for that tested production path. Prototype control counts and pixel matching are not production acceptance criteria.
+
+
+## Object addresses
+
+- Workspace links use the existing tenant origin. Projects use `/projects/<id>`, Cards use `/projects/<id>/cards/<id>`, and Comments use the Card path with `#<comment-id>`. Names and Column placement do not enter addresses.
+- Copy links are explicit actions in the Workspace/account menu, Project Actions, Card actions, and each Comment. Comment timestamps are ordinary anchors so browser open-in-new-tab remains available.
+- Direct links resolve after authentication and override the remembered Project. Reload, Back, and Forward keep selection and retained drafts together. A Comment link opens its Card, focuses the Comment, and marks it visibly. Missing or archived objects show an explicit status without substituting another object.
+- The nonsecret `kanban.cards:object-return` session preference holds only a validated Workspace slug and local object path while passkey navigation crosses origins. It is cleared when submitted or signed out. The tenant handoff validates the local return path before redirecting. It cannot select a different tenant, carry credentials, or grant access.
+- Shell asset paths are absolute so the same script and styles load from nested object addresses.

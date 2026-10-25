@@ -1,3 +1,4 @@
+import { objectPath, parseObjectRoute, safeObjectReturnPath, type ObjectRoute } from "../object-urls";
 import { RecoveryStore, RecoveryMap, reconcileCardValues, cardTextFields, type CardTextField, type ReconciliationField } from "./recovery";
 import { renderProductName } from "../brand";
 import { passkeyFormCopy, publicPageTitle, renderPublicHomepage, renderPublicWebsite, usesPublicWebsite } from "../public-website";
@@ -314,6 +315,12 @@ let mutationInFlight = false;
 let mutationKind: MutationKind = null;
 let authNotice: AuthNotice | null = null;
 let selectedCardId: string | null = null;
+let linkedCommentId: string | null = null;
+let workspaceObjectLocation = true;
+let objectNavigationPending = true;
+let objectLinkStatus: StatusMessage | null = null;
+let objectNavigationRequest = 0;
+let replaceObjectHistory = true;
 let creatingCard = false;
 let creatingColumnId = "";
 let projectEditorMode: ProjectEditorMode = null;
@@ -603,7 +610,19 @@ function submitAuthForm(destination: string, fields: Record<string, string>): vo
 
 async function beginPasskeyFlow(mode: PasskeyMode, action?: string): Promise<void> {
   if (accessContext === "workspace") {
-    if (!session) { if (rootUrl) window.location.assign(rootUrl); return; }
+    if (!session) {
+      if (rootUrl) {
+        const destination = new URL("/", rootUrl);
+        const path = safeObjectReturnPath(window.location.pathname + window.location.hash);
+        if (session === null && path) {
+          const slug = window.location.hostname.split(".")[0];
+          destination.searchParams.set("open-workspace", slug);
+          destination.searchParams.set("object", path);
+        }
+        window.location.assign(destination.toString());
+      }
+      return;
+    }
     if (action === "api-key") window.sessionStorage.setItem("kanban.cards:open-agents", "1");
     const destination = new URL("/", rootUrl);
     destination.searchParams.set("access", mode);
@@ -1143,13 +1162,13 @@ function renderWorkspaceSwitcher(): string {
   const workspace = session?.workspace;
   if (accessContext !== "workspace" || !workspace) return renderButton("Workspace Activity", "show-workspace-activity", { disabled: workspaceLocked() });
   const locked = workspaceLocked();
-  return `<div class="header-workspace-switcher"><button id="workspace-switcher-trigger" class="jk-button workspace-switcher-trigger" type="button" data-action="toggle-workspace-menu" aria-label="Workspace: ${escapeHtml(workspace.name)}" aria-expanded="${workspaceMenuOpen}" aria-controls="workspace-switcher-panel"${disabledAttribute(locked)}><span>${escapeHtml(workspace.name)}</span><span aria-hidden="true">⌄</span></button>${workspaceMenuOpen ? `<section id="workspace-switcher-panel" class="menu-panel workspace-switcher-panel" aria-labelledby="workspace-switcher-trigger"><p class="workspace-current"><span aria-hidden="true">✓ </span>${escapeHtml(workspace.name)}<span class="jk-visually-hidden">, current Workspace</span></p>${renderButton("Workspace Activity", "show-workspace-activity", { disabled: locked })}${renderButton("Switch Workspace…", "choose-workspace", { disabled: locked })}<hr>${renderButton("New Workspace…", "new-workspace", { disabled: locked })}</section>` : ""}</div>`;
+  return `<div class="header-workspace-switcher"><button id="workspace-switcher-trigger" class="jk-button workspace-switcher-trigger" type="button" data-action="toggle-workspace-menu" aria-label="Workspace: ${escapeHtml(workspace.name)}" aria-expanded="${workspaceMenuOpen}" aria-controls="workspace-switcher-panel"${disabledAttribute(locked)}><span>${escapeHtml(workspace.name)}</span><span aria-hidden="true">⌄</span></button>${workspaceMenuOpen ? `<section id="workspace-switcher-panel" class="menu-panel workspace-switcher-panel" aria-labelledby="workspace-switcher-trigger"><p class="workspace-current"><span aria-hidden="true">✓ </span>${escapeHtml(workspace.name)}<span class="jk-visually-hidden">, current Workspace</span></p>${renderButton("Copy Workspace link", "copy-workspace-link", { disabled: locked })}${renderButton("Workspace Activity", "show-workspace-activity", { disabled: locked })}${renderButton("Switch Workspace…", "choose-workspace", { disabled: locked })}<hr>${renderButton("New Workspace…", "new-workspace", { disabled: locked })}</section>` : ""}</div>`;
 }
 
 function renderHeader(): string {
   const name = ownerName();
   const editingProject = projectEditorMode !== null || addColumnPreparing || addColumnCommitted || addColumnDraft !== null;
-  return `<header class="app-header"><div class="header-primary">${renderProductName("span")}${renderWorkspaceSwitcher()}${renderProjectContext()}</div><div class="profile-menu"><button class="avatar-button" type="button" data-action="toggle-account-panel" aria-label="${accountPanelOpen ? "Close" : "Open"} account panel" aria-expanded="${accountPanelOpen ? "true" : "false"}" aria-controls="account-panel"${disabledAttribute(editingProject)}><span aria-hidden="true">${escapeHtml(ownerInitial())}</span></button>${accountPanelOpen ? `<section id="account-panel" class="menu-panel account-panel" aria-labelledby="account-name"><strong id="account-name">${escapeHtml(name)}</strong>${accessContext === "workspace" ? renderButton("Agent connections", "manage-agents", { disabled: editingProject }) : ""}${accessContext !== "local" ? renderButton("Manage access", "manage-access", { disabled: editingProject }) : ""}${renderButton("Sign out", "sign-out", { disabled: editingProject })}</section>` : ""}</div></header>`;
+  return `<header class="app-header"><div class="header-primary">${renderProductName("span")}${renderWorkspaceSwitcher()}${renderProjectContext()}</div><div class="profile-menu"><button class="avatar-button" type="button" data-action="toggle-account-panel" aria-label="${accountPanelOpen ? "Close" : "Open"} account panel" aria-expanded="${accountPanelOpen ? "true" : "false"}" aria-controls="account-panel"${disabledAttribute(editingProject)}><span aria-hidden="true">${escapeHtml(ownerInitial())}</span></button>${accountPanelOpen ? `<section id="account-panel" class="menu-panel account-panel" aria-labelledby="account-name"><strong id="account-name">${escapeHtml(name)}</strong>${renderButton("Copy Workspace link", "copy-workspace-link", { disabled: editingProject })}${accessContext === "workspace" ? renderButton("Agent connections", "manage-agents", { disabled: editingProject }) : ""}${accessContext !== "local" ? renderButton("Manage access", "manage-access", { disabled: editingProject }) : ""}${renderButton("Sign out", "sign-out", { disabled: editingProject })}</section>` : ""}</div></header>`;
 }
 
 function renderAccessSettings(): string {
@@ -1213,7 +1232,7 @@ function renderProjectContext(): string {
 function renderProjectActions(project: Project): string {
   const locked = workspaceLocked();
   const label = projectLoading || mutationKind === "refresh" ? "Refreshing…" : "Refresh";
-  return `<div class="project-action-menu"><button id="project-actions-trigger" class="jk-button action-menu-trigger" type="button" data-action="toggle-project-actions" aria-expanded="${projectActionsOpen ? "true" : "false"}" aria-controls="project-actions-panel"${disabledAttribute(locked)}><span>Actions</span><span aria-hidden="true">•••</span></button>${projectActionsOpen ? `<section id="project-actions-panel" class="menu-panel action-panel" aria-labelledby="project-actions-trigger">${renderButton("New Project", "new-project", { disabled: locked })}${renderButton("New Card", "new-card", { disabled: locked, data: `data-column-id="${escapeHtml(newCardColumn(project))}"` })}${renderButton("Edit Project", "edit-project", { disabled: locked })}${renderButton("Project Activity", "show-project-activity", { disabled: locked })}${renderButton(label, "refresh-project", { disabled: locked })}</section>` : ""}</div>`;
+  return `<div class="project-action-menu"><button id="project-actions-trigger" class="jk-button action-menu-trigger" type="button" data-action="toggle-project-actions" aria-expanded="${projectActionsOpen ? "true" : "false"}" aria-controls="project-actions-panel"${disabledAttribute(locked)}><span>Actions</span><span aria-hidden="true">•••</span></button>${projectActionsOpen ? `<section id="project-actions-panel" class="menu-panel action-panel" aria-labelledby="project-actions-trigger">${renderButton("New Project", "new-project", { disabled: locked })}${renderButton("New Card", "new-card", { disabled: locked, data: `data-column-id="${escapeHtml(newCardColumn(project))}"` })}${renderButton("Edit Project", "edit-project", { disabled: locked })}${renderButton("Copy Project link", "copy-project-link", { disabled: locked })}${renderButton("Project Activity", "show-project-activity", { disabled: locked })}${renderButton(label, "refresh-project", { disabled: locked })}</section>` : ""}</div>`;
 }
 
 function currentArchiveReceipt(projectId: string): ArchiveReceipt | null {
@@ -1423,7 +1442,7 @@ function renderComments(card: ProjectCard): string {
   const errorId = "comment-error";
   const draft = commentDrafts.get(draftKey(project.id, card.id)) || "";
   const idempotencyScope = `comment:${project.id}:${card.id}`;
-  return `<section class="comments" aria-labelledby="comments-heading"><h3 id="comments-heading">Comments</h3><ol class="comment-list">${card.comments.map((comment) => `<li><div class="comment-heading"><strong>${escapeHtml(comment.actorLabel)}</strong><time datetime="${escapeHtml(comment.createdAt)}">${escapeHtml(formatDate(comment.createdAt))}</time></div><p>${escapeHtml(comment.body)}</p></li>`).join("")}</ol>${renderPendingPostAction(idempotencyScope)}<form class="comment-form" data-form="comment" data-card-id="${escapeHtml(card.id)}" novalidate>${renderField({
+  return `<section class="comments" aria-labelledby="comments-heading"><h3 id="comments-heading">Comments</h3><ol class="comment-list">${card.comments.map((comment) => `<li id="${escapeHtml(comment.id)}" tabindex="-1"${linkedCommentId === comment.id ? ' data-linked-comment="true"' : ""}><div class="comment-heading"><strong>${escapeHtml(comment.actorLabel)}</strong><a href="${escapeHtml(objectPath({ projectId: project.id, cardId: card.id, commentId: comment.id }))}" aria-label="Link to Comment by ${escapeHtml(comment.actorLabel)}"><time datetime="${escapeHtml(comment.createdAt)}">${escapeHtml(formatDate(comment.createdAt))}</time></a>${renderButton("Copy Comment link", "copy-comment-link", { data: `data-comment-id="${escapeHtml(comment.id)}"` })}</div><p>${escapeHtml(comment.body)}</p></li>`).join("")}</ol>${renderPendingPostAction(idempotencyScope)}<form class="comment-form" data-form="comment" data-card-id="${escapeHtml(card.id)}" novalidate>${renderField({
     id: "comment-input",
     label: "Add Comment",
     control: renderTextArea({
@@ -1570,7 +1589,7 @@ function renderCardInspector(project: Project): string {
   const previewPanel = `<div id="description-preview-panel" class="description-view-panel markdown-preview" role="tabpanel" aria-labelledby="description-preview-tab" tabindex="0"${descriptionView === "preview" ? "" : " hidden"}>${previewContent}</div>`;
   const descriptionEditor = `<div class="jk-field surface-field card-body-field"><div class="description-field-header"><label for="card-body-input">Description</label>${descriptionTabs}</div><p class="jk-help" id="card-description-help">Markdown supports headings, lists, links, quotes, and code. HTML and images aren’t supported.</p>${writePanel}${previewPanel}</div>`;
   const createDestination = card ? "" : renderCreateDestination(project, draft);
-  const editor = `<form class="card-form surface-card-form" data-form="card" data-card-id="${escapeHtml(card?.id || "")}" novalidate><fieldset class="card-edit-fields"${card?.archivedAt ? " disabled" : ""}><div class="jk-field surface-field"><label class="jk-visually-hidden" for="card-title-input">Title</label>${titleControl}${titleError ? `<p class="jk-error" id="card-title-error">${escapeHtml(titleError)}</p>` : ""}</div><p id="card-filter-note" class="card-filter-note jk-help" role="status">${selectedCardFilterMessage(project, card)}</p>${draftRetentionMarkup}${descriptionEditor}${renderCardWorkFields(draft)}${createDestination}</fieldset>${conflict || moveConflictMarkup ? "" : card ? `<div class="inspector-actions"><button class="jk-button" data-priority="primary" type="submit"${disabledAttribute(Boolean(card.archivedAt))}>Save</button>${renderButton("Revert", "discard-draft")}${renderButton("Archive", "archive-card", { priority: "risk", data: `data-card-id="${escapeHtml(card.id)}"` })}</div>` : `<div class="inspector-actions"><button class="jk-button" data-priority="primary" type="submit"${disabledAttribute()}>${mutationKind === "card" ? "Creating…" : "Create Card"}</button>${renderButton("Discard", "discard-draft")}</div>`}</form>`;
+  const editor = `<form class="card-form surface-card-form" data-form="card" data-card-id="${escapeHtml(card?.id || "")}" novalidate><fieldset class="card-edit-fields"${card?.archivedAt ? " disabled" : ""}><div class="jk-field surface-field"><label class="jk-visually-hidden" for="card-title-input">Title</label>${titleControl}${titleError ? `<p class="jk-error" id="card-title-error">${escapeHtml(titleError)}</p>` : ""}</div><p id="card-filter-note" class="card-filter-note jk-help" role="status">${selectedCardFilterMessage(project, card)}</p>${draftRetentionMarkup}${descriptionEditor}${renderCardWorkFields(draft)}${createDestination}</fieldset>${conflict || moveConflictMarkup ? "" : card ? `<div class="inspector-actions"><button class="jk-button" data-priority="primary" type="submit"${disabledAttribute(Boolean(card.archivedAt))}>Save</button>${renderButton("Revert", "discard-draft")}${renderButton("Copy Card link", "copy-card-link")}${renderButton("Archive", "archive-card", { priority: "risk", data: `data-card-id="${escapeHtml(card.id)}"` })}</div>` : `<div class="inspector-actions"><button class="jk-button" data-priority="primary" type="submit"${disabledAttribute()}>${mutationKind === "card" ? "Creating…" : "Create Card"}</button>${renderButton("Discard", "discard-draft")}</div>`}</form>`;
   const cardPanel = `<div id="card-panel" class="inspector-panel" role="tabpanel" aria-labelledby="card-tab">${status ? `<div class="card-status">${renderStatus(status, "card-status")}</div>` : renderStatus(null, "card-status")}${staleMarkup}${moveConflictMarkup}${pendingCardCreate}${editor}${card && !card.archivedAt ? renderComments(card) : ""}</div>`;
   const preparingStatus = addColumnPreparing && cardOnlyQuery.matches
     ? `<div class="card-status inspector-preparing-status">${renderStatus(ADD_COLUMN_PREPARING_STATUS, "add-column-preparing-status")}</div>`
@@ -1733,7 +1752,9 @@ function closeActivityFeed(): void {
 function renderWorkspace(): string {
   const project = activeProject;
   const cardOpen = Boolean(!activityFeed && project && !addColumnDraft && !projectEditorMode && (selectedCardId || creatingCard));
-  const content = projectEditorMode
+  const content = objectLinkStatus
+      ? `<section class="jk-panel object-link-status" aria-labelledby="object-link-title"><h1 id="object-link-title" tabindex="-1">${escapeHtml(objectLinkStatus.title)}</h1><p>${escapeHtml(objectLinkStatus.message)}</p>${renderButton("Back to board", "leave-object-link", { priority: "primary" })}${renderButton("Retry link", "retry-object-link")}</section>`
+      : projectEditorMode
       ? renderProjectEditor()
       : !projects.length
         ? renderEmptyWorkspace()
@@ -1817,7 +1838,7 @@ function render(): void {
   const publicWebsite = usesPublicWebsite(accessContext, Boolean(session)) && !initialLoading && !workspaceHandoffPending && !signOutPending;
   document.title = publicPageTitle({ context: accessContext, authenticated: Boolean(session), resolved: !initialLoading, pending: workspaceHandoffPending || signOutPending, authMode: authIntent?.mode, recoveryCodePresent: Boolean(recoveryCode), signedOut: authNotice?.kind === "signed-out" });
   document.body.classList.toggle("public-website", publicWebsite);
-  const content = initialLoading || workspaceHandoffPending
+  const content = initialLoading || workspaceHandoffPending || (session && accessContext !== "root" && objectNavigationPending)
     ? renderLoading()
     : signOutPending
       ? renderSignOutProgress()
@@ -1833,8 +1854,9 @@ function render(): void {
   }
   root.innerHTML = publicWebsite ? renderPublicWebsite(content, rootUrl, utilities) : content;
   syncPublicWebsiteMenu();
+  syncObjectLocation();
   restoreDescriptionSelection();
-  restorePendingContext();
+  if (!initialLoading && !objectNavigationPending) restorePendingContext();
 }
 
 function formData(form: HTMLFormElement): FormData {
@@ -1966,6 +1988,10 @@ function safeSessionRemove(key: string): void {
 
 function clearPrivateState(notice: AuthNotice | null): void {
   sessionEpoch++;
+  objectNavigationRequest++;
+  objectLinkStatus = null;
+  linkedCommentId = null;
+  objectNavigationPending = false;
   activityFeed = null;
   session = null;
   recoveryStore.scope = "";
@@ -1980,6 +2006,7 @@ function clearPrivateState(notice: AuthNotice | null): void {
   createdWorkspace = null;
   uncertainWorkspaceCreations.clear();
   safeSessionRemove("kanban.cards:workspace-route");
+  safeSessionRemove("kanban.cards:object-return");
   agentConnections = [];
   agentPanelOpen = false;
   issuedAgentCredential = "";
@@ -2095,6 +2122,15 @@ function submitWorkspaceHandoff(destination: URL, token: string): void {
   input.name = "token";
   input.value = token;
   form.append(input);
+  const pending = pendingObjectReturn();
+  if (pending && new URL(destination).hostname.split(".")[0] === pending.slug) {
+    const returnInput = document.createElement("input");
+    returnInput.type = "hidden";
+    returnInput.name = "returnPath";
+    returnInput.value = pending.path;
+    form.append(returnInput);
+    safeSessionRemove("kanban.cards:object-return");
+  }
   document.body.append(form);
   try {
     form.submit();
@@ -2339,6 +2375,7 @@ async function signIn(form: HTMLFormElement): Promise<void> {
     await loadSession();
     if (!session) throw new Error("The owner key was accepted, but no browser session was created.");
     await loadProjects();
+    await applyObjectLocation();
     authNotice = null;
     projectStatus = null;
   } catch (error) {
@@ -2687,6 +2724,9 @@ async function saveProject(form: HTMLFormElement): Promise<void> {
 }
 
 function openCard(cardId: string, trigger: HTMLElement, allowArchived = false): void {
+  linkedCommentId = null;
+  workspaceObjectLocation = false;
+  objectLinkStatus = null;
   const project = activeProject;
   const card = project?.cards.find((candidate) => candidate.id === cardId && (allowArchived || !candidate.archivedAt));
   if (!project || !card) return;
@@ -2715,6 +2755,8 @@ function openCard(cardId: string, trigger: HTMLElement, allowArchived = false): 
 }
 
 function openNewCard(columnId: string, trigger: HTMLElement): void {
+  workspaceObjectLocation = false;
+  linkedCommentId = null;
   const project = activeProject;
   if (!project) return;
   selectedCardId = null;
@@ -2739,6 +2781,7 @@ function openNewCard(columnId: string, trigger: HTMLElement): void {
 }
 
 function closeCard(): void {
+  linkedCommentId = null;
   const project = activeProject;
   if (!project) return;
   const cardId = selectedCardId;
@@ -3288,6 +3331,9 @@ async function refreshProject(): Promise<void> {
 
 async function switchProject(projectId: string): Promise<void> {
   if (!projects.some((project) => project.id === projectId)) return;
+  workspaceObjectLocation = false;
+  objectLinkStatus = null;
+  linkedCommentId = null;
   activityFeed = null;
   await retainVisibleDrafts();
   selectedCardId = null;
@@ -3330,6 +3376,27 @@ function handlePrivateError(error: unknown): boolean {
 
 async function handleAction(button: HTMLElement): Promise<void> {
   const action = button.dataset.action || "";
+  if (action === "retry-object-link") return applyObjectLocation();
+  if (action === "leave-object-link") {
+    objectLinkStatus = null;
+    linkedCommentId = null;
+    selectedCardId = null;
+    await loadProjects();
+    render();
+    return;
+  }
+  if (action === "copy-workspace-link" || action === "copy-project-link" || action === "copy-card-link" || action === "copy-comment-link") {
+    if (!session) return;
+    const route: ObjectRoute = action === "copy-workspace-link" ? {} : {
+      projectId: activeProject?.id,
+      ...(action === "copy-card-link" || action === "copy-comment-link" ? { cardId: selectedCardId || undefined } : {}),
+      ...(action === "copy-comment-link" ? { commentId: button.dataset.commentId } : {})
+    };
+    const origin = safeOrigin(session.workspace?.url) || window.location.origin;
+    await navigator.clipboard.writeText(new URL(objectPath(route), origin).href);
+    showConfirmation("Link copied", "People with access to this Workspace can open this link.");
+    return;
+  }
   if (recoveryStore.failure && ["open-workspace", "choose-workspace", "new-workspace", "close-card", "cancel-project"].includes(action)) { syncRecoveryNotice(); return; }
   if (action === "read-back-patch") return readBackPendingPatch(button.dataset.patchPath || "");
   if (action === "retry-pending-post") {
@@ -3716,8 +3783,124 @@ cardOnlyQuery.addEventListener("change", () => {
   render();
 });
 
+function pendingObjectReturn(): { slug: string; path: string } | null {
+  try {
+    const value = JSON.parse(window.sessionStorage.getItem("kanban.cards:object-return") || "null");
+    const path = safeObjectReturnPath(value?.path);
+    return value && typeof value.slug === "string" && /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(value.slug) && path ? { slug: value.slug, path } : null;
+  } catch { return null; }
+}
+
+function selectedObjectPath(): string {
+  if (workspaceObjectLocation && !selectedCardId) return "/";
+  const commentId = linkedCommentId && activeProject?.cards.find(card => card.id === selectedCardId)?.comments.some(comment => comment.id === linkedCommentId) ? linkedCommentId : null;
+  return objectPath(activeProject ? { projectId: activeProject.id,
+    ...(selectedCardId ? { cardId: selectedCardId, ...(commentId ? { commentId } : {}) } : {}) } : {});
+}
+
+function syncObjectLocation(): void {
+  if (!session || accessContext === "root" || accessContext === "auth" || initialLoading || objectNavigationPending || objectLinkStatus || mutationInFlight || signOutPending) return;
+  const path = selectedObjectPath();
+  if (window.location.pathname + window.location.hash !== path) {
+    window.history[replaceObjectHistory ? "replaceState" : "pushState"](null, "", path);
+  }
+  replaceObjectHistory = false;
+}
+
+async function applyObjectLocation(): Promise<void> {
+  if (!session || accessContext === "root" || accessContext === "auth") return;
+  captureVisibleDrafts();
+  if (recoveryStore.failure) {
+    objectNavigationPending = false;
+    objectLinkStatus = { tone: "warning", title: "Local draft recovery needs attention", message: "Resolve the local storage error before opening another object. Your current drafts are retained." };
+    render();
+    return;
+  }
+  if (mutationInFlight && mutationKind !== "sign-in" || addColumnDraft || addColumnPreparing || addColumnCommitted) {
+    window.history.pushState(null, "", selectedObjectPath());
+    return;
+  }
+  const request = ++objectNavigationRequest;
+  const epoch = sessionEpoch;
+  const route = parseObjectRoute(window.location.pathname, window.location.hash);
+  objectNavigationPending = true;
+  objectLinkStatus = null;
+  linkedCommentId = null;
+  activityFeed = null;
+  agentPanelOpen = false;
+  selectedCardId = null;
+  creatingCard = false;
+  projectEditorMode = null;
+  projectEditorDraft = null;
+  addColumnDraft = null;
+  addColumnPreparing = false;
+  addColumnCommitted = false;
+  cardStatus = null;
+  cardConflict = null;
+  resetMoveContext();
+  resetDescriptionContext();
+  inspectorTab = "card";
+  render();
+  try {
+    if (!route) {
+      objectLinkStatus = { tone: "error", title: "Link unavailable", message: "This address does not identify a Project, Card, or Comment." };
+      return;
+    }
+    workspaceObjectLocation = !route.projectId;
+    if (!route.projectId) return;
+    const project = await fetchProject(route.projectId);
+    if (!session || epoch !== sessionEpoch || request !== objectNavigationRequest) return;
+    if (project.archivedAt) {
+      objectLinkStatus = { tone: "warning", title: "Project is archived", message: "This link still identifies the archived Project. It is not an active board." };
+      return;
+    }
+    const card = route.cardId ? project.cards.find(item => item.id === route.cardId) : null;
+    if (route.cardId && (!card || card.archivedAt)) {
+      objectLinkStatus = { tone: "warning", title: card ? "Card is archived" : "Card unavailable", message: card ? "This link still identifies the archived Card. It is not on the active board." : "This Card is unavailable in the linked Project." };
+      return;
+    }
+    if (route.commentId && !card?.comments.some(comment => comment.id === route.commentId)) {
+      objectLinkStatus = { tone: "warning", title: "Comment unavailable", message: "This Comment is unavailable on the linked Card." };
+      return;
+    }
+    reconcileProjectContext(project);
+    if (card) {
+      openCard(card.id, root);
+      linkedCommentId = route.commentId || null;
+      pendingFocusId = linkedCommentId || "card-title-input";
+    } else pendingFocusId = "main-content";
+  } catch (error) {
+    if (!session || epoch !== sessionEpoch || request !== objectNavigationRequest) return;
+    if (handlePrivateError(error)) return;
+    objectLinkStatus = { tone: "error", title: "Link unavailable", message: error instanceof ApiError && [403, 404].includes(error.status)
+      ? "This object is unavailable in this Workspace, or this account does not have access."
+      : "The linked object could not be loaded. Retry when the service is available." };
+  } finally {
+    if (epoch === sessionEpoch && request === objectNavigationRequest) {
+      objectNavigationPending = false;
+      if (objectLinkStatus) pendingFocusId = "object-link-title";
+      render();
+      if (linkedCommentId) document.getElementById(linkedCommentId)?.scrollIntoView({ block: "center" });
+    }
+  }
+}
+
+let objectNavigationQueued = false;
+function queueObjectNavigation(): void {
+  if (objectNavigationQueued || window.location.hash === "#main-content") return;
+  objectNavigationQueued = true;
+  queueMicrotask(() => { objectNavigationQueued = false; void applyObjectLocation(); });
+}
+window.addEventListener("popstate", queueObjectNavigation);
+window.addEventListener("hashchange", queueObjectNavigation);
+
 async function boot(): Promise<void> {
   const currentUrl = new URL(window.location.href);
+  const returnSlug = currentUrl.searchParams.get("open-workspace");
+  const returnPath = safeObjectReturnPath(currentUrl.searchParams.get("object") || "/");
+  if (returnSlug && /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(returnSlug) && returnPath) {
+    window.sessionStorage.setItem("kanban.cards:object-return", JSON.stringify({ slug: returnSlug, path: returnPath }));
+  }
   const requestedWorkspaceRoute = currentUrl.searchParams.get("new-workspace") === "1" || currentUrl.searchParams.get("workspaces") === "1";
   if (requestedWorkspaceRoute) window.sessionStorage.setItem("kanban.cards:workspace-route", JSON.stringify({ create: currentUrl.searchParams.get("new-workspace") === "1", returnSlug: currentUrl.searchParams.get("return-workspace") || "" }));
   render();
@@ -3772,9 +3955,14 @@ async function boot(): Promise<void> {
         window.sessionStorage.removeItem("kanban.cards:open-access");
         accessPanelOpen = true; await loadAccessSettings();
         window.history.replaceState(null, "", "/");
+      } else if (!workspaceRouteRequested && pendingObjectReturn()) {
+        const pending = pendingObjectReturn()!;
+        if (workspaceChoices.some(workspace => workspace.slug === pending.slug)) await openWorkspace(pending.slug);
+        else accessFailure = { title: "Workspace unavailable", message: "This account does not have access to the Workspace in that link." };
       } else if (!workspaceRouteRequested && workspaceChoices.length === 1) await openWorkspace(workspaceChoices[0].slug);
     } else if (session) {
       await loadProjects();
+      await applyObjectLocation();
       if (window.sessionStorage.getItem("kanban.cards:open-agents") === "1") {
         window.sessionStorage.removeItem("kanban.cards:open-agents");
         agentPanelOpen = true;
