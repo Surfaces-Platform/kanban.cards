@@ -299,5 +299,7 @@ async function listen(server: Server): Promise<void> {
 async function close(server: Server): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     server.close((error) => error ? reject(error) : resolve());
+    // Teardown runs before the browser page closes; release its remaining HTTP connections.
+    server.closeAllConnections();
   });
 }
