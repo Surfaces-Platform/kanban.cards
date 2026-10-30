@@ -3810,7 +3810,9 @@ function syncObjectLocation(): void {
 async function applyObjectLocation(): Promise<void> {
   if (!session || accessContext === "root" || accessContext === "auth") return;
   captureVisibleDrafts();
-  if (recoveryStore.failure) {
+  // Session restoration has no outgoing editor to protect; keep failed-write memory accessible.
+  const restoringSession = initialLoading || mutationKind === "sign-in";
+  if (recoveryStore.failure && !restoringSession) {
     objectNavigationPending = false;
     objectLinkStatus = { tone: "warning", title: "Local draft recovery needs attention", message: "Resolve the local storage error before opening another object. Your current drafts are retained." };
     render();
