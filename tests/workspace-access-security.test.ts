@@ -251,3 +251,30 @@ test("expected-owner fence rejects swapped cookies atomically before Project, Wo
   assert.equal((await f.request("other.kanban.cards", "/api/projects", { method: "POST", cookie: f.secondCookie, origin: "https://other.kanban.cards", expectedOwner: f.other.id, body: { name: "Verified owner intent" } })).status, 201);
   assert.equal((await f.request("other.kanban.cards", "/api/projects", { method: "POST", origin: "https://other.kanban.cards", expectedOwner: f.other.id, body: { name: "Header alone grants nothing" } })).status, 401);
 }));
+
+
+test("object shells keep tenant data private and auth handoffs return only to local object addresses", async () => fixture(async f => {
+  const projectPath = "/projects/project-permalink/cards/card-permalink#comment-permalink";
+  const shell = await f.request("mike.kanban.cards", projectPath.split("#")[0]);
+  assert.equal(shell.status, 200);
+  assert.match(shell.headers.get("cache-control") || "", /no-store/);
+  assert.doesNotMatch(shell.data, /Existing board/);
+  assert.equal((await f.request("mike.kanban.cards", "/api/projects/project-permalink")).status, 401);
+  assert.equal((await f.request("auth.kanban.cards", projectPath.split("#")[0])).status, 404);
+  const handoff = await f.request("kanban.cards", "/api/workspace-handoffs", {
+    method: "POST", origin: ROOT, cookie: f.rootCookie, body: { slug: "mike" }
+  });
+  assert.equal(handoff.status, 201);
+  for (const returnPath of ["https://evil.test/", "//other.kanban.cards/", "/api/projects", "/projects/p?workspaceId=other"]) {
+    const denied = await f.request("mike.kanban.cards", "/api/workspace-handoff", {
+      method: "POST", origin: ROOT, form: { token: handoff.data.handoffToken, returnPath }
+    });
+    assert.equal(denied.status, 400);
+    assert.equal(denied.headers.get("location"), null);
+  }
+  const entered = await f.request("mike.kanban.cards", "/api/workspace-handoff", {
+    method: "POST", origin: ROOT, form: { token: handoff.data.handoffToken, returnPath: projectPath }
+  });
+  assert.equal(entered.status, 303);
+  assert.equal(entered.headers.get("location"), projectPath);
+}));

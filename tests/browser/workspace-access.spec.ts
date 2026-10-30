@@ -526,3 +526,37 @@ async function close(server: Server): Promise<void> {
   server.closeAllConnections();
   if (server.listening) await new Promise<void>((resolve, reject) => { server.close(error => error ? reject(error) : resolve()); });
 }
+
+
+test("a signed-out tenant Comment link survives the real passkey round trip", async ({ page, context }) => {
+  test.setTimeout(60_000);
+  const harness = await startHarness();
+  await authenticator(context, page);
+  try {
+    await signup(page, harness, "permalinks");
+    await createProject(page, "Permalink Project");
+    await page.getByRole("button", { name: "Actions", exact: true }).click();
+    await page.getByRole("button", { name: "New Card", exact: true }).click();
+    await page.getByLabel("Title", { exact: true }).fill("Permalink Card");
+    await page.locator("form[data-form='card']").getByRole("button", { name: "Create Card", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Copy Card link", exact: true })).toBeVisible();
+    await page.getByLabel("Add Comment", { exact: true }).fill("Return to this exact Comment");
+    await page.getByRole("button", { name: "Add Comment", exact: true }).click();
+    const link = page.locator(".comment-list li a").first();
+    await expect(link).toBeVisible();
+    const path = await link.getAttribute("href");
+    expect(path).toMatch(/^\/projects\/project-.+\/cards\/card-.+#comment-/);
+    const address = harness.tenantOrigin("permalinks") + path;
+    await page.getByRole("button", { name: "Close Card and return to Next", exact: true }).click();
+    await signout(page, harness);
+    await page.goto(address);
+    await expect(page.getByRole("heading", { name: "Sign in", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Continue", exact: true }).click();
+    await page.getByRole("button", { name: "Sign in", exact: true }).click();
+    await page.getByRole("button", { name: "Continue with passkey", exact: true }).click();
+    await expect(page).toHaveURL(address);
+    await expect(page.getByLabel("Title", { exact: true })).toHaveValue("Permalink Card");
+    await expect(page.locator(".comment-list li[data-linked-comment='true']")).toBeFocused();
+    await expect(page.getByText("Return to this exact Comment", { exact: true })).toBeVisible();
+  } finally { await harness.stop(); }
+});

@@ -243,7 +243,7 @@ function checkApplicationSource(app: SourceFile, violations: Violation[]): void 
       const adapter = app.source.match(/const recoveryStorage: Storage = \{[\s\S]*?\n\};/)?.[0] || "";
       const recoveryAdapter = storageCall[1] === "localStorage" && adapter.includes(line) && /new RecoveryStore\(recoveryStorage,/.test(app.source);
       const privatePreferenceRemoval = storageCall[1] === "sessionStorage" && functionSection(app.source, "safeSessionRemove")?.includes(line);
-      if (!recoveryAdapter && !privatePreferenceRemoval && !(storageCall[1] === "localStorage" && literalKey === "kanban.cards:project-id") && !(storageCall[1] === "sessionStorage" && ["kanban.cards:open-agents", "kanban.cards:open-access", "kanban.cards:add-passkey-after-verify", "kanban.cards:workspace-route"].includes(literalKey || ""))) {
+      if (!recoveryAdapter && !privatePreferenceRemoval && !(storageCall[1] === "localStorage" && literalKey === "kanban.cards:project-id") && !(storageCall[1] === "sessionStorage" && ["kanban.cards:open-agents", "kanban.cards:open-access", "kanban.cards:add-passkey-after-verify", "kanban.cards:workspace-route", "kanban.cards:object-return"].includes(literalKey || ""))) {
         violations.push({
           file: app.file,
           line: index + 1,
@@ -712,14 +712,14 @@ function checkStaticShell(html: SourceFile, violations: Violation[]): void {
     );
   }
 
-  const judgmentKitIndex = html.source.indexOf('href="judgmentkit.css"');
-  const stylesIndex = html.source.indexOf('href="styles.css"');
+  const judgmentKitIndex = html.source.indexOf('href="/judgmentkit.css"');
+  const stylesIndex = html.source.indexOf('href="/styles.css"');
   if (judgmentKitIndex < 0 || stylesIndex < 0 || judgmentKitIndex > stylesIndex) {
     violations.push({
       file: html.file,
       line: 1,
       reason: "static shell must load judgmentkit.css before styles.css",
-      code: '<link rel="stylesheet" href="judgmentkit.css">'
+      code: '<link rel="stylesheet" href="/judgmentkit.css">'
     });
   }
 }
@@ -853,8 +853,8 @@ async function main(): Promise<void> {
   checkApplicationStyles(styles, declaredTokens, violations);
   const website = await readSource(path.resolve(__dirname, "../website.css"), "website.css", violations);
   for (const reason of validatePublicWebsiteCss(website.source)) violations.push({ file: website.file, line: 1, reason, code: "body.public-website" });
-  if (!html.source.includes('href="website.css"') || html.source.indexOf('href="website.css"') < html.source.indexOf('href="styles.css"')) {
-    violations.push({ file: html.file, line: 1, reason: "static shell must load scoped website.css after the unchanged Workbench styles", code: 'href="website.css"' });
+  if (!html.source.includes('href="/website.css"') || html.source.indexOf('href="/website.css"') < html.source.indexOf('href="/styles.css"')) {
+    violations.push({ file: html.file, line: 1, reason: "static shell must load scoped website.css after the unchanged Workbench styles", code: 'href="/website.css"' });
   }
 
   if (violations.length) report(violations);

@@ -767,6 +767,8 @@ test("Project confirmations replace, expire, and preserve focus while resource c
   const errors = monitorBrowserErrors(page);
   await authenticate(page, harness);
   await page.clock.install();
+  // Keep locator/viewport work from consuming the 100ms margin in the 4.9s assertion.
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1_000));
   const toastRegion = page.locator("#toast-region");
   await expect(toastRegion).toHaveAttribute("role", "status");
   await expect(toastRegion).toHaveAttribute("aria-live", "polite");
