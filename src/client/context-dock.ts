@@ -244,6 +244,7 @@ interface TextControlOptions {
   required?: boolean;
   autofocus?: boolean;
   disabled?: boolean;
+  allowDuringRefresh?: boolean;
   ariaDescribedBy?: string;
   ariaErrorMessage?: string;
   invalid?: boolean;
@@ -346,6 +347,9 @@ let addColumnReturnFocus: FocusTarget | null = null;
 let pendingFocusRestore: FocusTarget | null = null;
 let pendingFocusId: string | null = null;
 let pendingScrollRestore: number | null = null;
+let pendingSelectionRestore: { id: string; start: number; end: number; direction: "forward" | "backward" | "none" } | null = null;
+let pendingElementScrollRestore: Array<{ selector: string; top: number; left: number }> = [];
+let pendingFocusViewportRestore: { id: string; top: number; left: number } | null = null;
 let inspectorTab: InspectorTab = "card";
 let descriptionView: DescriptionView = "write";
 let descriptionSelection: { start: number; end: number; direction: "forward" | "backward" | "none" } | null = null;
@@ -990,8 +994,8 @@ function setWorkspaceMutationsDisabled(disabled: boolean, kind: MutationKind = n
   mutationKind = disabled ? kind : null;
 }
 
-function disabledAttribute(disabled = false): string {
-  return mutationInFlight || disabled ? " disabled" : "";
+function disabledAttribute(disabled = false, allowDuringRefresh = false): string {
+  return (mutationInFlight && !(allowDuringRefresh && mutationKind === "refresh")) || disabled ? " disabled" : "";
 }
 
 function renderTextInput(options: TextControlOptions & {
@@ -999,11 +1003,11 @@ function renderTextInput(options: TextControlOptions & {
   autocomplete?: string;
   className?: string;
 }): string {
-  return `<input class="form-control${options.className ? ` ${escapeHtml(options.className)}` : ""}" id="${escapeHtml(options.id)}" name="${escapeHtml(options.name)}" type="${options.type || "text"}" value="${escapeHtml(options.value || "")}"${options.placeholder ? ` placeholder="${escapeHtml(options.placeholder)}"` : ""}${options.autocomplete ? ` autocomplete="${escapeHtml(options.autocomplete)}"` : ""}${options.required ? " required" : ""}${options.autofocus ? " autofocus" : ""}${options.ariaDescribedBy ? ` aria-describedby="${escapeHtml(options.ariaDescribedBy)}"` : ""}${options.ariaErrorMessage ? ` aria-errormessage="${escapeHtml(options.ariaErrorMessage)}"` : ""}${options.invalid ? ' aria-invalid="true"' : ""}${disabledAttribute(Boolean(options.disabled))}>`;
+  return `<input class="form-control${options.className ? ` ${escapeHtml(options.className)}` : ""}" id="${escapeHtml(options.id)}" name="${escapeHtml(options.name)}" type="${options.type || "text"}" value="${escapeHtml(options.value || "")}"${options.placeholder ? ` placeholder="${escapeHtml(options.placeholder)}"` : ""}${options.autocomplete ? ` autocomplete="${escapeHtml(options.autocomplete)}"` : ""}${options.required ? " required" : ""}${options.autofocus ? " autofocus" : ""}${options.ariaDescribedBy ? ` aria-describedby="${escapeHtml(options.ariaDescribedBy)}"` : ""}${options.ariaErrorMessage ? ` aria-errormessage="${escapeHtml(options.ariaErrorMessage)}"` : ""}${options.invalid ? ' aria-invalid="true"' : ""}${disabledAttribute(Boolean(options.disabled), Boolean(options.allowDuringRefresh))}>`;
 }
 
 function renderTextArea(options: TextControlOptions & { rows?: number; ariaLabel?: string; className?: string }): string {
-  return `<textarea class="form-control textarea-control${options.className ? ` ${escapeHtml(options.className)}` : ""}" id="${escapeHtml(options.id)}" name="${escapeHtml(options.name)}" rows="${options.rows || 4}"${options.placeholder ? ` placeholder="${escapeHtml(options.placeholder)}"` : ""}${options.required ? " required" : ""}${options.ariaLabel ? ` aria-label="${escapeHtml(options.ariaLabel)}"` : ""}${options.ariaDescribedBy ? ` aria-describedby="${escapeHtml(options.ariaDescribedBy)}"` : ""}${options.ariaErrorMessage ? ` aria-errormessage="${escapeHtml(options.ariaErrorMessage)}"` : ""}${options.invalid ? ' aria-invalid="true"' : ""}${disabledAttribute(Boolean(options.disabled))}>${escapeHtml(options.value || "")}</textarea>`;
+  return `<textarea class="form-control textarea-control${options.className ? ` ${escapeHtml(options.className)}` : ""}" id="${escapeHtml(options.id)}" name="${escapeHtml(options.name)}" rows="${options.rows || 4}"${options.placeholder ? ` placeholder="${escapeHtml(options.placeholder)}"` : ""}${options.required ? " required" : ""}${options.ariaLabel ? ` aria-label="${escapeHtml(options.ariaLabel)}"` : ""}${options.ariaDescribedBy ? ` aria-describedby="${escapeHtml(options.ariaDescribedBy)}"` : ""}${options.ariaErrorMessage ? ` aria-errormessage="${escapeHtml(options.ariaErrorMessage)}"` : ""}${options.invalid ? ' aria-invalid="true"' : ""}${disabledAttribute(Boolean(options.disabled), Boolean(options.allowDuringRefresh))}>${escapeHtml(options.value || "")}</textarea>`;
 }
 
 function renderSelect(options: TextControlOptions & {
@@ -1011,7 +1015,7 @@ function renderSelect(options: TextControlOptions & {
   ariaLabel?: string;
   className?: string;
 }): string {
-  return `<select class="form-control select-control${options.className ? ` ${escapeHtml(options.className)}` : ""}" id="${escapeHtml(options.id)}" name="${escapeHtml(options.name)}"${options.ariaLabel ? ` aria-label="${escapeHtml(options.ariaLabel)}"` : ""}${options.ariaDescribedBy ? ` aria-describedby="${escapeHtml(options.ariaDescribedBy)}"` : ""}${options.ariaErrorMessage ? ` aria-errormessage="${escapeHtml(options.ariaErrorMessage)}"` : ""}${options.invalid ? ' aria-invalid="true"' : ""}${disabledAttribute(Boolean(options.disabled))}>${options.choices.map((choice) => `<option value="${escapeHtml(choice.value)}"${choice.value === options.value ? " selected" : ""}>${escapeHtml(choice.label)}</option>`).join("")}</select>`;
+  return `<select class="form-control select-control${options.className ? ` ${escapeHtml(options.className)}` : ""}" id="${escapeHtml(options.id)}" name="${escapeHtml(options.name)}"${options.ariaLabel ? ` aria-label="${escapeHtml(options.ariaLabel)}"` : ""}${options.ariaDescribedBy ? ` aria-describedby="${escapeHtml(options.ariaDescribedBy)}"` : ""}${options.ariaErrorMessage ? ` aria-errormessage="${escapeHtml(options.ariaErrorMessage)}"` : ""}${options.invalid ? ' aria-invalid="true"' : ""}${disabledAttribute(Boolean(options.disabled), Boolean(options.allowDuringRefresh))}>${options.choices.map((choice) => `<option value="${escapeHtml(choice.value)}"${choice.value === options.value ? " selected" : ""}>${escapeHtml(choice.label)}</option>`).join("")}</select>`;
 }
 
 function renderField(options: {
@@ -1232,7 +1236,7 @@ function renderProjectContext(): string {
 function renderProjectActions(project: Project): string {
   const locked = workspaceLocked();
   const label = projectLoading || mutationKind === "refresh" ? "Refreshing…" : "Refresh";
-  return `<div class="project-action-menu"><button id="project-actions-trigger" class="jk-button action-menu-trigger" type="button" data-action="toggle-project-actions" aria-expanded="${projectActionsOpen ? "true" : "false"}" aria-controls="project-actions-panel"${disabledAttribute(locked)}><span>Actions</span><span aria-hidden="true">•••</span></button>${projectActionsOpen ? `<section id="project-actions-panel" class="menu-panel action-panel" aria-labelledby="project-actions-trigger">${renderButton("New Project", "new-project", { disabled: locked })}${renderButton("New Card", "new-card", { disabled: locked, data: `data-column-id="${escapeHtml(newCardColumn(project))}"` })}${renderButton("Edit Project", "edit-project", { disabled: locked })}${renderButton("Copy Project link", "copy-project-link", { disabled: locked })}${renderButton("Project Activity", "show-project-activity", { disabled: locked })}${renderButton(label, "refresh-project", { disabled: locked })}</section>` : ""}</div>`;
+  return `<div class="project-action-menu"><button id="project-actions-trigger" class="jk-button action-menu-trigger" type="button" data-action="toggle-project-actions" aria-expanded="${projectActionsOpen ? "true" : "false"}" aria-controls="project-actions-panel"${projectLoading ? ' aria-disabled="true"' : ""}${disabledAttribute(locked && !projectLoading, true)}><span>Actions</span><span aria-hidden="true">•••</span></button>${projectActionsOpen ? `<section id="project-actions-panel" class="menu-panel action-panel" aria-labelledby="project-actions-trigger">${renderButton("New Project", "new-project", { disabled: locked })}${renderButton("New Card", "new-card", { disabled: locked, data: `data-column-id="${escapeHtml(newCardColumn(project))}"` })}${renderButton("Edit Project", "edit-project", { disabled: locked })}${renderButton("Copy Project link", "copy-project-link", { disabled: locked })}${renderButton("Project Activity", "show-project-activity", { disabled: locked })}${renderButton(label, "refresh-project", { disabled: locked })}</section>` : ""}</div>`;
 }
 
 function currentArchiveReceipt(projectId: string): ArchiveReceipt | null {
@@ -1252,7 +1256,8 @@ function renderProjectReceipt(): string {
   const projectId = project?.id || "";
   const archive = projectId ? currentArchiveReceipt(projectId) : null;
   const recoverableDrafts = project ? recoverableArchivedDrafts(project) : [];
-  const visibleProjectStatus = addColumnPreparing || addColumnCommitted || addColumnDraft ? null : projectStatus;
+  const refreshInInspector = Boolean(project && (selectedCardId || creatingCard) && !activityFeed && !projectEditorMode && !addColumnDraft && (projectLoading || projectStatus?.title === "Refresh failed"));
+  const visibleProjectStatus = addColumnPreparing || addColumnCommitted || addColumnDraft || refreshInInspector ? null : projectStatus;
   if (!archive && !visibleProjectStatus && !recoverableDrafts.length) return `<div class="project-status-wrap">${renderStatus(null, "project-status")}</div>`;
   const archiveMarkup = archive
     ? `<div class="jk-status" data-kind="receipt" role="status" aria-live="polite"><span class="jk-status-marker" aria-hidden="true">✓</span><div><strong>${escapeHtml(archive.cardTitle)} archived</strong><p>The Card left the active Project. It can be restored.</p>${renderButton("Undo archive", "undo-archive", { disabled: workspaceLocked(), data: `data-receipt-key="${escapeHtml(archive.key)}"` })}</div></div>`
@@ -1261,7 +1266,12 @@ function renderProjectReceipt(): string {
     const headingId = `draft-recovery-${index}`;
     return `<section class="jk-status draft-recovery" data-kind="warning" aria-labelledby="${headingId}"><span class="jk-status-marker" aria-hidden="true">!</span><div><strong id="${headingId}">${escapeHtml(card.title)} has a retained draft</strong><p>The stored Card is archived. Review the draft to restore it or discard it.</p>${renderButton("Review retained draft", "recover-draft", { disabled: workspaceLocked(), data: `data-card-id="${escapeHtml(card.id)}"` })}</div></section>`;
   }).join("");
-  return `<div class="project-status-wrap">${visibleProjectStatus ? renderStatus(visibleProjectStatus, "project-status") : ""}${archiveMarkup}${recoveryMarkup}</div>`;
+  return `<div class="project-status-wrap">${visibleProjectStatus ? renderProjectStatus(visibleProjectStatus, "project-status") : ""}${archiveMarkup}${recoveryMarkup}</div>`;
+}
+
+function renderProjectStatus(status: StatusMessage, id: string, includeRetry = true): string {
+  const retry = includeRetry && status.title === "Refresh failed" ? `<div class="jk-actions">${renderButton("Retry refresh", "refresh-project")}</div>` : "";
+  return `${renderStatus(status, id)}${retry}`;
 }
 
 function ordinalLabel(index: number): string {
@@ -1403,7 +1413,7 @@ function renderBoardPane(project: Project): string {
     ? narrowBoardQuery.matches ? renderAddColumnControl("narrow") : ""
     : renderAddColumnControl("narrow");
   const emptyResults = hasCardFilters(project) && activeCards(project).length && !visibleCards(project).length ? `<p class="card-filter-empty">No Cards match these filters.</p>` : "";
-  return `<section class="board-pane" aria-labelledby="cards-heading"><header class="board-toolbar"><h1 id="cards-heading" class="jk-visually-hidden">${escapeHtml(project.name)}</h1>${renderMobileColumnSelector(project)}${renderProjectActions(project)}</header>${renderCardFilters(project)}${emptyResults}${narrowAddColumn}${projectLoading ? `<div class="jk-status" data-kind="neutral" role="status"><span class="jk-status-marker" aria-hidden="true">…</span><p>Refreshing Project…</p></div>` : renderColumnGrid(project)}</section>`;
+  return `<section class="board-pane" aria-labelledby="cards-heading"><header class="board-toolbar"><h1 id="cards-heading" class="jk-visually-hidden">${escapeHtml(project.name)}</h1>${renderMobileColumnSelector(project)}${renderProjectActions(project)}</header>${renderCardFilters(project)}${emptyResults}${narrowAddColumn}${renderColumnGrid(project)}</section>`;
 }
 
 function draftKey(projectId: string, cardId: string | null): string {
@@ -1447,6 +1457,7 @@ function renderComments(card: ProjectCard): string {
     label: "Add Comment",
     control: renderTextArea({
       id: "comment-input",
+      allowDuringRefresh: true,
       name: "body",
       value: draft,
       rows: 3,
@@ -1471,6 +1482,7 @@ function renderCreateDestination(project: Project, draft: CardDraft): string {
     label: "Create in",
     control: renderSelect({
       id: "card-create-column",
+      allowDuringRefresh: true,
       name: "columnId",
       value: draft.columnId,
       choices: project.columns.map((column) => ({ value: column.id, label: column.name })),
@@ -1481,7 +1493,7 @@ function renderCreateDestination(project: Project, draft: CardDraft): string {
 }
 
 function renderCardWorkFields(draft: CardDraft): string {
-  return `<div class="card-work-fields"><div class="card-work-choices">${renderField({ id: "card-next-actor", label: "Next actor", control: renderSelect({ id: "card-next-actor", name: "nextActor", value: draft.nextActor || "", choices: [{ value: "", label: "Unassigned" }, { value: "human", label: "You" }, { value: "agent", label: "Agent" }] }) })}${renderField({ id: "card-priority", label: "Priority", control: renderSelect({ id: "card-priority", name: "priority", value: draft.priority || "", choices: [{ value: "", label: "Unset" }, { value: "High", label: "High" }, { value: "Medium", label: "Medium" }, { value: "Low", label: "Low" }] }) })}</div>${renderField({ id: "card-next-action", label: "Next action", control: renderTextArea({ id: "card-next-action", name: "nextAction", value: draft.nextAction, rows: 2, placeholder: "What should happen next?" }) })}${renderField({ id: "card-blocked-reason", label: "Blocker", control: renderTextArea({ id: "card-blocked-reason", name: "blockedReason", value: draft.blockedReason, rows: 2, placeholder: "Leave empty when work can proceed" }) })}</div>`;
+  return `<div class="card-work-fields"><div class="card-work-choices">${renderField({ id: "card-next-actor", label: "Next actor", control: renderSelect({ id: "card-next-actor", allowDuringRefresh: true, name: "nextActor", value: draft.nextActor || "", choices: [{ value: "", label: "Unassigned" }, { value: "human", label: "You" }, { value: "agent", label: "Agent" }] }) })}${renderField({ id: "card-priority", label: "Priority", control: renderSelect({ id: "card-priority", allowDuringRefresh: true, name: "priority", value: draft.priority || "", choices: [{ value: "", label: "Unset" }, { value: "High", label: "High" }, { value: "Medium", label: "Medium" }, { value: "Low", label: "Low" }] }) })}</div>${renderField({ id: "card-next-action", label: "Next action", control: renderTextArea({ id: "card-next-action", allowDuringRefresh: true, name: "nextAction", value: draft.nextAction, rows: 2, placeholder: "What should happen next?" }) })}${renderField({ id: "card-blocked-reason", label: "Blocker", control: renderTextArea({ id: "card-blocked-reason", allowDuringRefresh: true, name: "blockedReason", value: draft.blockedReason, rows: 2, placeholder: "Leave empty when work can proceed" }) })}</div>`;
 }
 
 function selectedCardFilterMessage(project: Project, card: ProjectCard | null): string {
@@ -1561,6 +1573,7 @@ function renderCardInspector(project: Project): string {
   const closeLabel = `Close Card and return to ${contextColumn?.name || "Column"}`;
   const titleControl = renderTextInput({
     id: "card-title-input",
+    allowDuringRefresh: true,
     name: "title",
     value: draft.title,
     placeholder: "Card title",
@@ -1572,6 +1585,7 @@ function renderCardInspector(project: Project): string {
   });
   const bodyControl = renderTextArea({
     id: "card-body-input",
+    allowDuringRefresh: true,
     name: "body",
     value: draft.body,
     placeholder: "Add details…",
@@ -1594,8 +1608,15 @@ function renderCardInspector(project: Project): string {
   const preparingStatus = addColumnPreparing && cardOnlyQuery.matches
     ? `<div class="card-status inspector-preparing-status">${renderStatus(ADD_COLUMN_PREPARING_STATUS, "add-column-preparing-status")}</div>`
     : "";
-  const toolbarActions = `<div class="inspector-toolbar-actions">${card ? renderMoveDisclosure(project, card, conflict) : ""}<button class="close-button inspector-close" type="button" data-action="close-card" aria-label="${escapeHtml(closeLabel)}"${disabledAttribute()}><span aria-hidden="true">×</span></button></div>`;
-  return `<aside class="card-inspector jk-panel" aria-labelledby="card-tab"><div class="inspector-content"><header class="inspector-toolbar">${tabs}${toolbarActions}</header>${preparingStatus}${cardSelected ? cardPanel : card ? renderActivity(card) : cardPanel}</div></aside>`;
+  const refreshStatus = projectStatus && (projectLoading || projectStatus.title === "Refresh failed")
+    ? `<div class="card-status">${renderProjectStatus(projectStatus, "inspector-refresh-status", false)}</div>`
+    : "";
+  const refreshFailed = projectStatus?.title === "Refresh failed";
+  const refreshRetry = refreshFailed
+    ? `<button class="jk-button inspector-refresh-retry" type="button" data-action="refresh-project" aria-label="Retry refresh" title="Refresh failed. Retry refresh" aria-describedby="inspector-refresh-status"${disabledAttribute()}>Retry</button>`
+    : "";
+  const toolbarActions = `<div class="inspector-toolbar-actions">${refreshRetry}${card ? renderMoveDisclosure(project, card, conflict) : ""}<button class="close-button inspector-close" type="button" data-action="close-card" aria-label="${escapeHtml(closeLabel)}"${disabledAttribute()}><span aria-hidden="true">×</span></button></div>`;
+  return `<aside class="card-inspector jk-panel" aria-labelledby="card-tab"><div class="inspector-content"><header class="inspector-toolbar" data-refresh-failed="${refreshFailed ? "true" : "false"}">${tabs}${toolbarActions}</header>${refreshStatus}${preparingStatus}${cardSelected ? cardPanel : card ? renderActivity(card) : cardPanel}</div></aside>`;
 }
 
 function renderRecovery(): string {
@@ -1817,20 +1838,61 @@ function restorePendingContext(): void {
   const focusId = pendingFocusId;
   const focusTarget = pendingFocusRestore;
   const scrollTop = pendingScrollRestore;
+  const selection = pendingSelectionRestore;
+  const elementScroll = pendingElementScrollRestore;
+  const focusViewport = pendingFocusViewportRestore;
+  pendingFocusViewportRestore = null;
+  pendingSelectionRestore = null;
+  pendingElementScrollRestore = [];
   pendingFocusId = null;
   pendingFocusRestore = null;
   pendingScrollRestore = null;
-  if (scrollTop !== null) window.scrollTo({ top: scrollTop });
   let target = focusId ? document.getElementById(focusId) : focusTarget ? findFocusTarget(focusTarget) : null;
   if (!target && focusTarget?.action === "open-card" && activeProject) {
     const card = activeProject.cards.find((candidate) => candidate.id === focusTarget.cardId);
     const heading = document.getElementById(`column-${safeId(card?.columnId || selectedMobileColumn(activeProject))}`);
     target = heading?.getClientRects().length ? heading : document.getElementById("board-filter-next-actor");
   }
-  target?.focus();
+  const originalTarget = target;
+  if (target && (!target.getClientRects().length || target.matches(":disabled"))) {
+    target = document.getElementById("stale-heading") || document.getElementById("card-body-input") || document.getElementById("main-content");
+  }
+  const preservePosition = target === originalTarget;
+  target?.focus({ preventScroll: preservePosition && (scrollTop !== null || elementScroll.length > 0) });
+  if (selection && target?.id === selection.id && (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) {
+    target.setSelectionRange(Math.min(selection.start, target.value.length), Math.min(selection.end, target.value.length), selection.direction);
+  }
+  if (preservePosition) {
+    for (const position of elementScroll) {
+      const element = root.querySelector<HTMLElement>(position.selector);
+      if (element) { element.scrollTop = position.top; element.scrollLeft = position.left; }
+    }
+    if (scrollTop !== null) window.scrollTo({ top: scrollTop });
+    if (target && focusViewport?.id === target.id) {
+      // Status and conflict content can change height above the editor. Keep the
+      // same point on screen, allowing its scroll containers to absorb that change.
+      const rect = target.getBoundingClientRect();
+      const toolbar = target.closest(".card-inspector")?.querySelector<HTMLElement>(".inspector-toolbar");
+      const toolbarBottom = toolbar && !toolbar.contains(target) ? toolbar.getBoundingClientRect().bottom : 0;
+      const desiredTop = focusViewport.top + rect.height < toolbarBottom + Math.min(44, rect.height)
+        ? toolbarBottom + 4
+        : focusViewport.top;
+      let top = rect.top - desiredTop;
+      let left = rect.left - focusViewport.left;
+      for (let parent = target.parentElement; parent && parent !== document.body; parent = parent.parentElement) {
+        const style = getComputedStyle(parent);
+        const previousTop = parent.scrollTop, previousLeft = parent.scrollLeft;
+        if (/(auto|scroll)/.test(style.overflowY)) parent.scrollTop += top;
+        if (/(auto|scroll)/.test(style.overflowX)) parent.scrollLeft += left;
+        top -= parent.scrollTop - previousTop;
+        left -= parent.scrollLeft - previousLeft;
+      }
+      if (top || left) window.scrollBy({ top, left });
+    }
+  }
 }
 
-function render(): void {
+function render(preserveEditingPosition = projectLoading): void {
   if (confirmation && (mutationInFlight || projectStatus || cardStatus || cardConflict || moveConflict)) {
     clearConfirmation();
   }
@@ -1849,8 +1911,36 @@ function render(): void {
     ? (setupAvailable ? renderButton("Set up existing account", "start-setup", { disabled: !loginUrl }) : "") + (authNotice?.kind === "sign-out-incomplete" ? renderButton("Retry sign out", "retry-global-sign-out") : "")
     : "";
   const activeElement = document.activeElement;
-  if (!pendingFocusId && !pendingFocusRestore && activeElement instanceof HTMLElement && root.contains(activeElement) && activeElement.id) {
-    pendingFocusId = activeElement.id;
+  const explicitFocus = Boolean(pendingFocusId || pendingFocusRestore);
+  if (!pendingFocusId && !pendingFocusRestore && activeElement instanceof HTMLElement && root.contains(activeElement)) {
+    if (activeElement.id) pendingFocusId = activeElement.id;
+    else if (preserveEditingPosition) pendingFocusRestore = focusTargetFor(activeElement);
+  }
+  if (preserveEditingPosition && !explicitFocus && session && !objectNavigationPending) {
+    pendingScrollRestore ??= window.scrollY;
+    pendingElementScrollRestore = [...root.querySelectorAll<HTMLElement>("[id], .columns, .card-list, .card-inspector, .inspector-content")].flatMap((element) => {
+      const columnId = element.closest<HTMLElement>(".column")?.dataset.columnId;
+      const selector = element.id ? `#${CSS.escape(element.id)}`
+        : element.classList.contains("card-list") && columnId ? `.column[data-column-id="${CSS.escape(columnId)}"] .card-list`
+        : ["columns", "card-inspector", "inspector-content"].find(name => element.classList.contains(name));
+      if (!selector) return [];
+      return [{ selector: element.id || element.classList.contains("card-list") ? selector : `.${selector}`, top: element.scrollTop, left: element.scrollLeft }];
+    });
+    if ((activeElement instanceof HTMLInputElement || activeElement instanceof HTMLTextAreaElement) && activeElement.id && activeElement.selectionStart !== null && activeElement.selectionEnd !== null) {
+      pendingSelectionRestore = { id: activeElement.id, start: activeElement.selectionStart, end: activeElement.selectionEnd, direction: activeElement.selectionDirection || "none" };
+    }
+    if (activeElement instanceof HTMLElement && activeElement.id && root.contains(activeElement)) {
+      const rect = activeElement.getBoundingClientRect();
+      pendingFocusViewportRestore = { id: activeElement.id, top: rect.top, left: rect.left };
+    }
+    captureDescriptionSelection();
+  } else if (preserveEditingPosition) {
+    // Explicit recovery targets must scroll into view instead of restoring the
+    // outgoing editor's position over their focus instruction.
+    pendingScrollRestore = null;
+    pendingSelectionRestore = null;
+    pendingElementScrollRestore = [];
+    pendingFocusViewportRestore = null;
   }
   root.innerHTML = publicWebsite ? renderPublicWebsite(content, rootUrl, utilities) : content;
   syncPublicWebsiteMenu();
@@ -1954,7 +2044,7 @@ function captureCardDraft(form: HTMLFormElement): CardDraft | null {
   const cardId = form.dataset.cardId || null;
   const card = cardId ? project.cards.find((candidate) => candidate.id === cardId) || null : null;
   const key = draftKey(project.id, cardId);
-  if (mutationInFlight || card?.archivedAt) return retainedDrafts.get(key) || storedCardDraft(project, card);
+  if ((mutationInFlight && mutationKind !== "refresh") || card?.archivedAt) return retainedDrafts.get(key) || storedCardDraft(project, card);
   const data = formData(form);
   const existing = retainedDrafts.get(key);
   const base = existing || storedCardDraft(project, card);
@@ -1988,6 +2078,7 @@ function safeSessionRemove(key: string): void {
 
 function clearPrivateState(notice: AuthNotice | null): void {
   sessionEpoch++;
+  projectLoading = false;
   objectNavigationRequest++;
   objectLinkStatus = null;
   linkedCommentId = null;
@@ -2049,6 +2140,9 @@ function clearPrivateState(notice: AuthNotice | null): void {
   addColumnReturnFocus = null;
   pendingFocusRestore = null;
   pendingScrollRestore = null;
+  pendingSelectionRestore = null;
+  pendingElementScrollRestore = [];
+  pendingFocusViewportRestore = null;
   inspectorTab = "card";
   resetDescriptionContext();
   accountPanelOpen = false;
@@ -2340,12 +2434,13 @@ async function loadProject(projectId: string): Promise<void> {
   reconcileProjectContext(await fetchProject(projectId));
 }
 
-async function loadProjects(preferredId?: string): Promise<void> {
+async function loadProjects(preferredId?: string, beforeApply?: () => boolean | void): Promise<void> {
   const payload = await api("/projects");
   const record = objectValue(payload);
   const list = Array.isArray(payload) ? payload : arrayValue(record.projects);
   const nextProjects = list.map(normalizeProjectSummary).filter((project) => project.id);
   if (!nextProjects.length) {
+    if (beforeApply?.() === false) return;
     projects = [];
     activeProject = null;
     return;
@@ -2355,6 +2450,7 @@ async function loadProjects(preferredId?: string): Promise<void> {
   const candidateId = preferredId || activeProject?.id || storedId;
   const projectId = nextProjects.some((project) => project.id === candidateId) ? candidateId : nextProjects[0].id;
   const nextProject = await fetchProject(projectId);
+  if (beforeApply?.() === false) return;
   projects = nextProjects;
   reconcileProjectContext(nextProject);
 }
@@ -2817,11 +2913,18 @@ function validateCardDraft(draft: CardDraft): boolean {
 
 async function retainVisibleDrafts(): Promise<void> { captureVisibleDrafts(); }
 function captureVisibleDrafts(): void {
-  if (mutationInFlight) return;
+  if (mutationInFlight && mutationKind !== "refresh") return;
   const card = root.querySelector<HTMLFormElement>("form[data-form='card']");
   if (card) captureCardDraft(card);
   const project = root.querySelector<HTMLFormElement>("form[data-form='project']");
   if (project) captureProjectDraft(project);
+  const comment = root.querySelector<HTMLFormElement>("form[data-form='comment']");
+  if (comment && activeProject) {
+    const key = draftKey(activeProject.id, comment.dataset.cardId || "");
+    const body = formValue(formData(comment), "body");
+    if (body) commentDrafts.set(key, body);
+    else commentDrafts.delete(key);
+  }
 }
 
 function showDescriptionView(nextView: DescriptionView): void {
@@ -3289,16 +3392,31 @@ async function undoArchive(): Promise<void> {
   }
 }
 
-async function refreshProject(): Promise<void> {
+async function refreshProject(trigger?: HTMLElement): Promise<void> {
+  if (mutationInFlight) return;
   await retainVisibleDrafts();
   const project = activeProject;
   if (!project) return;
+  const epoch = sessionEpoch;
+  const navigationRequest = objectNavigationRequest;
+  const currentContext = () => epoch === sessionEpoch && navigationRequest === objectNavigationRequest && activeProject?.id === project.id;
+  if (trigger && document.activeElement === trigger) {
+    pendingFocusId = trigger.closest("#project-actions-panel") || !selectedCardId && !creatingCard
+      ? "project-actions-trigger"
+      : inspectorTab === "activity" ? "activity-panel" : "card-title-input";
+  }
   projectLoading = true;
   setWorkspaceMutationsDisabled(true, "refresh");
   projectStatus = { tone: "neutral", title: "Refreshing Project", message: "Loading the latest stored state without discarding valid Card context." };
   render();
   try {
-    await loadProjects(project.id);
+    let applied = false;
+    await loadProjects(project.id, () => {
+      if (!currentContext()) return false;
+      captureVisibleDrafts();
+      applied = true;
+    });
+    if (!applied) return;
     projectStatus = null;
     let refreshConfirmation = {
       title: "Refresh complete",
@@ -3320,12 +3438,17 @@ async function refreshProject(): Promise<void> {
     }
     showConfirmation(refreshConfirmation.title, refreshConfirmation.message, "refresh-success");
   } catch (error) {
+    if (epoch !== sessionEpoch || navigationRequest !== objectNavigationRequest) return;
     if (handlePrivateError(error)) return;
-    projectStatus = { tone: "error", title: "Refresh failed", message: `The previous displayed state remains visible. ${error instanceof Error ? error.message : "Try again."}` };
+    if (currentContext()) projectStatus = { tone: "error", title: "Refresh failed", message: `The previous displayed state remains visible. ${error instanceof Error ? error.message : "Try again."}` };
   } finally {
-    projectLoading = false;
-    setWorkspaceMutationsDisabled(false);
-    render();
+    // Session/navigation changes own their replacement UI; an older refresh may
+    // neither apply its snapshot nor rerender over that new context.
+    if (epoch === sessionEpoch && navigationRequest === objectNavigationRequest) {
+      projectLoading = false;
+      setWorkspaceMutationsDisabled(false);
+      render(true);
+    }
   }
 }
 
@@ -3376,6 +3499,7 @@ function handlePrivateError(error: unknown): boolean {
 
 async function handleAction(button: HTMLElement): Promise<void> {
   const action = button.dataset.action || "";
+  if (mutationInFlight && mutationKind === "refresh") return;
   if (action === "retry-object-link") return applyObjectLocation();
   if (action === "leave-object-link") {
     objectLinkStatus = null;
@@ -3566,7 +3690,7 @@ async function handleAction(button: HTMLElement): Promise<void> {
   }
   if (action === "recover-draft") return openCard(button.dataset.cardId || "", button, true);
   if (action === "close-card") return closeCard();
-  if (action === "refresh-project") return refreshProject();
+  if (action === "refresh-project") return refreshProject(button);
   if (action === "retry-save") return saveCard(null, true);
   if (action === "discard-draft") return discardDraft();
   if (action === "discard-pending-post") return discardPendingPost(button.dataset.idempotencyScope || "");
@@ -3600,7 +3724,7 @@ root.addEventListener("click", (event) => {
 root.addEventListener("input", (event) => {
   const target = event.target as HTMLElement;
   const form = target.closest<HTMLFormElement>("form");
-  if (!form || mutationInFlight) return;
+  if (!form || mutationInFlight && mutationKind !== "refresh") return;
   if (form.dataset.form === "workspace") {
     const data = formData(form);
     workspaceDraft = { name: formValue(data, "name"), slug: formValue(data, "slug") };
@@ -3632,7 +3756,8 @@ root.addEventListener("focusout", (event) => {
 
 root.addEventListener("change", (event) => {
   const target = event.target as HTMLSelectElement;
-  if (mutationInFlight || projectEditorMode || addColumnDraft) return;
+  const cardForm = target.closest<HTMLFormElement>("form[data-form='card']");
+  if ((mutationInFlight && !(mutationKind === "refresh" && cardForm)) || projectEditorMode || addColumnDraft) return;
   if (target.id.startsWith("board-filter-") && activeProject) {
     const filters = { ...cardFilters(activeProject) };
     if (target.id === "board-filter-next-actor") filters.nextActor = target.value as CardFilters["nextActor"];
@@ -3654,11 +3779,7 @@ root.addEventListener("change", (event) => {
     restorePendingContext();
     return;
   }
-  const cardForm = target.closest<HTMLFormElement>("form[data-form='card']");
-  if (cardForm) {
-    captureCardDraft(cardForm);
-
-  }
+  if (cardForm) captureCardDraft(cardForm);
 });
 
 root.addEventListener("submit", (event) => {
@@ -3692,6 +3813,10 @@ root.addEventListener("submit", (event) => {
 
 root.addEventListener("keydown", (event) => {
   const target = event.target as HTMLElement;
+  if (mutationKind === "refresh" && (event.key === "Escape" || target.getAttribute("role") === "tab" && ["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key))) {
+    event.preventDefault();
+    return;
+  }
   if (target.getAttribute("role") === "tab" && ["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
     event.preventDefault();
     if (target.closest("[data-tablist='description']")) {
