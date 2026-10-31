@@ -181,8 +181,10 @@ for (const width of [1440, 390]) {
         await expectEditingContext(page, field, before);
         await expect(page.getByRole("button", { name: "Save", exact: true })).toBeEnabled();
         await expect(page).toHaveURL(url);
+        const retry = page.getByRole("button", { name: "Retry refresh", exact: true });
+        await expect(retry).toBeInViewport({ ratio: 1 });
         await page.screenshot({ path: test.info().outputPath(`refresh-failure-${part}-${width}.png`) });
-        await page.getByRole("button", { name: "Retry refresh", exact: true }).click();
+        await retry.click();
         await expect(page.locator("#toast-region").getByText("Refresh complete", { exact: true })).toBeVisible();
         await expect(visibleRefreshFailure(page)).toHaveCount(0);
         await expect(page.getByLabel("Title", { exact: true })).toHaveValue("Draft retained after refresh failure");
@@ -445,5 +447,57 @@ test("a delayed refresh cannot clear a newly signed-in session or replace its dr
     await expect(page.getByRole("button", { name: "Save", exact: true })).toBeEnabled();
     await expect(page).toHaveURL(cardUrl);
     await expect(visibleRefreshFailure(page)).toHaveCount(0);
+  } finally { held.release(); }
+});
+
+
+test("320px refresh failure keeps Retry, Move, Close and the focused editor usable without overlap", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 844 });
+  await authenticate(page, harness);
+  await openCard(page, seed.cards.desktopDraft.title);
+  const title = page.getByLabel("Title", { exact: true });
+  await title.fill("Narrow draft after refresh failure");
+  await page.getByLabel("Description", { exact: true }).fill("Retain this unsaved narrow description.");
+  const held = await holdRefresh(page, "detail", true);
+  const refresh = await openRefreshMenu(page);
+  await title.focus();
+  await focusSelection(title, 5, 11);
+  await refresh.dispatchEvent("click");
+  await held.started;
+  try {
+    held.release();
+    await expect(visibleRefreshFailure(page)).toBeVisible();
+    const retry = page.getByRole("button", { name: "Retry refresh", exact: true });
+    const controls = [
+      page.getByRole("tab", { name: "Card", exact: true }),
+      page.getByRole("tab", { name: "Activity", exact: true }),
+      page.getByRole("button", { name: "Move…", exact: true }),
+      retry,
+      page.getByRole("button", { name: "Close Card and return to Next", exact: true })
+    ];
+    for (const control of controls) await expect(control).toBeInViewport({ ratio: 1 });
+    const boxes = await Promise.all(controls.map(control => control.boundingBox()));
+    for (let left = 0; left < boxes.length; left += 1) {
+      for (let right = left + 1; right < boxes.length; right += 1) {
+        const a = boxes[left]!, b = boxes[right]!;
+        const overlapWidth = Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x);
+        const overlapHeight = Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y);
+        expect(overlapWidth > 1 && overlapHeight > 1, `toolbar controls ${left} and ${right} must not overlap`).toBe(false);
+      }
+    }
+    await expect(title).toBeFocused();
+    await expect(title).toHaveValue("Narrow draft after refresh failure");
+    expect(await title.evaluate(element => ({ start: (element as HTMLInputElement).selectionStart, end: (element as HTMLInputElement).selectionEnd }))).toEqual({ start: 5, end: 11 });
+    await expect(title).toBeInViewport({ ratio: 1 });
+    const toolbarBox = await page.locator(".inspector-toolbar").boundingBox();
+    const titleBox = await title.boundingBox();
+    expect(titleBox!.y, "the sticky toolbar must not cover the focused Title").toBeGreaterThanOrEqual(toolbarBox!.y + toolbarBox!.height - 1);
+    await expectNoHorizontalOverflow(page, "320px visible refresh retry");
+    await page.screenshot({ path: test.info().outputPath("refresh-failure-toolbar-320.png") });
+    await retry.click();
+    await expect(page.locator("#toast-region").getByText("Refresh complete", { exact: true })).toBeVisible();
+    await expect(title).toHaveValue("Narrow draft after refresh failure");
+    await expect(page.getByLabel("Description", { exact: true })).toHaveValue("Retain this unsaved narrow description.");
+    await expect(page.getByRole("button", { name: "Save", exact: true })).toBeEnabled();
   } finally { held.release(); }
 });

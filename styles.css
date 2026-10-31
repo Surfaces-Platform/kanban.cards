@@ -1598,6 +1598,20 @@ body[data-state="empty-workspace"] .workbench {
   z-index: 2;
 }
 
+.inspector-toolbar[data-refresh-failed="true"] {
+  flex-wrap: wrap;
+  gap: var(--jk-space-2);
+}
+
+.inspector-toolbar[data-refresh-failed="true"] .inspector-toolbar-actions {
+  margin-inline-start: auto;
+}
+
+.inspector-refresh-retry {
+  padding-inline: var(--jk-space-2);
+  white-space: nowrap;
+}
+
 .inspector-toolbar-actions {
   align-items: center;
   display: flex;
@@ -2078,6 +2092,11 @@ body[data-state="empty-workspace"] .workbench {
 
   .inspector-toolbar-actions {
     gap: 0;
+  }
+
+  .inspector-toolbar[data-refresh-failed="true"] .inspector-tab {
+    min-inline-size: 2.75rem;
+    padding-inline: var(--jk-space-2);
   }
 
   .description-field-header {

@@ -1269,8 +1269,8 @@ function renderProjectReceipt(): string {
   return `<div class="project-status-wrap">${visibleProjectStatus ? renderProjectStatus(visibleProjectStatus, "project-status") : ""}${archiveMarkup}${recoveryMarkup}</div>`;
 }
 
-function renderProjectStatus(status: StatusMessage, id: string): string {
-  const retry = status.title === "Refresh failed" ? `<div class="jk-actions">${renderButton("Retry refresh", "refresh-project")}</div>` : "";
+function renderProjectStatus(status: StatusMessage, id: string, includeRetry = true): string {
+  const retry = includeRetry && status.title === "Refresh failed" ? `<div class="jk-actions">${renderButton("Retry refresh", "refresh-project")}</div>` : "";
   return `${renderStatus(status, id)}${retry}`;
 }
 
@@ -1609,10 +1609,14 @@ function renderCardInspector(project: Project): string {
     ? `<div class="card-status inspector-preparing-status">${renderStatus(ADD_COLUMN_PREPARING_STATUS, "add-column-preparing-status")}</div>`
     : "";
   const refreshStatus = projectStatus && (projectLoading || projectStatus.title === "Refresh failed")
-    ? `<div class="card-status">${renderProjectStatus(projectStatus, "inspector-refresh-status")}</div>`
+    ? `<div class="card-status">${renderProjectStatus(projectStatus, "inspector-refresh-status", false)}</div>`
     : "";
-  const toolbarActions = `<div class="inspector-toolbar-actions">${card ? renderMoveDisclosure(project, card, conflict) : ""}<button class="close-button inspector-close" type="button" data-action="close-card" aria-label="${escapeHtml(closeLabel)}"${disabledAttribute()}><span aria-hidden="true">×</span></button></div>`;
-  return `<aside class="card-inspector jk-panel" aria-labelledby="card-tab"><div class="inspector-content"><header class="inspector-toolbar">${tabs}${toolbarActions}</header>${refreshStatus}${preparingStatus}${cardSelected ? cardPanel : card ? renderActivity(card) : cardPanel}</div></aside>`;
+  const refreshFailed = projectStatus?.title === "Refresh failed";
+  const refreshRetry = refreshFailed
+    ? `<button class="jk-button inspector-refresh-retry" type="button" data-action="refresh-project" aria-label="Retry refresh" title="Refresh failed. Retry refresh" aria-describedby="inspector-refresh-status"${disabledAttribute()}>Retry</button>`
+    : "";
+  const toolbarActions = `<div class="inspector-toolbar-actions">${refreshRetry}${card ? renderMoveDisclosure(project, card, conflict) : ""}<button class="close-button inspector-close" type="button" data-action="close-card" aria-label="${escapeHtml(closeLabel)}"${disabledAttribute()}><span aria-hidden="true">×</span></button></div>`;
+  return `<aside class="card-inspector jk-panel" aria-labelledby="card-tab"><div class="inspector-content"><header class="inspector-toolbar" data-refresh-failed="${refreshFailed ? "true" : "false"}">${tabs}${toolbarActions}</header>${refreshStatus}${preparingStatus}${cardSelected ? cardPanel : card ? renderActivity(card) : cardPanel}</div></aside>`;
 }
 
 function renderRecovery(): string {
@@ -1867,8 +1871,14 @@ function restorePendingContext(): void {
     if (target && focusViewport?.id === target.id) {
       // Status and conflict content can change height above the editor. Keep the
       // same point on screen, allowing its scroll containers to absorb that change.
-      let top = target.getBoundingClientRect().top - focusViewport.top;
-      let left = target.getBoundingClientRect().left - focusViewport.left;
+      const rect = target.getBoundingClientRect();
+      const toolbar = target.closest(".card-inspector")?.querySelector<HTMLElement>(".inspector-toolbar");
+      const toolbarBottom = toolbar && !toolbar.contains(target) ? toolbar.getBoundingClientRect().bottom : 0;
+      const desiredTop = focusViewport.top + rect.height < toolbarBottom + Math.min(44, rect.height)
+        ? toolbarBottom + 4
+        : focusViewport.top;
+      let top = rect.top - desiredTop;
+      let left = rect.left - focusViewport.left;
       for (let parent = target.parentElement; parent && parent !== document.body; parent = parent.parentElement) {
         const style = getComputedStyle(parent);
         const previousTop = parent.scrollTop, previousLeft = parent.scrollLeft;
