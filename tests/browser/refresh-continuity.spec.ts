@@ -82,8 +82,8 @@ async function expectEditingContext(page: Page, field: Locator, expected: Awaite
   }
 }
 
-function visibleRefreshFailure(page: Page) {
-  return page.locator(".jk-status:visible").filter({ hasText: "Refresh failed" });
+function refreshFailureDetailsTrigger(page: Page) {
+  return page.getByRole("button", { name: "Refresh details", exact: true });
 }
 
 for (const width of [1440, 390]) {
@@ -173,8 +173,7 @@ for (const width of [1440, 390]) {
         await expect(page.locator(".columns button.board-card")).toHaveCount(boardCount);
         await expectEditingContext(page, field, before);
         held.release();
-        await expect(visibleRefreshFailure(page)).toBeVisible();
-        await expect(visibleRefreshFailure(page)).toContainText("Refresh temporarily unavailable");
+        await expect(refreshFailureDetailsTrigger(page)).toBeVisible();
         await expect(page.locator(".columns button.board-card")).toHaveCount(boardCount);
         await expect(page.getByLabel("Title", { exact: true })).toHaveValue("Draft retained after refresh failure");
         await expect(page.getByLabel("Description", { exact: true })).toHaveValue("Unsaved body after failure");
@@ -184,9 +183,16 @@ for (const width of [1440, 390]) {
         const retry = page.getByRole("button", { name: "Retry refresh", exact: true });
         await expect(retry).toBeInViewport({ ratio: 1 });
         await page.screenshot({ path: test.info().outputPath(`refresh-failure-${part}-${width}.png`) });
+        await refreshFailureDetailsTrigger(page).click();
+        const failureDetails = page.getByRole("region", { name: "Refresh failed", exact: true });
+        await expect(failureDetails).toBeInViewport({ ratio: 1 });
+        await expect(failureDetails).toContainText("Refresh temporarily unavailable");
+        await page.screenshot({ path: test.info().outputPath(`refresh-failure-details-${part}-${width}.png`) });
+        await page.keyboard.press("Escape");
+        await expect(refreshFailureDetailsTrigger(page)).toBeFocused();
         await retry.click();
         await expect(page.locator("#toast-region").getByText("Refresh complete", { exact: true })).toBeVisible();
-        await expect(visibleRefreshFailure(page)).toHaveCount(0);
+        await expect(refreshFailureDetailsTrigger(page)).toHaveCount(0);
         await expect(page.getByLabel("Title", { exact: true })).toHaveValue("Draft retained after refresh failure");
         await expect(page.getByLabel("Next action", { exact: true })).toHaveValue("Keep this unsaved next action");
         await expect(page.getByRole("button", { name: "Save", exact: true })).toBeEnabled();
@@ -327,7 +333,7 @@ for (const width of [1440, 390]) {
       await expect(field).toBeInViewport({ ratio: 1 });
       await page.screenshot({ path: test.info().outputPath(`refresh-pending-position-${width}.png`) });
       first.release();
-      await expect(visibleRefreshFailure(page)).toBeVisible();
+      await expect(refreshFailureDetailsTrigger(page)).toBeVisible();
       await expectEditingContext(page, field, before);
       await expect(field).toBeInViewport({ ratio: 1 });
       const retry = await holdRefresh(page);
@@ -446,7 +452,7 @@ test("a delayed refresh cannot clear a newly signed-in session or replace its dr
     expect(await title.evaluate(element => ({ start: (element as HTMLInputElement).selectionStart, end: (element as HTMLInputElement).selectionEnd }))).toEqual({ start: 4, end: 11 });
     await expect(page.getByRole("button", { name: "Save", exact: true })).toBeEnabled();
     await expect(page).toHaveURL(cardUrl);
-    await expect(visibleRefreshFailure(page)).toHaveCount(0);
+    await expect(refreshFailureDetailsTrigger(page)).toHaveCount(0);
   } finally { held.release(); }
 });
 
@@ -466,12 +472,13 @@ test("320px refresh failure keeps Retry, Move, Close and the focused editor usab
   await held.started;
   try {
     held.release();
-    await expect(visibleRefreshFailure(page)).toBeVisible();
+    await expect(refreshFailureDetailsTrigger(page)).toBeVisible();
     const retry = page.getByRole("button", { name: "Retry refresh", exact: true });
     const controls = [
       page.getByRole("tab", { name: "Card", exact: true }),
       page.getByRole("tab", { name: "Activity", exact: true }),
       page.getByRole("button", { name: "Move…", exact: true }),
+      refreshFailureDetailsTrigger(page),
       retry,
       page.getByRole("button", { name: "Close Card and return to Next", exact: true })
     ];
@@ -499,5 +506,320 @@ test("320px refresh failure keeps Retry, Move, Close and the focused editor usab
     await expect(title).toHaveValue("Narrow draft after refresh failure");
     await expect(page.getByLabel("Description", { exact: true })).toHaveValue("Retain this unsaved narrow description.");
     await expect(page.getByRole("button", { name: "Save", exact: true })).toBeEnabled();
+  } finally { held.release(); }
+});
+
+async function resizedEditorPosition(field: Locator) {
+  return field.evaluate(element => {
+    const input = element as HTMLTextAreaElement;
+    const inspector = input.closest<HTMLElement>(".inspector-content")!;
+    const toolbar = inspector.querySelector<HTMLElement>(".inspector-toolbar")!;
+    const rect = input.getBoundingClientRect();
+    return {
+      start: input.selectionStart, end: input.selectionEnd, direction: input.selectionDirection,
+      fieldTop: input.scrollTop, fieldLeft: input.scrollLeft,
+      viewportTop: rect.top, inspectorTop: inspector.scrollTop,
+      inspectorMax: Math.max(0, inspector.scrollHeight - inspector.clientHeight),
+      toolbarHeight: toolbar.getBoundingClientRect().height
+    };
+  });
+}
+
+async function expectResizedEditorPosition(field: Locator, expected: Awaited<ReturnType<typeof resizedEditorPosition>>) {
+  await expect(field).toBeFocused();
+  await expect(field).toBeInViewport();
+  const actual = await resizedEditorPosition(field);
+  expect({ start: actual.start, end: actual.end, direction: actual.direction, top: actual.fieldTop, left: actual.fieldLeft }, "selection, direction and textarea scrolling remain exact").toEqual({ start: expected.start, end: expected.end, direction: expected.direction, top: expected.fieldTop, left: expected.fieldLeft });
+  expect(Math.abs(actual.viewportTop - expected.viewportTop), "the editor stays within one CSS pixel of its position before the response").toBeLessThanOrEqual(1);
+  expect(Math.abs(actual.toolbarHeight - expected.toolbarHeight), "pending/failure controls do not change the sticky toolbar height").toBeLessThanOrEqual(1);
+  expect(actual.inspectorTop, "restoration uses a reachable nonnegative parent scroll position").toBeGreaterThanOrEqual(0);
+}
+
+async function expectNarrowRefreshToastFits(page: Page): Promise<void> {
+  const viewport = page.viewportSize()!;
+  if (viewport.width > 768) return;
+  const toast = page.locator("#toast-region .toast");
+  await expect(toast).toBeVisible();
+  const box = (await toast.boundingBox())!;
+  expect(box.width, "the narrow success toast has readable width").toBeGreaterThanOrEqual(Math.min(240, viewport.width - 32));
+  expect(box.height, "the narrow success toast has positive height").toBeGreaterThan(0);
+  expect(box.height, "the success toast must not become a tall strip over the editor").toBeLessThanOrEqual(Math.min(240, viewport.height / 3));
+  expect(box.x).toBeGreaterThanOrEqual(-1);
+  expect(box.x + box.width).toBeLessThanOrEqual(viewport.width + 1);
+  expect(box.y).toBeGreaterThanOrEqual(-1);
+  expect(box.y + box.height).toBeLessThanOrEqual(viewport.height + 1);
+}
+
+for (const width of [390, 320]) {
+  for (const outcome of ["success", "failure then retry"] as const) {
+    test(`desktop-start refresh resized to ${width}px preserves bounded editing position through ${outcome}`, async ({ page }) => {
+      await page.setViewportSize({ width: 1440, height: 1000 });
+      await authenticate(page, harness);
+      await openCard(page, seed.cards.desktopDraft.title);
+      const title = page.getByLabel("Title", { exact: true });
+      const description = page.getByLabel("Description", { exact: true });
+      const comment = page.getByLabel("Add Comment", { exact: true });
+      const draftTitle = `Unsaved title ${width}`;
+      const draftBody = Array.from({ length: 45 }, (_, index) => `Unsaved description ${width}: line ${index}`).join("\n");
+      await title.fill(draftTitle);
+      await description.fill(draftBody);
+      await page.getByLabel("Next action", { exact: true }).fill(`Unsaved next action ${width}`);
+      await page.getByLabel("Blocker", { exact: true }).fill(`Unsaved blocker ${width}`);
+      await page.getByLabel("Next actor", { exact: true }).last().selectOption("agent");
+      await comment.fill(`Unsent Comment ${width}`);
+      const stored = await readSeededProject(harness, seed.projectId);
+      const card = stored.cards.find(candidate => candidate.id === seed.cards.desktopDraft.id)!;
+      await updateSeededCard(harness, seed.projectId, card.id, card.version, { priority: "High" });
+      const cardUrl = page.url();
+      const historyLength = await page.evaluate(() => history.length);
+      const held = await holdRefresh(page, "detail", outcome === "failure then retry");
+      const refresh = await openRefreshMenu(page);
+      await description.scrollIntoViewIfNeeded();
+      await description.evaluate(element => {
+        const input = element as HTMLTextAreaElement;
+        input.focus({ preventScroll: true });
+        input.setSelectionRange(40, 48, "backward");
+        input.scrollTop = 72;
+        input.scrollLeft = 0;
+      });
+      await refresh.dispatchEvent("click");
+      await held.started;
+      try {
+        await page.setViewportSize({ width, height: 844 });
+        await expect(page.getByRole("tab", { name: "Card", exact: true })).toBeVisible();
+        await expect(description).toBeFocused();
+        await expect(description).toBeEnabled();
+        await expect(page.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
+        await page.keyboard.insertText(" typed during refresh ");
+        const pendingValue = await description.inputValue();
+        await description.evaluate((element, boundParent) => {
+          const input = element as HTMLTextAreaElement;
+          input.setSelectionRange(44, 52, "backward");
+          input.scrollTop = 72;
+          input.scrollLeft = 0;
+          // A parent at its lower bound cannot absorb removal of content above
+          // this field with a negative scroll offset. Cover that boundary as well
+          // as the natural desktop-to-narrow typing position in the success case.
+          if (boundParent) input.closest<HTMLElement>(".inspector-content")!.scrollTop = 0;
+        }, outcome === "failure then retry");
+        const beforeResponse = await resizedEditorPosition(description);
+        expect(beforeResponse.inspectorTop).toBeGreaterThanOrEqual(0);
+        if (outcome === "failure then retry") expect(beforeResponse.inspectorTop).toBe(0);
+        await expect(description).toBeInViewport();
+        // Release directly after reading the baseline: a screenshot or frame wait
+        // here must not conceal the response-time layout shift this guards.
+        held.release();
+        await expect(page.locator("body")).not.toHaveAttribute("data-state", "refreshing");
+        if (outcome === "success") {
+          await expect(page.locator("#toast-region").getByText("Refresh complete", { exact: true })).toBeVisible();
+          await expectNarrowRefreshToastFits(page);
+        } else await expect(refreshFailureDetailsTrigger(page)).toBeVisible();
+        await expect(description).toHaveValue(pendingValue);
+        await expectResizedEditorPosition(description, beforeResponse);
+        const afterResponse = await resizedEditorPosition(description);
+        await test.info().attach(`resized-${width}-${outcome}-positions`, { body: JSON.stringify({ beforeResponse, afterResponse }), contentType: "application/json" });
+        if (outcome === "failure then retry") {
+          const retryButton = page.getByRole("button", { name: "Retry refresh", exact: true });
+          await expect(retryButton).toBeInViewport({ ratio: 1 });
+          const retry = await holdRefresh(page);
+          await retryButton.dispatchEvent("click");
+          await retry.started;
+          try {
+            await expectResizedEditorPosition(description, afterResponse);
+            await page.keyboard.insertText(" typed while retrying ");
+            const retryValue = await description.inputValue();
+            await description.evaluate(element => {
+              const input = element as HTMLTextAreaElement;
+              input.setSelectionRange(52, 60, "backward");
+              input.scrollTop = 72;
+              input.scrollLeft = 0;
+              input.closest<HTMLElement>(".inspector-content")!.scrollTop = 0;
+            });
+            const beforeRetryResponse = await resizedEditorPosition(description);
+            expect(beforeRetryResponse.inspectorTop).toBe(0);
+            retry.release();
+            await expect(page.locator("#toast-region").getByText("Refresh complete", { exact: true })).toBeVisible();
+            await expectNarrowRefreshToastFits(page);
+            await expect(description).toHaveValue(retryValue);
+            await expectResizedEditorPosition(description, beforeRetryResponse);
+          } finally { retry.release(); }
+        }
+        await expect(title).toHaveValue(draftTitle);
+        await expect(comment).toHaveValue(`Unsent Comment ${width}`);
+        await expect(page.getByLabel("Next action", { exact: true })).toHaveValue(`Unsaved next action ${width}`);
+        await expect(page.getByLabel("Blocker", { exact: true })).toHaveValue(`Unsaved blocker ${width}`);
+        await expect(page.getByLabel("Priority", { exact: true }).last()).toHaveValue("High");
+        await expect(page.getByRole("button", { name: "Save", exact: true })).toBeEnabled();
+        await expect(page).toHaveURL(cardUrl);
+        expect(await page.evaluate(() => history.length)).toBe(historyLength);
+        expect((await readSeededProject(harness, seed.projectId)).cards.find(candidate => candidate.id === card.id)?.body).toBe(seed.cards.desktopDraft.body);
+        await expectNoHorizontalOverflow(page, `desktop-start refresh resized to ${width}px`);
+        await page.screenshot({ path: test.info().outputPath(`refresh-resized-${width}-${outcome.replaceAll(" ", "-")}.png`) });
+      } finally { held.release(); }
+    });
+  }
+}
+
+
+async function placeCommentAtPendingScrollMaximum(comment: Locator) {
+  await comment.evaluate(element => {
+    const input = element as HTMLTextAreaElement;
+    input.focus({ preventScroll: true });
+    input.setSelectionRange(20, 28, "backward");
+    input.scrollTop = 60;
+    input.scrollLeft = 0;
+    const inspector = input.closest<HTMLElement>(".inspector-content")!;
+    inspector.scrollTop = inspector.scrollHeight;
+  });
+  const position = await resizedEditorPosition(comment);
+  expect(position.inspectorMax, "the fixture has a real scrollable parent").toBeGreaterThan(0);
+  expect(position.inspectorTop, "the user reached the pending parent's upper scroll bound").toBeCloseTo(position.inspectorMax, 0);
+  await expect(comment).toBeInViewport();
+  return position;
+}
+
+for (const width of [1440, 320]) {
+  for (const outcome of ["success", "failure then retry"] as const) {
+    test(`${width}px Comment at the pending scroll maximum keeps its editing position through ${outcome}`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 844 });
+      await authenticate(page, harness);
+      await openCard(page, seed.cards.desktopDraft.title);
+      const comment = page.getByLabel("Add Comment", { exact: true });
+      await comment.fill(Array.from({ length: 35 }, (_, index) => `Unsent Comment at scroll maximum: line ${index}`).join("\n"));
+      let commentPosts = 0;
+      page.on("request", request => {
+        if (request.method() === "POST" && new URL(request.url()).pathname.endsWith("/comments")) commentPosts += 1;
+      });
+      const held = await holdRefresh(page, "detail", outcome === "failure then retry");
+      const refresh = await openRefreshMenu(page);
+      await placeCommentAtPendingScrollMaximum(comment);
+      await refresh.dispatchEvent("click");
+      await held.started;
+      try {
+        await expect(comment).toBeFocused();
+        await page.keyboard.insertText(" typed during refresh ");
+        const pendingValue = await comment.inputValue();
+        const beforeResponse = await placeCommentAtPendingScrollMaximum(comment);
+        held.release();
+        await expect(page.locator("body")).not.toHaveAttribute("data-state", "refreshing");
+        if (outcome === "success") {
+          await expect(page.locator("#toast-region").getByText("Refresh complete", { exact: true })).toBeVisible();
+          await expectNarrowRefreshToastFits(page);
+        } else await expect(page.getByRole("button", { name: "Retry refresh", exact: true })).toBeInViewport({ ratio: 1 });
+        await expect(comment).toHaveValue(pendingValue);
+        await expectResizedEditorPosition(comment, beforeResponse);
+        const afterResponse = await resizedEditorPosition(comment);
+        expect(Math.abs(afterResponse.inspectorTop - beforeResponse.inspectorTop), "removing status does not clamp the focused Comment's parent scroll").toBeLessThanOrEqual(1);
+        await test.info().attach(`comment-upper-bound-${width}-${outcome}`, { body: JSON.stringify({ beforeResponse, afterResponse }), contentType: "application/json" });
+        if (outcome === "failure then retry") {
+          const retry = await holdRefresh(page);
+          await page.getByRole("button", { name: "Retry refresh", exact: true }).dispatchEvent("click");
+          await retry.started;
+          try {
+            await expectResizedEditorPosition(comment, afterResponse);
+            await page.keyboard.insertText(" typed during retry ");
+            const retryValue = await comment.inputValue();
+            const beforeRetryResponse = await placeCommentAtPendingScrollMaximum(comment);
+            retry.release();
+            await expect(page.locator("#toast-region").getByText("Refresh complete", { exact: true })).toBeVisible();
+            await expectNarrowRefreshToastFits(page);
+            await expect(comment).toHaveValue(retryValue);
+            await expectResizedEditorPosition(comment, beforeRetryResponse);
+            expect(Math.abs((await resizedEditorPosition(comment)).inspectorTop - beforeRetryResponse.inspectorTop)).toBeLessThanOrEqual(1);
+          } finally { retry.release(); }
+        }
+        expect(commentPosts).toBe(0);
+        await expect(page.getByRole("button", { name: "Add Comment", exact: true })).toBeEnabled();
+        await expectNoHorizontalOverflow(page, `${width}px Comment at the pending scroll maximum`);
+        await page.screenshot({ path: test.info().outputPath(`comment-upper-bound-${width}-${outcome.replaceAll(" ", "-")}.png`) });
+      } finally { held.release(); }
+    });
+  }
+}
+
+
+test("320px refresh failure details open by keyboard, expose the error, close with focus return, and leave direct Retry available", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 844 });
+  await authenticate(page, harness);
+  await openCard(page, seed.cards.desktopDraft.title);
+  const title = page.getByLabel("Title", { exact: true });
+  const description = page.getByLabel("Description", { exact: true });
+  await title.fill("Keyboard details retain the narrow draft");
+  await description.fill("Unsaved description remains available after reading refresh details.");
+  const held = await holdRefresh(page, "list", true);
+  const refresh = await openRefreshMenu(page);
+  await title.focus();
+  await focusSelection(title, 4, 12);
+  const before = await editingContext(page, title);
+  const toolbarBefore = (await page.locator(".inspector-toolbar").boundingBox())!;
+  await refresh.dispatchEvent("click");
+  await held.started;
+  try {
+    held.release();
+    const details = refreshFailureDetailsTrigger(page);
+    const retry = page.getByRole("button", { name: "Retry refresh", exact: true });
+    await expect(details).toBeInViewport({ ratio: 1 });
+    await expect(retry).toBeInViewport({ ratio: 1 });
+    await expectEditingContext(page, title, before);
+    const toolbarAfter = (await page.locator(".inspector-toolbar").boundingBox())!;
+    expect(Math.abs(toolbarAfter.height - toolbarBefore.height), "failure recovery does not resize the 320px toolbar").toBeLessThanOrEqual(1);
+    const controls = [
+      page.getByRole("tab", { name: "Card", exact: true }),
+      page.getByRole("tab", { name: "Activity", exact: true }),
+      details, retry,
+      page.getByRole("button", { name: "Move…", exact: true }),
+      page.getByRole("button", { name: "Close Card and return to Next", exact: true })
+    ];
+    for (const control of controls) {
+      const box = (await control.boundingBox())!;
+      expect(box.width, "each 320px toolbar target is at least 44px wide").toBeGreaterThanOrEqual(44);
+      expect(box.height, "each 320px toolbar target is at least 44px high").toBeGreaterThanOrEqual(44);
+      await expect(control).toBeInViewport({ ratio: 1 });
+    }
+    await page.locator(".inspector-content").evaluate(element => { element.scrollTop = element.scrollHeight; });
+    await details.focus();
+    const inspectorTop = await page.locator(".inspector-content").evaluate(element => element.scrollTop);
+    expect(inspectorTop, "details are read from an already scrolled editor").toBeGreaterThan(0);
+    await page.keyboard.press("Enter");
+    const panel = page.getByRole("region", { name: "Refresh failed", exact: true });
+    const heading = page.getByRole("heading", { name: "Refresh failed", exact: true });
+    await expect(details).toHaveAttribute("aria-expanded", "true");
+    await expect(heading).toBeFocused();
+    await expect(panel).toBeInViewport({ ratio: 1 });
+    await expect(panel).toContainText("The previous displayed state remains visible.");
+    await expect(panel).toContainText("Refresh temporarily unavailable. Try again.");
+    expect(await page.locator(".inspector-content").evaluate(element => element.scrollTop), "reading out-of-flow details leaves the editor scroll alone").toBe(inspectorTop);
+    await expectNoHorizontalOverflow(page, "320px visual refresh failure details");
+    await page.screenshot({ path: test.info().outputPath("refresh-failure-keyboard-details-320.png") });
+    await page.keyboard.press("Escape");
+    await expect(panel).toHaveCount(0);
+    await expect(details).toHaveAttribute("aria-expanded", "false");
+    await expect(details).toBeFocused();
+    expect(await page.locator(".inspector-content").evaluate(element => element.scrollTop), "Escape retains the underlying editor scroll").toBe(inspectorTop);
+    await expect(title).toHaveValue("Keyboard details retain the narrow draft");
+    await expect(description).toHaveValue("Unsaved description remains available after reading refresh details.");
+    await page.keyboard.press("Space");
+    await expect(heading).toBeFocused();
+    const close = page.getByRole("button", { name: "Close refresh details", exact: true });
+    await close.focus();
+    await page.keyboard.press("Enter");
+    await expect(panel).toHaveCount(0);
+    await expect(details).toBeFocused();
+    expect(await page.locator(".inspector-content").evaluate(element => element.scrollTop), "Close retains the underlying editor scroll").toBe(inspectorTop);
+    const successfulRetry = await holdRefresh(page);
+    await retry.focus();
+    await page.keyboard.press("Enter");
+    await successfulRetry.started;
+    try {
+      await expect(page.locator("body")).toHaveAttribute("data-state", "refreshing");
+      await expect(panel).toHaveCount(0);
+      await expect(details).toHaveCount(0);
+      successfulRetry.release();
+      await expect(page.locator("#toast-region").getByText("Refresh complete", { exact: true })).toBeVisible();
+      await expectNarrowRefreshToastFits(page);
+      await expect(title).toHaveValue("Keyboard details retain the narrow draft");
+      await expect(description).toHaveValue("Unsaved description remains available after reading refresh details.");
+      await expect(page.getByRole("button", { name: "Save", exact: true })).toBeEnabled();
+    } finally { successfulRetry.release(); }
   } finally { held.release(); }
 });
