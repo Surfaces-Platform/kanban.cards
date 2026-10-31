@@ -115,7 +115,7 @@ test("resolved public titles follow the task while private and transitional view
   const sequence = [resolved, { ...resolved, authenticated: true }, { ...resolved, pending: true }, { ...resolved, context: "auth", authMode: "recover" }, { ...resolved, context: "local" }];
   assert.deepEqual(sequence.map(publicPageTitle), [PUBLIC_HOME_TITLE, DEFAULT_PAGE_TITLE, DEFAULT_PAGE_TITLE, "Recover your account | kanban.cards", DEFAULT_PAGE_TITLE]);
   const client = await fs.readFile(path.join(root, "src/client/context-dock.ts"), "utf8");
-  assert.match(client, /function render\(\): void \{[\s\S]*?document\.title = publicPageTitle\(/);
+  assert.match(client, /function render\([^)]*\): void \{[\s\S]*?document\.title = publicPageTitle\(/);
 });
 
 test("HTML title classification is conservative and social identity stays fixed on every shell", async () => {
