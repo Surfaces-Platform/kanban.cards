@@ -355,6 +355,7 @@ let descriptionView: DescriptionView = "write";
 let descriptionSelection: { start: number; end: number; direction: "forward" | "backward" | "none" } | null = null;
 let accountPanelOpen = false;
 let projectActionsOpen = false;
+let refreshDetailsOpen = false;
 let sessionEpoch = 0;
 let activityFeed: ActivityFeed | null = null;
 const recoveryStorage: Storage = {
@@ -1525,7 +1526,7 @@ function renderMoveDisclosure(project: Project, card: ProjectCard, conflict: boo
   const disabledReason = unavailableReason && !describedBy.startsWith("stale") && !describedBy.startsWith("move-conflict")
     ? `<span id="move-card-unavailable" class="move-disabled-reason">${escapeHtml(unavailableReason)}</span>`
     : "";
-  return `<div class="move-card-disclosure"><button id="move-card-trigger" class="jk-button move-card-trigger" type="button" data-action="toggle-move-panel" aria-expanded="${movePanelOpen && !unavailableReason ? "true" : "false"}" aria-controls="move-card-panel"${describedBy ? ` aria-describedby="${escapeHtml(describedBy)}"` : ""}${disabledAttribute(Boolean(unavailableReason))}>Move…</button>${disabledReason}${panel}</div>`;
+  return `<div class="move-card-disclosure"><button id="move-card-trigger" class="jk-button move-card-trigger" type="button" data-action="toggle-move-panel" aria-label="Move…" title="Move Card" aria-expanded="${movePanelOpen && !unavailableReason ? "true" : "false"}" aria-controls="move-card-panel"${describedBy ? ` aria-describedby="${escapeHtml(describedBy)}"` : ""}${disabledAttribute(Boolean(unavailableReason))}><span class="move-card-label">Move…</span><span class="move-card-icon" aria-hidden="true">↔</span></button>${disabledReason}${panel}</div>`;
 }
 
 function renderMoveConflict(project: Project, card: ProjectCard): string {
@@ -1569,7 +1570,7 @@ function renderCardInspector(project: Project): string {
   const previewBlocked = addColumnPreparing || recoveryActive || Boolean(status && (status.tone === "error" || status.title.includes("outcome unconfirmed")));
   if (previewBlocked) descriptionView = "write";
   const cardSelected = inspectorTab === "card" || !card;
-  const tabs = `<div class="inspector-tabs" role="tablist" aria-label="Card views"><button id="card-tab" class="inspector-tab" type="button" role="tab" data-action="show-card-tab" aria-selected="${cardSelected ? "true" : "false"}" aria-controls="card-panel" tabindex="${cardSelected ? "0" : "-1"}"${disabledAttribute()}>Card</button>${card ? `<button id="activity-tab" class="inspector-tab" type="button" role="tab" data-action="show-activity-tab" aria-selected="${cardSelected ? "false" : "true"}" aria-controls="activity-panel" tabindex="${cardSelected ? "-1" : "0"}"${disabledAttribute(recoveryActive)}>Activity</button>` : ""}</div>`;
+  const tabs = `<div class="inspector-tabs" role="tablist" aria-label="Card views"><button id="card-tab" class="inspector-tab" type="button" role="tab" data-action="show-card-tab" aria-label="Card"${projectLoading ? ' title="Refreshing Project"' : ""} aria-selected="${cardSelected ? "true" : "false"}" aria-controls="card-panel" tabindex="${cardSelected ? "0" : "-1"}"${disabledAttribute()}>Card${projectLoading ? '<span class="inspector-refresh-indicator" aria-hidden="true"></span>' : ""}</button>${card ? `<button id="activity-tab" class="inspector-tab" type="button" role="tab" data-action="show-activity-tab" aria-selected="${cardSelected ? "false" : "true"}" aria-controls="activity-panel" tabindex="${cardSelected ? "-1" : "0"}"${disabledAttribute(recoveryActive)}>Activity</button>` : ""}</div>`;
   const closeLabel = `Close Card and return to ${contextColumn?.name || "Column"}`;
   const titleControl = renderTextInput({
     id: "card-title-input",
@@ -1609,14 +1610,21 @@ function renderCardInspector(project: Project): string {
     ? `<div class="card-status inspector-preparing-status">${renderStatus(ADD_COLUMN_PREPARING_STATUS, "add-column-preparing-status")}</div>`
     : "";
   const refreshStatus = projectStatus && (projectLoading || projectStatus.title === "Refresh failed")
-    ? `<div class="card-status">${renderProjectStatus(projectStatus, "inspector-refresh-status", false)}</div>`
+    ? `<div class="jk-visually-hidden">${renderProjectStatus(projectStatus, "inspector-refresh-status", false)}</div>`
     : "";
   const refreshFailed = projectStatus?.title === "Refresh failed";
-  const refreshRetry = refreshFailed
-    ? `<button class="jk-button inspector-refresh-retry" type="button" data-action="refresh-project" aria-label="Retry refresh" title="Refresh failed. Retry refresh" aria-describedby="inspector-refresh-status"${disabledAttribute()}>Retry</button>`
+  if (!refreshFailed) refreshDetailsOpen = false;
+  const refreshDetails = refreshFailed
+    ? `<button id="refresh-details-trigger" class="jk-button inspector-refresh-details" type="button" data-action="toggle-refresh-details" aria-label="Refresh details" title="Refresh failed. Show details" aria-expanded="${refreshDetailsOpen ? "true" : "false"}" aria-controls="refresh-details-panel" aria-describedby="inspector-refresh-status"${disabledAttribute()}><span aria-hidden="true">!</span></button>`
     : "";
-  const toolbarActions = `<div class="inspector-toolbar-actions">${refreshRetry}${card ? renderMoveDisclosure(project, card, conflict) : ""}<button class="close-button inspector-close" type="button" data-action="close-card" aria-label="${escapeHtml(closeLabel)}"${disabledAttribute()}><span aria-hidden="true">×</span></button></div>`;
-  return `<aside class="card-inspector jk-panel" aria-labelledby="card-tab"><div class="inspector-content"><header class="inspector-toolbar" data-refresh-failed="${refreshFailed ? "true" : "false"}">${tabs}${toolbarActions}</header>${refreshStatus}${preparingStatus}${cardSelected ? cardPanel : card ? renderActivity(card) : cardPanel}</div></aside>`;
+  const refreshDetailsPanel = refreshFailed && refreshDetailsOpen
+    ? `<section id="refresh-details-panel" class="refresh-details-panel jk-panel" aria-labelledby="refresh-details-heading"><h2 id="refresh-details-heading" tabindex="-1">Refresh failed</h2><p>${escapeHtml(projectStatus?.message || "The previous displayed state remains available. Retry the refresh.")}</p>${renderButton("Close refresh details", "toggle-refresh-details")}</section>`
+    : "";
+  const refreshRetry = refreshFailed
+    ? `<button class="jk-button inspector-refresh-retry" type="button" data-action="refresh-project" aria-label="Retry refresh" title="Refresh failed. Retry refresh" aria-describedby="inspector-refresh-status"${disabledAttribute()}><span class="inspector-refresh-retry-label">Retry</span><span class="inspector-refresh-retry-icon" aria-hidden="true">↻</span></button>`
+    : "";
+  const toolbarActions = `<div class="inspector-toolbar-actions">${refreshDetails}${refreshRetry}${card ? renderMoveDisclosure(project, card, conflict) : ""}<button class="close-button inspector-close" type="button" data-action="close-card" aria-label="${escapeHtml(closeLabel)}"${disabledAttribute()}><span aria-hidden="true">×</span></button></div>`;
+  return `<aside class="card-inspector jk-panel" aria-labelledby="card-tab"><div class="inspector-content"><header class="inspector-toolbar" data-refresh-failed="${refreshFailed ? "true" : "false"}">${tabs}${toolbarActions}</header>${preparingStatus}${cardSelected ? cardPanel : card ? renderActivity(card) : cardPanel}</div>${refreshStatus}${refreshDetailsPanel}</aside>`;
 }
 
 function renderRecovery(): string {
@@ -2077,6 +2085,7 @@ function safeSessionRemove(key: string): void {
 }
 
 function clearPrivateState(notice: AuthNotice | null): void {
+  refreshDetailsOpen = false;
   sessionEpoch++;
   projectLoading = false;
   objectNavigationRequest++;
@@ -2840,6 +2849,7 @@ function openCard(cardId: string, trigger: HTMLElement, allowArchived = false): 
   if (draft) retainedDrafts.set(key, mergeCardDraft(draft, card));
   const hasStoredConflict = Boolean(cardConflict);
   cardStatus = hasStoredConflict ? { tone: "warning", title: "Stored Card changed", message: "Choose a value for each conflicting field. Your other changes are retained." } : null;
+  refreshDetailsOpen = false;
   resetMoveContext();
   inspectorTab = "card";
   resetDescriptionContext();
@@ -2866,6 +2876,7 @@ function openNewCard(columnId: string, trigger: HTMLElement): void {
   cardFieldErrors.clear();
   cardStatus = null;
   cardConflict = null;
+  refreshDetailsOpen = false;
   resetMoveContext();
   inspectorTab = "card";
   resetDescriptionContext();
@@ -2891,6 +2902,7 @@ function closeCard(): void {
   creatingColumnId = "";
   cardStatus = null;
   cardConflict = null;
+  refreshDetailsOpen = false;
   resetMoveContext();
   inspectorTab = "card";
   resetDescriptionContext();
@@ -2939,6 +2951,7 @@ function showDescriptionView(nextView: DescriptionView): void {
 }
 
 function toggleMovePanel(): void {
+  refreshDetailsOpen = false;
   const project = activeProject;
   const card = selectedCardId ? project?.cards.find((candidate) => candidate.id === selectedCardId) : null;
   if (!project || !card || cardConflict || moveConflict) return;
@@ -3405,6 +3418,7 @@ async function refreshProject(trigger?: HTMLElement): Promise<void> {
       ? "project-actions-trigger"
       : inspectorTab === "activity" ? "activity-panel" : "card-title-input";
   }
+  refreshDetailsOpen = false;
   projectLoading = true;
   setWorkspaceMutationsDisabled(true, "refresh");
   projectStatus = { tone: "neutral", title: "Refreshing Project", message: "Loading the latest stored state without discarding valid Card context." };
@@ -3454,6 +3468,7 @@ async function refreshProject(trigger?: HTMLElement): Promise<void> {
 
 async function switchProject(projectId: string): Promise<void> {
   if (!projects.some((project) => project.id === projectId)) return;
+  refreshDetailsOpen = false;
   workspaceObjectLocation = false;
   objectLinkStatus = null;
   linkedCommentId = null;
@@ -3500,6 +3515,21 @@ function handlePrivateError(error: unknown): boolean {
 async function handleAction(button: HTMLElement): Promise<void> {
   const action = button.dataset.action || "";
   if (mutationInFlight && mutationKind === "refresh") return;
+  if (action === "toggle-refresh-details") {
+    if (mutationInFlight || projectStatus?.title !== "Refresh failed") return;
+    captureVisibleDrafts();
+    refreshDetailsOpen = !refreshDetailsOpen;
+    if (refreshDetailsOpen) {
+      movePanelOpen = false;
+      workspaceMenuOpen = false;
+      accountPanelOpen = false;
+      projectActionsOpen = false;
+    }
+    const focusId = refreshDetailsOpen ? "refresh-details-heading" : "refresh-details-trigger";
+    render(true);
+    document.getElementById(focusId)?.focus({ preventScroll: true });
+    return;
+  }
   if (action === "retry-object-link") return applyObjectLocation();
   if (action === "leave-object-link") {
     objectLinkStatus = null;
@@ -3602,6 +3632,7 @@ async function handleAction(button: HTMLElement): Promise<void> {
   if (projectEditorMode && !button.closest("#project-editor")) return;
   if (addColumnDraft && !button.closest("#add-column-editor")) return;
   if (action === "toggle-workspace-menu") {
+    refreshDetailsOpen = false;
     workspaceMenuOpen = !workspaceMenuOpen;
     accountPanelOpen = false;
     projectActionsOpen = false;
@@ -3610,6 +3641,7 @@ async function handleAction(button: HTMLElement): Promise<void> {
     return;
   }
   if (action === "toggle-account-panel") {
+    refreshDetailsOpen = false;
     workspaceMenuOpen = false;
     accountPanelOpen = !accountPanelOpen;
     projectActionsOpen = false;
@@ -3654,6 +3686,7 @@ async function handleAction(button: HTMLElement): Promise<void> {
   if (action === "retry-activity-feed") return loadActivityFeed(activityFeed?.retryMore);
   if (action === "load-more-activity") return loadActivityFeed(true);
   if (action === "toggle-project-actions") {
+    refreshDetailsOpen = false;
     workspaceMenuOpen = false;
     projectActionsOpen = !projectActionsOpen;
     accountPanelOpen = false;
@@ -3839,6 +3872,14 @@ root.addEventListener("keydown", (event) => {
     return;
   }
   if (event.key !== "Escape") return;
+  if (refreshDetailsOpen) {
+    event.preventDefault();
+    captureVisibleDrafts();
+    refreshDetailsOpen = false;
+    render(true);
+    document.getElementById("refresh-details-trigger")?.focus({ preventScroll: true });
+    return;
+  }
   if (accessContext === "root" && workspaceCreationOpen && workspaceChoices.length) {
     event.preventDefault();
     if (!mutationInFlight) void cancelWorkspaceCreation();
@@ -3948,6 +3989,7 @@ async function applyObjectLocation(): Promise<void> {
     return;
   }
   const request = ++objectNavigationRequest;
+  refreshDetailsOpen = false;
   const epoch = sessionEpoch;
   const route = parseObjectRoute(window.location.pathname, window.location.hash);
   objectNavigationPending = true;
