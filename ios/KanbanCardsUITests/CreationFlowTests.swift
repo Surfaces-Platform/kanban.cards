@@ -694,14 +694,47 @@ final class CreationFlowTests: XCTestCase {
     }
 
     private func assertEditableValue(_ field: XCUIElement, equals expected: String, phase: String) {
+        let trace = CreationValueWaitDiagnostic(
+            testCase: name, helper: "assertEditableValue", phase: phase, expected: expected)
         let matchesValue = NSPredicate { _, _ in
+            let evaluationStarted = CreationValueWaitDiagnostic.uptime()
+            let valueReadStarted = CreationValueWaitDiagnostic.uptime()
             let value = field.value as? String ?? ""
-            return value == expected || (expected.isEmpty && value == field.placeholderValue)
+            let valueReadEnded = CreationValueWaitDiagnostic.uptime()
+            // This is the original condition, including its short-circuit behavior.
+            let matched = value == expected || (expected.isEmpty && value == field.placeholderValue)
+            let evaluationEnded = CreationValueWaitDiagnostic.uptime()
+            trace.record("predicate-evaluation", [
+                "startedUptime": evaluationStarted, "endedUptime": evaluationEnded,
+                "valueReadStartedUptime": valueReadStarted,
+                "valueReadEndedUptime": valueReadEnded,
+                "valueUTF8": Array(value.utf8), "matched": matched,
+            ])
+            return matched
         }
-        let matches = XCTWaiter.wait(
+        let waitStarted = CreationValueWaitDiagnostic.uptime()
+        trace.record("wait-call-start", [
+            "startedUptime": waitStarted, "timeoutSeconds": 5,
+            "nominalDeadlineUptime": waitStarted + 5,
+        ])
+        let waitResult = XCTWaiter.wait(
             for: [XCTNSPredicateExpectation(predicate: matchesValue, object: nil)], timeout: 5
-        ) == .completed
+        )
+        let waitEnded = CreationValueWaitDiagnostic.uptime()
+        trace.record("wait-call-end", [
+            "endedUptime": waitEnded, "elapsedSeconds": waitEnded - waitStarted,
+            "rawResult": waitResult.rawValue, "result": String(describing: waitResult),
+        ])
+        trace.emit(stage: "wait-return")
+        let matches = waitResult == .completed
+        let actualReadStarted = CreationValueWaitDiagnostic.uptime()
         let actual = field.value as? String ?? ""
+        let actualReadEnded = CreationValueWaitDiagnostic.uptime()
+        trace.record("original-post-wait-value-read", [
+            "startedUptime": actualReadStarted, "endedUptime": actualReadEnded,
+            "valueUTF8": Array(actual.utf8),
+        ])
+        trace.emit(stage: "post-wait-value")
         if !matches, let app = runningApp {
             attach(app, named: "\(phase) failed for \(field.identifier)")
         }
@@ -713,8 +746,25 @@ final class CreationFlowTests: XCTestCase {
 
     private func assertValue(_ field: XCUIElement, equals value: String) {
         let predicate = NSPredicate(format: "value == %@", value)
+        let trace = CreationValueWaitDiagnostic(
+            testCase: name, helper: "assertValue", phase: "exact-value", expected: value)
         expectation(for: predicate, evaluatedWith: field)
-        waitForExpectations(timeout: 5)
+        let waitStarted = CreationValueWaitDiagnostic.uptime()
+        trace.record("wait-call-start", [
+            "startedUptime": waitStarted, "timeoutSeconds": 5,
+            "nominalDeadlineUptime": waitStarted + 5,
+        ])
+        // XCTest still records timeout as a test failure even with a handler.
+        waitForExpectations(timeout: 5) { error in
+            let waitEnded = CreationValueWaitDiagnostic.uptime()
+            let failure = error as NSError?
+            trace.record("wait-completion-handler", [
+                "endedUptime": waitEnded, "elapsedSeconds": waitEnded - waitStarted,
+                "hasError": failure != nil,
+                "errorDomain": failure?.domain ?? "", "errorCode": failure?.code ?? 0,
+            ])
+            trace.emit(stage: "completion-handler")
+        }
     }
 
     private func attach(_ app: XCUIApplication, named name: String) {
@@ -726,5 +776,50 @@ final class CreationFlowTests: XCTestCase {
         tree.name = name + " accessibility tree"
         tree.lifetime = .keepAlways
         add(tree)
+    }
+}
+
+
+/// Diagnostic records use only clocks and data already obtained by the original
+/// predicates. The buffer is synchronized because XCTest controls evaluation.
+/// Serialization and stderr output happen only after a wait completes.
+private final class CreationValueWaitDiagnostic: @unchecked Sendable {
+    private let lock = NSLock()
+    private let identifier = UUID().uuidString
+    private let testCase: String
+    private let helper: String
+    private let phase: String
+    private let expectedUTF8: [UInt8]
+    private var events: [[String: Any]] = []
+
+    init(testCase: String, helper: String, phase: String, expected: String) {
+        self.testCase = testCase
+        self.helper = helper
+        self.phase = phase
+        expectedUTF8 = Array(expected.utf8)
+    }
+
+    static func uptime() -> TimeInterval { ProcessInfo.processInfo.systemUptime }
+
+    func record(_ event: String, _ fields: [String: Any]) {
+        lock.lock()
+        events.append(["event": event].merging(fields) { _, next in next })
+        lock.unlock()
+    }
+
+    func emit(stage: String) {
+        lock.lock()
+        let observedEvents = events
+        lock.unlock()
+        let record: [String: Any] = [
+            "schemaVersion": 1, "diagnosticID": identifier, "stage": stage,
+            "testCase": testCase, "helper": helper, "phase": phase,
+            "expectedUTF8": expectedUTF8, "events": observedEvents,
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]),
+            let text = String(data: data, encoding: .utf8)
+        else { return }
+        let line = "KANBAN_CREATION_VALUE_WAIT_DIAGNOSTIC " + text + "\n"
+        try? FileHandle.standardError.write(contentsOf: Data(line.utf8))
     }
 }
