@@ -2118,19 +2118,7 @@ body[data-state="empty-workspace"] .workbench {
   }
 }
 
-@media (max-width: 24rem) {
-  .header-primary .product-name {
-    font-size: 0.82rem;
-  }
-
-  .header-project-switcher {
-    max-inline-size: 11rem;
-  }
-
-  .inspector-toolbar-actions {
-    gap: 0;
-  }
-
+@media (max-width: 28rem) {
   .inspector-toolbar[data-refresh-failed="true"] .inspector-tab {
     min-inline-size: 2.75rem;
     padding-inline: calc(var(--jk-space-2) / 2);
@@ -2152,6 +2140,20 @@ body[data-state="empty-workspace"] .workbench {
     display: inline;
     font-size: 1.25rem;
     line-height: 1;
+  }
+}
+
+@media (max-width: 24rem) {
+  .header-primary .product-name {
+    font-size: 0.82rem;
+  }
+
+  .header-project-switcher {
+    max-inline-size: 11rem;
+  }
+
+  .inspector-toolbar-actions {
+    gap: 0;
   }
 
   .description-field-header {

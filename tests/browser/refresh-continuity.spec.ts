@@ -457,57 +457,107 @@ test("a delayed refresh cannot clear a newly signed-in session or replace its dr
 });
 
 
-test("320px refresh failure keeps Retry, Move, Close and the focused editor usable without overlap", async ({ page }) => {
-  await page.setViewportSize({ width: 320, height: 844 });
-  await authenticate(page, harness);
-  await openCard(page, seed.cards.desktopDraft.title);
-  const title = page.getByLabel("Title", { exact: true });
-  await title.fill("Narrow draft after refresh failure");
-  await page.getByLabel("Description", { exact: true }).fill("Retain this unsaved narrow description.");
-  const held = await holdRefresh(page, "detail", true);
-  const refresh = await openRefreshMenu(page);
-  await title.focus();
-  await focusSelection(title, 5, 11);
-  await refresh.dispatchEvent("click");
-  await held.started;
-  try {
-    held.release();
-    await expect(refreshFailureDetailsTrigger(page)).toBeVisible();
-    const retry = page.getByRole("button", { name: "Retry refresh", exact: true });
-    const controls = [
+async function expectToolbarControlsUsable(controls: Locator[]): Promise<void> {
+  for (const control of controls) {
+    await expect(control).toBeInViewport({ ratio: 1 });
+    const box = (await control.boundingBox())!;
+    expect(box.width, "toolbar controls retain at least 44px target width").toBeGreaterThanOrEqual(44);
+    expect(box.height, "toolbar controls retain at least 44px target height").toBeGreaterThanOrEqual(44);
+    const hits = await control.evaluate(element => {
+      const box = element.getBoundingClientRect();
+      const x = box.x + box.width / 2, y = box.y + box.height / 2;
+      return [
+        { name: "centre", x, y },
+        { name: "left-inner", x: box.left + 2, y },
+        { name: "right-inner", x: box.right - 2, y },
+        { name: "top-inner", x, y: box.top + 2 },
+        { name: "bottom-inner", x, y: box.bottom - 2 }
+      ].map(point => {
+        const hit = document.elementFromPoint(point.x, point.y);
+        return { name: point.name, passed: Boolean(hit && (hit === element || element.contains(hit))) };
+      });
+    });
+    expect(hits.filter(hit => !hit.passed), "the centre and edges inside each control receive pointer input").toEqual([]);
+  }
+  const boxes = await Promise.all(controls.map(control => control.boundingBox()));
+  for (let left = 0; left < boxes.length; left += 1) {
+    for (let right = left + 1; right < boxes.length; right += 1) {
+      const a = boxes[left]!, b = boxes[right]!;
+      const overlapWidth = Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x);
+      const overlapHeight = Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y);
+      expect(overlapWidth > 1 && overlapHeight > 1, `toolbar controls ${left} and ${right} must not overlap`).toBe(false);
+    }
+  }
+}
+
+for (const variant of [
+  { width: 320, rootFont: null },
+  { width: 385, rootFont: null },
+  { width: 390, rootFont: null },
+  { width: 385, rootFont: "18px" },
+  { width: 390, rootFont: "18px" },
+  { width: 414, rootFont: "18px" }
+]) {
+  test(`${variant.width}px${variant.rootFont ? " at 18px text" : ""} refresh failure keeps Retry, Move, Close and the focused editor usable without overlap`, async ({ page }) => {
+    await page.setViewportSize({ width: variant.width, height: 844 });
+    await authenticate(page, harness);
+    await openCard(page, seed.cards.desktopDraft.title);
+    if (variant.rootFont) await page.evaluate(font => { document.documentElement.style.fontSize = font; }, variant.rootFont);
+    await page.evaluate(() => document.fonts.ready);
+    const title = page.getByLabel("Title", { exact: true });
+    await title.fill("Narrow draft after refresh failure");
+    await page.getByLabel("Description", { exact: true }).fill("Retain this unsaved narrow description.");
+    const ordinaryControls = [
       page.getByRole("tab", { name: "Card", exact: true }),
       page.getByRole("tab", { name: "Activity", exact: true }),
       page.getByRole("button", { name: "Move…", exact: true }),
-      refreshFailureDetailsTrigger(page),
-      retry,
       page.getByRole("button", { name: "Close Card and return to Next", exact: true })
     ];
-    for (const control of controls) await expect(control).toBeInViewport({ ratio: 1 });
-    const boxes = await Promise.all(controls.map(control => control.boundingBox()));
-    for (let left = 0; left < boxes.length; left += 1) {
-      for (let right = left + 1; right < boxes.length; right += 1) {
-        const a = boxes[left]!, b = boxes[right]!;
-        const overlapWidth = Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x);
-        const overlapHeight = Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y);
-        expect(overlapWidth > 1 && overlapHeight > 1, `toolbar controls ${left} and ${right} must not overlap`).toBe(false);
-      }
-    }
-    await expect(title).toBeFocused();
-    await expect(title).toHaveValue("Narrow draft after refresh failure");
-    expect(await title.evaluate(element => ({ start: (element as HTMLInputElement).selectionStart, end: (element as HTMLInputElement).selectionEnd }))).toEqual({ start: 5, end: 11 });
-    await expect(title).toBeInViewport({ ratio: 1 });
-    const toolbarBox = await page.locator(".inspector-toolbar").boundingBox();
-    const titleBox = await title.boundingBox();
-    expect(titleBox!.y, "the sticky toolbar must not cover the focused Title").toBeGreaterThanOrEqual(toolbarBox!.y + toolbarBox!.height - 1);
-    await expectNoHorizontalOverflow(page, "320px visible refresh retry");
-    await page.screenshot({ path: test.info().outputPath("refresh-failure-toolbar-320.png") });
-    await retry.click();
-    await expect(page.locator("#toast-region").getByText("Refresh complete", { exact: true })).toBeVisible();
-    await expect(title).toHaveValue("Narrow draft after refresh failure");
-    await expect(page.getByLabel("Description", { exact: true })).toHaveValue("Retain this unsaved narrow description.");
-    await expect(page.getByRole("button", { name: "Save", exact: true })).toBeEnabled();
-  } finally { held.release(); }
-});
+    await expectToolbarControlsUsable(ordinaryControls);
+    const toolbarHeight = (await page.locator(".inspector-toolbar").boundingBox())!.height;
+    const held = await holdRefresh(page, "detail", true);
+    const refresh = await openRefreshMenu(page);
+    await title.focus();
+    await focusSelection(title, 5, 11);
+    const before = await editingContext(page, title);
+    await refresh.dispatchEvent("click");
+    await held.started;
+    try {
+      await expectToolbarControlsUsable(ordinaryControls);
+      expect(Math.abs((await page.locator(".inspector-toolbar").boundingBox())!.height - toolbarHeight), "pending refresh retains toolbar height").toBeLessThanOrEqual(1);
+      await expectEditingContext(page, title, before);
+      held.release();
+      await expect(refreshFailureDetailsTrigger(page)).toBeVisible();
+      const retry = page.getByRole("button", { name: "Retry refresh", exact: true });
+      await expectToolbarControlsUsable([...ordinaryControls, refreshFailureDetailsTrigger(page), retry]);
+      expect(Math.abs((await page.locator(".inspector-toolbar").boundingBox())!.height - toolbarHeight), "failure recovery retains toolbar height").toBeLessThanOrEqual(1);
+      await expect(title).toBeFocused();
+      await expect(title).toHaveValue("Narrow draft after refresh failure");
+      expect(await title.evaluate(element => ({ start: (element as HTMLInputElement).selectionStart, end: (element as HTMLInputElement).selectionEnd }))).toEqual({ start: 5, end: 11 });
+      await expect(title).toBeInViewport({ ratio: 1 });
+      await expectEditingContext(page, title, before);
+      const toolbarBox = await page.locator(".inspector-toolbar").boundingBox();
+      const titleBox = await title.boundingBox();
+      expect(titleBox!.y, "the sticky toolbar must not cover the focused Title").toBeGreaterThanOrEqual(toolbarBox!.y + toolbarBox!.height - 1);
+      await expectNoHorizontalOverflow(page, `${variant.width}px ${variant.rootFont || "default"} visible refresh retry`);
+      await page.screenshot({ path: test.info().outputPath(`refresh-failure-toolbar-${variant.width}-${variant.rootFont || "default"}.png`) });
+      const successfulRetry = await holdRefresh(page);
+      await retry.click();
+      await successfulRetry.started;
+      try {
+        await expectToolbarControlsUsable(ordinaryControls);
+        expect(Math.abs((await page.locator(".inspector-toolbar").boundingBox())!.height - toolbarHeight), "retry pending retains toolbar height").toBeLessThanOrEqual(1);
+        successfulRetry.release();
+        await expect(page.locator("#toast-region").getByText("Refresh complete", { exact: true })).toBeVisible();
+        await expectToolbarControlsUsable(ordinaryControls);
+        expect(Math.abs((await page.locator(".inspector-toolbar").boundingBox())!.height - toolbarHeight), "retry success retains toolbar height").toBeLessThanOrEqual(1);
+        await expect(title).toHaveValue("Narrow draft after refresh failure");
+        await expect(page.getByLabel("Description", { exact: true })).toHaveValue("Retain this unsaved narrow description.");
+        await expect(page.getByRole("button", { name: "Save", exact: true })).toBeEnabled();
+      } finally { successfulRetry.release(); }
+    } finally { held.release(); }
+  });
+}
 
 async function resizedEditorPosition(field: Locator) {
   return field.evaluate(element => {
